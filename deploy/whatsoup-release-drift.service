@@ -10,12 +10,13 @@ EnvironmentFile=%h/.config/whatsoup/bot-errors.env
 # WHATSOUP_RELEASE_DRIFT_INSTANCE, the BOT ERRORS instance label of this host's
 # release alerts, comes from its own file and never from bot-errors.env, which
 # every BOT ERRORS unit loads. deploy/setup.sh writes this name to that file and
-# nowhere else. The wrapper reads the label from that file itself and ignores
-# the value in its environment, where a line in bot-errors.env would put it
-# whenever the file is absent. It never reads WHATSOUP_INSTANCE, which
-# bot-errors.env, the user manager or a drop-in can set for per-instance agent
-# state. A later file overrides an earlier one, and the "-" lets a missing file
-# reach the wrapper, whose exit 2 fails the unit.
+# nowhere else. The wrapper uses the value systemd hands it only when that file,
+# in the home folder the user database names for this user, assigns the same
+# value; otherwise it exits 2, so a label set only in bot-errors.env is refused.
+# It never reads WHATSOUP_INSTANCE, which bot-errors.env, the user manager or a
+# drop-in can set for per-instance agent state. A later file overrides an
+# earlier one, and the "-" lets a missing file reach the wrapper, whose exit 2
+# fails the unit.
 EnvironmentFile=-%h/.config/whatsoup/release-drift.env
 ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
 # Exit statuses of deploy/scripts/whatsoup-release-drift-linux.sh:

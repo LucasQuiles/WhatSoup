@@ -61,6 +61,30 @@ read_env_file_value() {
     END { if (found) printf "%s", value }
   ' "$file"
 }
+# The last assignment of a key in an environment file, read as systemd reads
+# the ordinary forms, for the release-drift label keys.
+# deploy/scripts/whatsoup-release-drift-linux.sh holds the same function, so
+# setup reads a label file as the wrapper does.
+read_env_label() {
+  # $1 file, $2 key. Leading whitespace and "#" or ";" comment lines are
+  # skipped; trailing whitespace and one pair of matching quotes around the
+  # whole value are removed. A value systemd reads otherwise, such as one with
+  # escapes or a quoted value over several lines, reads differently here.
+  awk -v key="$2" -v sq="'" -v dq='"' '
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    line ~ /^[#;]/ { next }
+    index(line, key "=") == 1 {
+      value = substr(line, length(key) + 2)
+      sub(/[ \t\r]+$/, "", value)
+      first = substr(value, 1, 1)
+      if (length(value) >= 2 && (first == sq || first == dq) && substr(value, length(value)) == first) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      found = 1
+    }
+    END { if (found) printf "%s", value }
+  ' "$1"
+}
 env_file_has_key() {
   local file="$1" key="$2"
   [[ -f "$file" ]] || return 1
@@ -645,13 +669,22 @@ else
     # A failed read warns and never ends setup (set -e), which has already
     # linked the launchers, installed the units and reloaded systemd. Only a
     # regular file is read, so any other path reads as a file without a label.
-    if ! release_drift_existing="$(read_env_file_value "$release_drift_env" WHATSOUP_RELEASE_DRIFT_INSTANCE 2>/dev/null)"; then
+    # The file is read as the wrapper reads it (read_env_label), and a value the
+    # wrapper refuses is never reported as preserved.
+    release_drift_existing=""
+    if [ -f "$release_drift_env" ] \
+      && ! release_drift_existing="$(read_env_label "$release_drift_env" WHATSOUP_RELEASE_DRIFT_INSTANCE 2>/dev/null)"; then
       echo "  ⚠ setup cannot read ~/.config/whatsoup/release-drift.env: whatsoup-release-drift.service will fail until that file can be read and sets WHATSOUP_RELEASE_DRIFT_INSTANCE"
       if [ -n "$release_drift_instance" ]; then
         echo "    The requested label was not applied: setup never replaces an existing file."
       fi
     elif [ -z "$release_drift_existing" ]; then
       echo "  ⚠ ~/.config/whatsoup/release-drift.env exists but sets no WHATSOUP_RELEASE_DRIFT_INSTANCE: whatsoup-release-drift.service will fail until it does"
+      if [ -n "$release_drift_instance" ]; then
+        echo "    The requested label was not applied: setup never replaces an existing file."
+      fi
+    elif [[ ! "$release_drift_existing" =~ ^[A-Za-z0-9._][A-Za-z0-9._-]*$ ]]; then
+      echo "  ⚠ ~/.config/whatsoup/release-drift.env sets WHATSOUP_RELEASE_DRIFT_INSTANCE to a value whatsoup-release-drift.service refuses: write it as one line, WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance>, with only letters, digits, dot, underscore and dash, not beginning with a dash"
       if [ -n "$release_drift_instance" ]; then
         echo "    The requested label was not applied: setup never replaces an existing file."
       fi
@@ -672,19 +705,31 @@ else
     # drop-in or in bot-errors.env, which it loaded. Setup has just replaced that
     # unit but keeps the setting, so every run exits 2 until the label file exists.
     # A WHATSOUP_RELEASE_DRIFT_INSTANCE line in bot-errors.env labels no run
-    # either, since the wrapper reads the label only from the label file; its
-    # warning comes first, as the more specific mistake.
+    # either: the wrapper takes the label only when the label file assigns it.
+    # When both settings exist they may name different instances, so setup
+    # names both and lets the operator choose. Both keys are read as the
+    # wrapper reads a label (read_env_label).
     # All checks sit in if conditions: a file setup cannot read must not end setup.
+    release_drift_bot_errors_env="$HOME/.config/whatsoup/bot-errors.env"
     release_drift_old_label=""
     release_drift_shared_label=""
-    if env_file_has_key "$HOME/.config/whatsoup/bot-errors.env" WHATSOUP_RELEASE_DRIFT_INSTANCE 2>/dev/null; then
+    if [ -f "$release_drift_bot_errors_env" ] \
+      && release_drift_value="$(read_env_label "$release_drift_bot_errors_env" WHATSOUP_RELEASE_DRIFT_INSTANCE 2>/dev/null)" \
+      && [ -n "$release_drift_value" ]; then
       release_drift_shared_label=1
-    elif grep -qsE '^[[:space:]]*Environment[[:space:]]*=.*WHATSOUP_INSTANCE=' "$SYSTEMD_DIR/whatsoup-release-drift.service.d"/*.conf; then
+    fi
+    if grep -qsE '^[[:space:]]*Environment[[:space:]]*=.*WHATSOUP_INSTANCE=' "$SYSTEMD_DIR/whatsoup-release-drift.service.d"/*.conf; then
       release_drift_old_label="a drop-in in ~/.config/systemd/user/whatsoup-release-drift.service.d"
-    elif env_file_has_key "$HOME/.config/whatsoup/bot-errors.env" WHATSOUP_INSTANCE 2>/dev/null; then
+    elif [ -f "$release_drift_bot_errors_env" ] \
+      && release_drift_value="$(read_env_label "$release_drift_bot_errors_env" WHATSOUP_INSTANCE 2>/dev/null)" \
+      && [ -n "$release_drift_value" ]; then
       release_drift_old_label="the file ~/.config/whatsoup/bot-errors.env"
     fi
-    if [ -n "$release_drift_shared_label" ]; then
+    if [ -n "$release_drift_old_label" ] && [ -n "$release_drift_shared_label" ]; then
+      echo "  ⚠ whatsoup-release-drift.service no longer reads WHATSOUP_INSTANCE, which $release_drift_old_label sets: a release-drift unit installed by hand took its label from that setting."
+      echo "  ⚠ whatsoup-release-drift.service never takes WHATSOUP_RELEASE_DRIFT_INSTANCE from ~/.config/whatsoup/bot-errors.env either, which sets it too; the two settings may name different instances. Every run exits 2 without observing until ~/.config/whatsoup/release-drift.env holds the label. Choose the instance this host's release alerts belong to and write that file once:"
+      echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
+    elif [ -n "$release_drift_shared_label" ]; then
       echo "  ⚠ whatsoup-release-drift.service never takes WHATSOUP_RELEASE_DRIFT_INSTANCE from ~/.config/whatsoup/bot-errors.env, which sets it: every run exits 2 without observing until ~/.config/whatsoup/release-drift.env holds the label. Write that file once, with the same instance:"
       echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
     elif [ -n "$release_drift_old_label" ]; then
