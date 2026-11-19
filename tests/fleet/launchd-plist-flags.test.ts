@@ -4,14 +4,12 @@
  * ties the text stat(1) prints to those same bits.
  */
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { parseFileFlags, readFileFlags } from '../../src/fleet/launchd-plist-flags.ts';
-import { trackTmpDirs } from '../helpers/tmp-dir.ts';
-
-const tmp = trackTmpDirs('launchd-plist-flags-');
 
 describe('parseFileFlags', () => {
   // stat -f %f prints the flags word in decimal; each expected value is the bit
@@ -56,17 +54,28 @@ describe('parseFileFlags', () => {
 
 describe('readFileFlags', () => {
   // @skip-env stat -f %f and chflags are the BSD tools of macOS; GNU stat reads -f as --file-system.
-  it.skipIf(process.platform !== 'darwin')('decodes what the real stat prints for a file with the user immutable flag (uchg, 2)', () => {
-    const file = path.join(tmp.make('uchg'), 'flagged');
+  it.skipIf(process.platform !== 'darwin')('decodes what the real stat prints for user-settable flags: hidden (32768) and uchg (2)', () => {
+    // Not a tracked folder: a uchg file cannot be removed, so the folder is
+    // removed here, and only once the flag is clear.
+    const folder = mkdtempSync(path.join(tmpdir(), 'launchd-plist-flags-real-'));
+    const file = path.join(folder, 'flagged');
     writeFileSync(file, '');
-    // A fresh file carries no flag, so the value after chflags is uchg alone.
-    expect(readFileFlags(file)).toBe(0);
+    let immutable = false;
+    let cleared = true;
     try {
-      expect(spawnSync('/usr/bin/chflags', ['uchg', file]).status).toBe(0);
-      expect(readFileFlags(file)).toBe(0x2);
+      // A fresh file carries no flag, so each value below is the flags just set.
+      expect(readFileFlags(file)).toBe(0);
+      // UF_HIDDEN prints as 32768, which a hex reading would turn into 0x32768.
+      expect(spawnSync('/usr/bin/chflags', ['hidden', file]).status).toBe(0);
+      expect(readFileFlags(file)).toBe(0x8000);
+      const setImmutable = spawnSync('/usr/bin/chflags', ['uchg', file]);
+      immutable = setImmutable.status === 0;
+      expect(setImmutable.status).toBe(0);
+      expect(readFileFlags(file)).toBe(0x8000 | 0x2);
     } finally {
-      // The folder cleanup runs after this and cannot remove a uchg file.
-      spawnSync('/usr/bin/chflags', ['nouchg', file]);
+      if (immutable) cleared = spawnSync('/usr/bin/chflags', ['nouchg', file]).status === 0;
+      if (cleared) rmSync(folder, { recursive: true, force: true });
     }
+    expect(cleared, `chflags nouchg failed: ${file} keeps its uchg flag`).toBe(true);
   });
 });

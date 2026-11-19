@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { writeGetentShim } from '../helpers/user-database-shim.ts';
 
 const repoRoot = path.resolve(import.meta.dirname, '../..');
 const unitPath = path.join(repoRoot, 'deploy/whatsoup-release-drift.service');
@@ -55,26 +56,39 @@ function fakeRelease(scheduleExit: number): { launcher: string; argsFile: string
 
 const LABEL_KEY = 'WHATSOUP_RELEASE_DRIFT_INSTANCE';
 
+function writeLabelFile(home: string, content: string): void {
+  mkdirSync(path.join(home, '.config/whatsoup'), { recursive: true });
+  writeFileSync(path.join(home, '.config/whatsoup/release-drift.env'), content);
+}
+
 /**
- * Run the wrapper with HOME set to `env.HOME` or a fresh folder. A label in `env`
- * is also written to the dedicated label file in that HOME, as setup writes it,
- * unless `labelFile` says otherwise: null writes no file, a string is the file's
- * whole content.
+ * Run the wrapper as the unit would. HOME is `env.HOME` or a fresh folder, and
+ * is unset with `unsetHome`. A getent stand-in first in PATH names
+ * `databaseHome` (default: that HOME) as this user's home, or fails when it is
+ * null. A label in `env` is also written to the label file in the database home,
+ * where systemd would have loaded it from, unless `labelFile` says otherwise:
+ * null writes no file, a string is the file's whole content.
  */
-function runWrapper(env: Record<string, string>, options: { labelFile?: string | null } = {}) {
+function runWrapper(
+  env: Record<string, string>,
+  options: { labelFile?: string | null; databaseHome?: string | null; unsetHome?: boolean } = {},
+) {
   const home = env.HOME ?? tmp.make('home');
+  const databaseHome = options.databaseHome === undefined ? home : options.databaseHome;
   const label = env[LABEL_KEY];
   const content = options.labelFile !== undefined
     ? options.labelFile
     : label === undefined ? null : `${LABEL_KEY}=${label}\n`;
-  if (content !== null) {
-    mkdirSync(path.join(home, '.config/whatsoup'), { recursive: true });
-    writeFileSync(path.join(home, '.config/whatsoup/release-drift.env'), content);
-  }
-  return spawnSync('bash', [wrapperPath], {
-    encoding: 'utf8',
-    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, ...env },
-  });
+  if (content !== null && databaseHome !== null) writeLabelFile(databaseHome, content);
+  const shims = tmp.make('shims');
+  writeGetentShim(shims, databaseHome);
+  const runEnv: Record<string, string> = {
+    PATH: `${shims}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+    HOME: home,
+    ...env,
+  };
+  if (options.unsetHome) delete runEnv.HOME;
+  return spawnSync('bash', [wrapperPath], { encoding: 'utf8', env: runEnv });
 }
 
 function observedInstance(argsFile: string): string | undefined {
@@ -203,9 +217,9 @@ describe('whatsoup-release-drift systemd unit', () => {
     expect(existsSync(release.argsFile)).toBe(false);
   });
 
-  it('takes the label from the dedicated file when its environment holds another one', () => {
-    // Under systemd the label file is loaded last, so its value is also the one in
-    // the environment; a mismatch can only come from a direct run.
+  it('refuses when the environment and the dedicated file name different instances', () => {
+    // systemd loads the label file last, so a different value in the environment
+    // means systemd did not take it from that file as the wrapper reads it.
     const release = fakeRelease(0);
     const result = runWrapper({
       WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-b',
@@ -213,37 +227,147 @@ describe('whatsoup-release-drift systemd unit', () => {
       WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
     }, { labelFile: 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n' });
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(observedInstance(release.argsFile)).toBe('bot-a');
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('does not match');
+    expect(existsSync(release.argsFile)).toBe(false);
   });
 
-  it('reads the label from the dedicated file alone', () => {
+  it('refuses a label in the dedicated file that systemd did not hand over in the environment', () => {
     const release = fakeRelease(0);
     const result = runWrapper({
       WHATSOUP_LAUNCHER: release.launcher,
       WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
     }, { labelFile: 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n' });
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(observedInstance(release.argsFile)).toBe('bot-a');
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('does not match');
+    expect(existsSync(release.argsFile)).toBe(false);
   });
 
-  it('reads the last label assignment in the file and skips comment lines, as systemd does', () => {
+  it('accepts the environment label when the last assignment in the file names it, past # and ; comment lines', () => {
     const release = fakeRelease(0);
     const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
       WHATSOUP_LAUNCHER: release.launcher,
       WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
     }, {
       labelFile: [
         'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-x',
         'OTHER_KEY=1',
-        '# WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-y',
         'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a',
+        '# WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-y',
+        '; WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-z',
       ].join('\n'),
     });
 
     expect(result.status, result.stderr).toBe(0);
     expect(observedInstance(release.argsFile)).toBe('bot-a');
+  });
+
+  // Each value is one systemd hands over as bot-a: it removes one pair of
+  // matching quotes and the whitespace after an unquoted value.
+  it.each([
+    ['double quotes', 'WHATSOUP_RELEASE_DRIFT_INSTANCE="bot-a"\n'],
+    ['single quotes', "WHATSOUP_RELEASE_DRIFT_INSTANCE='bot-a'\n"],
+    ['trailing spaces', 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a  \n'],
+    ['a CRLF line end', 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\r\n'],
+  ])('accepts a label written with %s, as systemd reads it', (_name, labelFile) => {
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(observedInstance(release.argsFile)).toBe('bot-a');
+  });
+
+  it('reads an indented later assignment, as systemd does', () => {
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-b',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile: 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n  WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n' });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(observedInstance(release.argsFile)).toBe('bot-b');
+  });
+
+  it('refuses a label line inside a multi-line quoted value, which systemd reads as part of that value', () => {
+    // systemd sets only NOTE from this file, so the environment holds no label.
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile: "NOTE='example configuration\nWHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\nend'\n" });
+
+    expect(result.status).toBe(2);
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('reads the label file in the home the user database names, not in HOME', () => {
+    // systemd's %h is the user manager's home, which the unit's environment
+    // cannot change; HOME here can come from bot-errors.env or a drop-in.
+    const release = fakeRelease(0);
+    const home = tmp.make('home');
+    writeLabelFile(home, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n');
+    const result = runWrapper({
+      HOME: home,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { databaseHome: tmp.make('database-home') });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(observedInstance(release.argsFile)).toBe('bot-a');
+  });
+
+  it('refuses when only the folder HOME names holds a label file', () => {
+    const release = fakeRelease(0);
+    const home = tmp.make('home');
+    writeLabelFile(home, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n');
+    const result = runWrapper({
+      HOME: home,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-b',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { databaseHome: tmp.make('database-home'), labelFile: null });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('WHATSOUP_RELEASE_DRIFT_INSTANCE is not set');
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('fails closed when the user database names no home, and never falls back to HOME', () => {
+    const release = fakeRelease(0);
+    const home = tmp.make('home');
+    writeLabelFile(home, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n');
+    const result = runWrapper({
+      HOME: home,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { databaseHome: null });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('user database');
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('fails closed with exit 2, not a shell abort, when HOME is unset', () => {
+    // The launcher and log folder are set, so no default needs HOME.
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { databaseHome: tmp.make('database-home'), unsetHome: true });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('HOME is not set');
+    expect(existsSync(release.argsFile)).toBe(false);
   });
 
   it('fails closed before observing when the label path is not a readable file', () => {

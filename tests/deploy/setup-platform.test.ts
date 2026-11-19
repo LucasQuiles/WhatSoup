@@ -15,6 +15,8 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { writeGetentShim } from '../helpers/user-database-shim.ts';
+
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const setupSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
 const botErrorsSystemdUnits = [
@@ -174,11 +176,14 @@ function fakeObservedRelease(): { launcher: string; argsFile: string } {
  * environment first, then each EnvironmentFile in order (%h is HOME, a later file
  * overrides an earlier one, and a "-" prefix makes a missing file optional), then
  * ExecStart. The launcher points at a fake release, so nothing is observed or
- * emitted.
+ * emitted. A getent stand-in names HOME as this user's home, as the user
+ * database does for the manager that resolves %h.
  */
 function runInstalledReleaseDriftUnit(home: string, launcher: string, managerEnv: NodeJS.ProcessEnv = {}) {
   const unitFile = path.join(home, '.config', 'systemd', 'user', 'whatsoup-release-drift.service');
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, ...managerEnv };
+  const shims = makeTempRoot('whatsoup-setup-getent-');
+  writeGetentShim(shims, home);
+  const env: NodeJS.ProcessEnv = { PATH: `${shims}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: home, ...managerEnv };
   let execStart = '';
   for (const line of fs.readFileSync(unitFile, 'utf8').split('\n')) {
     const environmentFile = /^EnvironmentFile=(-?)(.+)$/.exec(line);
@@ -723,8 +728,8 @@ describe('deploy/setup.sh platform portability', () => {
   });
 
   it.each([
-    { keys: 'the label key alone', content: 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n' },
-    { keys: 'the label key and WHATSOUP_INSTANCE', content: 'WHATSOUP_INSTANCE=bot-c\nWHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n' },
+    { keys: 'the label key', content: 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n' },
+    { keys: 'the label key on an indented line', content: '  WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n' },
   ])('Linux setup replay without a label file warns that bot-errors.env cannot label release-drift runs when it sets $keys, and the unit takes no label from it', ({ content }) => {
     const home = makeTempRoot('whatsoup-setup-home-');
     const shimDir = makeTempRoot('whatsoup-setup-shims-');
@@ -746,7 +751,7 @@ describe('deploy/setup.sh platform portability', () => {
     expect(warning, result.stdout).toBeGreaterThanOrEqual(0);
     expect(lines[warning]).toContain('⚠');
     expect(lines[warning + 1]?.trim()).toBe(labelFileCommand);
-    // One warning per run: the label key is the more specific mistake.
+    // Nothing set WHATSOUP_INSTANCE, so no migration warning.
     expect(result.stdout).not.toContain(oldLabelWarning);
     expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'release-drift.env'))).toBe(false);
 
@@ -756,6 +761,89 @@ describe('deploy/setup.sh platform portability', () => {
     expect(observed.status).toBe(2);
     expect(observed.stderr).toContain('WHATSOUP_RELEASE_DRIFT_INSTANCE is not set');
     expect(fs.existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('Linux setup replay names both settings when bot-errors.env sets WHATSOUP_INSTANCE and the label key, and lets the operator choose the instance', () => {
+    // A hand-installed unit took its label from WHATSOUP_INSTANCE (bot-c); the label
+    // key (bot-b) may name another instance, so no "same instance" advice is safe.
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const botErrorsEnv = path.join(home, '.config', 'whatsoup', 'bot-errors.env');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(path.dirname(botErrorsEnv), { recursive: true });
+    fs.writeFileSync(botErrorsEnv, 'WHATSOUP_INSTANCE=bot-c\nWHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n', 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: '',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const lines = result.stdout.split('\n');
+    const oldWarning = lines.findIndex((line) => line.includes(oldLabelWarning));
+    const sharedWarning = lines.findIndex((line) => line.includes(sharedFileLabelWarning));
+    expect(oldWarning, result.stdout).toBeGreaterThanOrEqual(0);
+    expect(lines[oldWarning]).toContain('⚠');
+    expect(lines[oldWarning]).toContain('bot-errors.env');
+    expect(lines[oldWarning]).toContain('installed by hand');
+    expect(sharedWarning, result.stdout).toBeGreaterThan(oldWarning);
+    expect(lines[sharedWarning]).toContain('⚠');
+    expect(lines[sharedWarning]).toContain('may name different instances');
+    expect(lines[sharedWarning]).toContain('Choose the instance');
+    expect(lines[sharedWarning + 1]?.trim()).toBe(labelFileCommand);
+    expect(result.stdout).not.toContain('same instance');
+    expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'release-drift.env'))).toBe(false);
+  });
+
+  it.each([
+    { form: 'a quoted value', content: 'WHATSOUP_RELEASE_DRIFT_INSTANCE="bot-a"\n' },
+    { form: 'an indented line', content: '  WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n' },
+  ])('Linux setup replay reads an existing label file written with $form as the wrapper reads it', ({ content }) => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const labelFile = path.join(home, '.config', 'whatsoup', 'release-drift.env');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(path.dirname(labelFile), { recursive: true });
+    fs.writeFileSync(labelFile, content, 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('Existing release-drift instance label preserved');
+    expect(result.stdout).not.toContain('was ignored');
+    expect(fs.readFileSync(labelFile, 'utf8')).toBe(content);
+  });
+
+  it('Linux setup replay says an existing label the wrapper refuses needs a plain value, and never calls it preserved', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    const labelFile = path.join(home, '.config', 'whatsoup', 'release-drift.env');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(path.dirname(labelFile), { recursive: true });
+    fs.writeFileSync(labelFile, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=-bot-a\n', 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: '',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('a value whatsoup-release-drift.service refuses');
+    expect(result.stdout).not.toContain('Existing release-drift instance label preserved');
+  });
+
+  it('deploy/setup.sh and the Linux release-drift wrapper read a label with the same function', () => {
+    const wrapperSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'scripts', releaseDriftWrapper), 'utf8');
+    expect(extractShellFunction(setupSource, 'read_env_label')).toBe(extractShellFunction(wrapperSource, 'read_env_label'));
   });
 
   it('Linux setup replay labels release-drift runs from the dedicated file when bot-errors.env names another instance', () => {
