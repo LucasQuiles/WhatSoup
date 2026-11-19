@@ -3833,9 +3833,11 @@ recovery have been verified; stopping containers alone does not migrate their da
 `deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. To see this
 refusal before stopping a running instance, run `deploy/preflight-check.sh <repo-root> <instance>`: it
 runs the same start check and exits `3` on a block (at boot the wrapper defers that copy to its own
-exit-`78` gate). On launchd, `restart_self` refuses a job whose plist on disk is release-pinned,
-without sending anything or stopping it; restart such a job through
-[the release procedure](runbooks/release-deployment.md#activating-a-release). Recovery:
+exit-`78` gate). On launchd, `restart_self` restarts only a job whose plist on disk is the generated
+shared-wrapper form; it refuses any other plist (release-pinned, absent, unreadable or not WhatSoup's)
+with a named `cause` before it sends anything or stops the job. It reads the plist on disk, so a
+loaded release-pinned job whose plist on disk is the shared-wrapper form is not detected. Restart a
+release-pinned job through [the release procedure](runbooks/release-deployment.md#activating-a-release). Recovery:
 
 - `reason=missing_database` without the `initial-database-create` marker: an instance DB is expected but
   absent — restore the DB from the host backup path before restarting; creating a fresh DB silently

@@ -3943,11 +3943,24 @@ the global turn's queue, so a restart there would discard owed text. The declara
 | `reason` | string | yes | Non-empty reason for the restart. |
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
-A release-pinned launchd job, one whose plist on disk runs
-`<release>/deploy/whatsoup` directly, refuses self-restart: the handler checks
-this first and returns `ok: false` / `restarting: false` with the `cause`
-`release_pinned` without sending anything, writing a marker or stopping the
-service, so restart such a job through [the release procedure](runbooks/release-deployment.md#activating-a-release).
+The handler first asks the service manager whether it would refuse to restart
+this job. On launchd the manager reads the plist on disk once and restarts only
+the generated plist that runs `~/.local/bin/whatsoup`. For any other plist it
+names a `cause`: `release_pinned` for a validated release-pinned plist (one that
+runs `<release>/deploy/whatsoup` directly and meets the conditions in
+[the macOS launchd runbook](runbooks/macos-launchd-deployment.md)),
+`plist_not_owned` for any other plist, including a release-launcher plist whose
+release cannot be validated, and `plist_absent`, `plist_unreadable` or
+`invalid_instance`. The handler then returns `ok: false` / `restarting: false`
+with that `cause` without sending anything, aborting the turn, writing a marker,
+emitting an alert or stopping the service. Restart a release-pinned job through
+[the release procedure](runbooks/release-deployment.md#activating-a-release).
+The manager's own self-restart refuses the same plists again from its own read,
+before any `launchctl` call, so a plist that changes after the first check is
+still refused, though only after the steps below. Both checks read the plist on
+disk, not the job launchd has loaded: a loaded release-pinned job whose plist on
+disk is the shared-wrapper form is not detected. Systemd and the docker
+supervisor are not asked.
 Otherwise the handler first sends the text the current turn still owes. The queue holds the
 turn's streamed answer until the turn ends, so the handler sends that answer
 unchanged, with the status role rather than as the turn's recorded answer, and
@@ -3972,8 +3985,8 @@ supervisor and Linux without systemd reject the request. An acknowledgement
 failure is logged and does not stop the restart. A repeated request in the same
 process returns `ok: false` / `restarting: false`.
 
-**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when a
-release-pinned job or an unconfirmed owed reply stopped the restart, when the
+**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when the
+service manager's answer or an unconfirmed owed reply stopped the restart, when the
 caller survives long enough to receive a result. A fast service-manager rejection throws and marks
 the intent rejected. A successful request is not proof of a healthy reboot;
 verify service health and continuity after startup.

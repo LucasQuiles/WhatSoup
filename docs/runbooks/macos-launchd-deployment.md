@@ -739,11 +739,17 @@ refuse the job as not theirs (#3829):
 - The path is canonical and physically inside the service user's home (no
   symlink out of home).
 
-The in-job `restart_self` tool refuses a job whose plist on disk is
-release-pinned, even when all of these hold, before it sends anything or stops
-the job: `kickstart -k` would stop the running process before the launcher's
-boot checks run. It reads the plist on disk, not the definition launchd has
-loaded. Restart such a job through
+The in-job `restart_self` tool restarts only a job whose plist on disk is the
+generated `~/.local/bin/whatsoup` form. It refuses a release-pinned job, even
+when all of these hold, because `kickstart -k` would stop the running process
+before the launcher's boot checks run. It also refuses an absent or unreadable
+plist and one WhatSoup does not own, which includes a release-launcher plist
+that fails these conditions. It refuses before it sends anything or stops the
+job, and the service manager's own self-restart refuses the same plists again
+from its own read, before any `launchctl` call. Both read the plist on disk, not
+the definition launchd has loaded: a loaded release-pinned job whose plist on
+disk is the shared-wrapper form is not detected and is restarted with
+`kickstart -k`. Restart a release-pinned job through
 [the release procedure](release-deployment.md#activating-a-release).
 
 `reconcile-launchd-restart-policy` re-renders the symlink form, so it refuses a
