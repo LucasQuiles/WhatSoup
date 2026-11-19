@@ -255,7 +255,10 @@ function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): vo
   throw new Error(`launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity`);
 }
 
-/** Lifecycle commands (start, stop, restart, restartSelf, disable) accept either owned form. */
+/**
+ * Lifecycle commands (start, stop, restart, disable) accept either owned form.
+ * restartSelf() checks ownership here too, then refuses the release-pinned form.
+ */
 function assertOwnedLaunchdPlist(name: string, contents: string): void {
   if (!isExpectedGeneratedLaunchdPlist(name, contents) && !isReleasePinnedLaunchdPlist(name, contents)) {
     throw new Error(
@@ -872,6 +875,9 @@ async function installLaunchdPlist(name: string): Promise<void> {
 // ServiceManager interface + implementations
 // ---------------------------------------------------------------------------
 
+/** Same values as SelfRestartRefusal in src/runtimes/agent/self-restart.ts, which fleet does not import. */
+type SelfRestartRefusal = 'release_pinned' | 'invalid_instance' | 'plist_absent' | 'plist_unreadable' | 'plist_not_owned';
+
 export interface ServiceManager {
   enable(name: string): Promise<void>;
   disable(name: string): Promise<void>;
@@ -886,11 +892,11 @@ export interface ServiceManager {
    */
   restartSelf(name: string): Promise<void>;
   /**
-   * True only when the job's plist on disk is a validated release-pinned
-   * launchd plist. restart_self asks this first and refuses such a job before
-   * it sends or stops anything.
+   * The cause for which restartSelf() would refuse this job, or null when it
+   * would restart it. restart_self asks this first and refuses before it sends
+   * or stops anything.
    */
-  isReleasePinned?(name: string): boolean;
+  selfRestartRefusal?(name: string): SelfRestartRefusal | null;
   /** Fire-and-forget start with optional error callback (used in auth flow). */
   startFire(name: string, onError?: (err: Error | null) => void): void;
   /** Optional auth teardown hook; false means there was no job to restore after a failed pairing. */
@@ -1108,21 +1114,22 @@ class LaunchdServiceManager extends BaseServiceManager {
   }
 
   /**
-   * kickstart -k stops this process before the launcher's boot checks run, so a
-   * release-pinned job that cannot boot again would stay down. restart_self
-   * refuses such a job on this answer. Any other plist is left to restartSelf(),
-   * which refuses an absent, unowned or unreadable one before any launchctl call.
+   * One read of the plist on disk gives the cause for which restartSelf()
+   * would refuse the job, or null for the generated form, the only one it
+   * restarts. restart_self asks this before it sends or stops anything.
    */
-  isReleasePinned(name: string): boolean {
-    if (!isValidInstanceName(name)) return false;
+  selfRestartRefusal(name: string): SelfRestartRefusal | null {
+    if (!isValidInstanceName(name)) return 'invalid_instance';
     let contents: string | null;
     try {
       contents = readExistingLaunchdPlist(plistPath(name));
     } catch {
-      // intentional: restartSelf() reads the plist again and refuses an unreadable one.
-      return false;
+      // intentional: restartSelf() rethrows this read error before any launchctl call.
+      return 'plist_unreadable';
     }
-    return contents !== null && isReleasePinnedLaunchdPlist(name, contents);
+    if (contents === null) return 'plist_absent';
+    if (isExpectedGeneratedLaunchdPlist(name, contents)) return null;
+    return isReleasePinnedLaunchdPlist(name, contents) ? 'release_pinned' : 'plist_not_owned';
   }
 
   /**
@@ -1132,13 +1139,22 @@ class LaunchdServiceManager extends BaseServiceManager {
    * apply to an unloaded job). `kickstart -k` asks launchd to kill and relaunch
    * the loaded job itself; the caller issues nothing after it. There is no
    * bootstrap fallback: an absent job means this process is not that job.
-   * restart_self asks isReleasePinned() first and never calls this for a
-   * release-pinned job.
+   * Only the generated form is restarted. `kickstart -k` would stop a
+   * release-pinned job before the launcher's boot checks run, so the plist read
+   * that the ownership check uses also refuses that form, before any launchctl
+   * call, whatever selfRestartRefusal() answered earlier.
    */
   async restartSelf(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
-    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) {
+    const contents = readOwnedLaunchdPlist(name, plistPath(name));
+    if (contents === null) {
       throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
+    }
+    // The ownership check admitted the generated or a validated release-pinned form.
+    if (!isExpectedGeneratedLaunchdPlist(name, contents)) {
+      throw new Error(
+        `launchd plist for ${launchdLabel(name)} is release-pinned, so self-restart is refused: kickstart -k would stop the job before the launcher's boot checks run`,
+      );
     }
     await execFileAsync('launchctl', ['kickstart', '-k', launchdServiceTarget(name)]);
   }
