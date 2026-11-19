@@ -205,7 +205,7 @@ The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the 
 | `DELETE` | `/api/lines/:name` | Delete an instance (stop + cleanup) |
 | `PATCH` | `/api/lines/:name/config` | Update instance configuration |
 | `GET` | `/api/lines/:name/auth` | SSE stream for QR code authentication |
-| `POST` | `/api/console-session` | Console unlock: exchange the root token for an HttpOnly session cookie (the page holds the token only for this request; the browser keeps only the cookie) |
+| `POST` | `/api/console-session` | Console unlock: exchange the root token for an HttpOnly session cookie; the response carries no token (the manual unlock form keeps the entered token until an unlock succeeds) |
 | `DELETE` | `/api/console-session` | Console logout: revoke the presented session and clear the cookie |
 | `POST` | `/api/auth-ticket` | Mint a short-lived API or SSE auth ticket (root Bearer, or session cookie + same-origin proof) |
 | `POST` | `/api/ws-ticket` | Mint a short-lived WebSocket ticket (root Bearer, or session cookie + same-origin proof) |
@@ -267,10 +267,10 @@ The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` 
 
 **Console auto-unlock (macOS).** `deploy/scripts/whatsoup-console-unlock` unlocks a console tab in a local Chrome through its CDP port, installed with its helper in `~/.local/bin`:
 
-- Token source, keychain first: the login keychain item `whatsoup-console-token`, handed to the helper in `WHATSOUP_CONSOLE_TOKEN`. Without one, the helper `whatsoup-console-unlock.mjs` reads the token file itself (`WHATSOUP_FLEET_TOKEN_FILE`, default `~/.config/whatsoup/fleet-tokens.json`; it does not follow `XDG_CONFIG_HOME`).
-- Token file: a regular file, not a symlink, owned by the user who runs the helper, with no group or other permission bits (`0600` or `0400`), at most 64 KiB. Its folder is not checked. Each refusal prints `no-fleet-token:<reason>`.
-- `FLEET`: `https://` on any host, or `http://` on a loopback address only (`insecure-fleet-url` otherwise, since the token would cross the network unencrypted).
-- The page receives the token only as the argument of one call, which checks the page's origin and then posts to `/api/console-session` on the fleet origin.
+- Token source, keychain first: the keychain item `whatsoup-console-token`, found through the default keychain search list of `security`, handed to the helper in `WHATSOUP_CONSOLE_TOKEN`. Without one, the helper `whatsoup-console-unlock.mjs` reads the token file itself (`WHATSOUP_FLEET_TOKEN_FILE`, default `~/.config/whatsoup/fleet-tokens.json`; it does not follow `XDG_CONFIG_HOME`).
+- Token file: a regular file, not a symlink, that the helper can read, with no group or other permission bits (`0600` or `0400`), at most 1 MiB (a guard against reading a wrong file), holding JSON whose `active` field is 64 lowercase hex characters, as the fleet server writes it. Its owner and folder are not checked. A file replaced while it is read, as an atomic rotation does, is read once more. Each refusal prints `no-fleet-token:<reason>`.
+- `FLEET`: `https://` on any host, or plain `http://` on a loopback address: `localhost`, `127.0.0.0/8`, `[::1]` or an IPv4-mapped `127.0.0.0/8` literal such as `[::ffff:127.0.0.1]`. The helper looks up no names, so any other plain-http host, a host name for loopback included, prints `insecure-fleet-url: use https, or a loopback address`. A page on the fleet origin whose path begins with the `FLEET` path, such as the target of a same-origin redirect, counts as the console.
+- The helper resolves the page's window object in a call that checks the page's origin and carries no token, then runs the unlock function on that object. Only the checked document receives the token; after a navigation the call fails. The function posts to `/api/console-session` on the fleet origin.
 - Deploy order: install the helper before the wrapper. With an older helper, a host without a keychain token gets `helper-outdated`; an older wrapper works with the newer helper.
 
 ### Legacy authentication (deprecated)
