@@ -282,16 +282,16 @@ This one-time startup pass is an immediate history/corroboration reconciliation 
 
 For each `maybe_sent` op (including those promoted in Step 1):
 
-- **Has `wa_message_id`**: query `messages` for the matching `message_id` and its persisted authorship. Startup and live reconciliation share this check, including stored history.
-  - Found with `is_from_me != 1`: conflicting evidence; quarantine regardless of replay policy. Global message-ID uniqueness may have displaced our own echo, so an occupied ID is not missing evidence and cannot authorize automatic replay. Existing delivery-risk quarantine review and retention apply.
-  - Found with `is_from_me = 1`: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
+- **Has `wa_message_id`**: query `messages` for the row holding the matching `message_id`, its chat and its persisted authorship. Only a row in the op's own chat can confirm the send. Startup and live reconciliation share this check, including stored history.
+  - Found in another chat, with either authorship, or found in the op's chat with `is_from_me != 1`: conflicting evidence; quarantine regardless of replay policy. Global message-ID uniqueness may have displaced our own echo, so an occupied ID is not missing evidence and never authorizes automatic replay. Existing delivery-risk quarantine review and retention apply.
+  - Found in the op's chat with `is_from_me = 1`: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
   - Not found + `safe`/`read_only`, without typed `transport.send_ambiguous`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - Not found + `unsafe` or typed `transport.send_ambiguous`: `markQuarantined()`.
 - **No `wa_message_id`**: no provider receipt was recorded; delivery remains unconfirmed.
   - `safe`/`read_only`, without typed `transport.send_ambiguous`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe` or typed `transport.send_ambiguous`: `markQuarantined()`.
 
-Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
+Self-authorship is necessary but does not establish provider account or conversation identity. The chat binding means a self message in a different conversation never confirms the send; it holds the op for quarantine review instead. This check does not resolve Signal UUID/number aliases or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
 A full history message replaces an envelope-only placeholder only when it comes from the placeholder's chat;
 its `fromMe` value then replaces the placeholder's persisted authorship together with the body.
@@ -299,7 +299,7 @@ This corrects either direction of stale authorship. History replay leaves an
 existing non-placeholder row unchanged; previously upgraded rows are not backfilled.
 
 Here, a conflict means a row occupying the exact stored `message_id` used by the
-outbound receipt. Ordinary Signal peer messages use a composite `signal:` storage
+outbound receipt, in any chat, unless it is a self-authored row in the op's own chat. Ordinary Signal peer messages use a composite `signal:` storage
 key; self syncs and outbound receipts retain the raw provider timestamp. A peer
 message with the same timestamp therefore does not occupy the self-echo key and
 does not by itself require quarantine. Without a matching self echo, the existing

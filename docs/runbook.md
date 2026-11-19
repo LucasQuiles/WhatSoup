@@ -2528,6 +2528,8 @@ After the bound operation is echoed and original fulfillment is independently es
 use the same command below with `--source-seqs 101 --operator-op OP_ID` instead of `--catchup-seq`.
 This path requires schema 70, supports exactly one original request per operation, and records
 an append-only resolution with retained delivery proof. It never fabricates a new inbound turn.
+It refuses an operation whose provider message ID another operation in the same chat also claims:
+one stored echo cannot prove two requests.
 The direct-operation output contains keyed fingerprints and counts, not raw identifiers.
 First inspect without `--confirm`; repeat the same tuple with `--confirm` only under authority.
 Existing unbound sends cannot be retroactively claimed by this path. Preserve their open outcome

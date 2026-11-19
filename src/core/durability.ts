@@ -1424,9 +1424,11 @@ export class DurabilityEngine {
          FROM outbound_ops
          WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
       ),
+      // The row holding the provider ID in any chat (message IDs are unique), and
+      // whether it is in the operation's chat: only a same-chat row can confirm the send.
       getMessageByWaMessageId: prepare(
-        `SELECT m.pk, m.is_from_me FROM messages m
-         JOIN outbound_ops o ON o.chat_jid = m.chat_jid
+        `SELECT m.pk, m.is_from_me, m.chat_jid = o.chat_jid AS same_chat
+         FROM messages m, outbound_ops o
          WHERE m.message_id = ? AND o.id = ?`,
       ),
       resetMaybeSentWithWaToPending: prepare(
@@ -3421,10 +3423,12 @@ export class DurabilityEngine {
 
         if (op.wa_message_id) {
           const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id, op.id) as
-            | { pk: number; is_from_me: number }
+            | { pk: number; is_from_me: number; same_chat: number | null }
             | undefined;
 
-          if (found && found.is_from_me !== 1) {
+          // A peer row, or any row in another chat, is conflicting evidence:
+          // it never confirms the send and never permits a replay.
+          if (found && (found.same_chat !== 1 || found.is_from_me !== 1)) {
             this.quarantineMaybeSent(op, recoveryRun, operation);
           } else if (found) {
             this.markEchoed(op.id);

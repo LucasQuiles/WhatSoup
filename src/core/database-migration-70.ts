@@ -17,6 +17,12 @@ export const OPERATOR_CATCHUP_PROOF_SQL = `
     AND length(trim(json_extract(op.payload, '$.operatorCatchup.actor'))) > 0
     AND length(trim(json_extract(op.payload, '$.operatorCatchup.evidenceRef'))) > 0
     AND op.status = 'echoed' AND length(trim(op.wa_message_id)) > 0
+    AND NOT EXISTS (
+      SELECT 1 FROM outbound_ops claimant
+      WHERE claimant.chat_jid = op.chat_jid
+        AND claimant.wa_message_id = op.wa_message_id
+        AND claimant.id <> op.id
+    )
     AND julianday(op.created_at) >= julianday(pending.created_at)
     AND julianday(op.created_at) >= julianday(source.received_at)
     AND julianday(op.submitted_at) >= julianday(op.created_at)
