@@ -4,7 +4,6 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
-import { writeGetentShim } from '../helpers/user-database-shim.ts';
 
 const repoRoot = path.resolve(import.meta.dirname, '../..');
 const unitPath = path.join(repoRoot, 'deploy/whatsoup-release-drift.service');
@@ -56,39 +55,41 @@ function fakeRelease(scheduleExit: number): { launcher: string; argsFile: string
 
 const LABEL_KEY = 'WHATSOUP_RELEASE_DRIFT_INSTANCE';
 
+function labelFilePath(home: string): string {
+  return path.join(home, '.config/whatsoup/release-drift.env');
+}
+
 function writeLabelFile(home: string, content: string): void {
-  mkdirSync(path.join(home, '.config/whatsoup'), { recursive: true });
-  writeFileSync(path.join(home, '.config/whatsoup/release-drift.env'), content);
+  mkdirSync(path.dirname(labelFilePath(home)), { recursive: true });
+  writeFileSync(labelFilePath(home), content);
 }
 
 /**
- * Run the wrapper as the unit would. HOME is `env.HOME` or a fresh folder, and
- * is unset with `unsetHome`. A getent stand-in first in PATH names
- * `databaseHome` (default: that HOME) as this user's home, or fails when it is
- * null. A label in `env` is also written to the label file in the database home,
- * where systemd would have loaded it from, unless `labelFile` says otherwise:
- * null writes no file, a string is the file's whole content.
+ * Run the wrapper as the unit runs it: the label file path, %h's
+ * .config/whatsoup/release-drift.env, is its only argument. HOME is `env.HOME` or
+ * a fresh folder, and is unset with `unsetHome`. The label file sits under
+ * `labelHome` (default: that HOME), standing in for %h. A label in `env` is also
+ * written to that file, as systemd would have loaded it from there, unless
+ * `labelFile` says otherwise: null writes no file, a string is the file's whole
+ * content. `args` replaces the argument list.
  */
 function runWrapper(
   env: Record<string, string>,
-  options: { labelFile?: string | null; databaseHome?: string | null; unsetHome?: boolean } = {},
+  options: { labelFile?: string | null; labelHome?: string; unsetHome?: boolean; args?: string[] } = {},
 ) {
   const home = env.HOME ?? tmp.make('home');
-  const databaseHome = options.databaseHome === undefined ? home : options.databaseHome;
+  const labelHome = options.labelHome ?? home;
   const label = env[LABEL_KEY];
   const content = options.labelFile !== undefined
     ? options.labelFile
     : label === undefined ? null : `${LABEL_KEY}=${label}\n`;
-  if (content !== null && databaseHome !== null) writeLabelFile(databaseHome, content);
-  const shims = tmp.make('shims');
-  writeGetentShim(shims, databaseHome);
-  const runEnv: Record<string, string> = {
-    PATH: `${shims}:${process.env.PATH ?? '/usr/bin:/bin'}`,
-    HOME: home,
-    ...env,
-  };
+  if (content !== null) writeLabelFile(labelHome, content);
+  const runEnv: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, ...env };
   if (options.unsetHome) delete runEnv.HOME;
-  return spawnSync('bash', [wrapperPath], { encoding: 'utf8', env: runEnv });
+  return spawnSync('bash', [wrapperPath, ...(options.args ?? [labelFilePath(labelHome)])], {
+    encoding: 'utf8',
+    env: runEnv,
+  });
 }
 
 function observedInstance(argsFile: string): string | undefined {
@@ -171,6 +172,18 @@ describe('whatsoup-release-drift systemd unit', () => {
     expect(environmentFiles).toEqual([
       '%h/.config/whatsoup/bot-errors.env',
       '-%h/.config/whatsoup/release-drift.env',
+    ]);
+  });
+
+  it('passes the wrapper the same label file path that its EnvironmentFile line loads', () => {
+    // One specifier names the file twice, so the wrapper reads the file systemd
+    // loaded; bot-errors.env can change HOME but not an argument.
+    const unit = readFileSync(unitPath, 'utf8');
+    const labelFile = /^EnvironmentFile=-(.*\/release-drift\.env)$/m.exec(unit)?.[1];
+    expect(labelFile).toBe('%h/.config/whatsoup/release-drift.env');
+    expect(/^ExecStart=(.*)$/m.exec(unit)?.[1].split(/\s+/)).toEqual([
+      '%h/.local/bin/whatsoup-release-drift-linux.sh',
+      labelFile,
     ]);
   });
 
@@ -307,9 +320,35 @@ describe('whatsoup-release-drift systemd unit', () => {
     expect(existsSync(release.argsFile)).toBe(false);
   });
 
-  it('reads the label file in the home the user database names, not in HOME', () => {
-    // systemd's %h is the user manager's home, which the unit's environment
-    // cannot change; HOME here can come from bot-errors.env or a drop-in.
+  // A later assignment that this reader takes differently from systemd must end
+  // in a refusal or in agreement, never in the superseded label. The environment
+  // value is what systemd hands over in each case.
+  it.each([
+    ['spaces around "=" (systemd sets bot-c; this reader keeps bot-a)', 'WHATSOUP_RELEASE_DRIFT_INSTANCE = bot-c\n', 'bot-c', null],
+    ['spaces around "=", if systemd skipped that line', 'WHATSOUP_RELEASE_DRIFT_INSTANCE = bot-c\n', 'bot-a', 'bot-a'],
+    ['an indented line (both read bot-c)', '  WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-c\n', 'bot-c', 'bot-c'],
+    ['an indented line, against an environment holding the earlier value', '  WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-c\n', 'bot-a', null],
+  ])('a later assignment with %s exits 2 unless both readings agree', (_name, laterLine, environmentLabel, observed) => {
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: environmentLabel,
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile: `WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n${laterLine}` });
+
+    if (observed === null) {
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('does not match');
+      expect(existsSync(release.argsFile)).toBe(false);
+    } else {
+      expect(result.status, result.stderr).toBe(0);
+      expect(observedInstance(release.argsFile)).toBe(observed);
+    }
+  });
+
+  it('reads the label file its argument names, not one under HOME', () => {
+    // The unit passes %h's file, the one its EnvironmentFile line loads; HOME here
+    // can come from bot-errors.env or a drop-in.
     const release = fakeRelease(0);
     const home = tmp.make('home');
     writeLabelFile(home, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n');
@@ -318,7 +357,7 @@ describe('whatsoup-release-drift systemd unit', () => {
       WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
       WHATSOUP_LAUNCHER: release.launcher,
       WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
-    }, { databaseHome: tmp.make('database-home') });
+    }, { labelHome: tmp.make('unit-home') });
 
     expect(result.status, result.stderr).toBe(0);
     expect(observedInstance(release.argsFile)).toBe('bot-a');
@@ -333,26 +372,27 @@ describe('whatsoup-release-drift systemd unit', () => {
       WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-b',
       WHATSOUP_LAUNCHER: release.launcher,
       WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
-    }, { databaseHome: tmp.make('database-home'), labelFile: null });
+    }, { labelHome: tmp.make('unit-home'), labelFile: null });
 
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('WHATSOUP_RELEASE_DRIFT_INSTANCE is not set');
     expect(existsSync(release.argsFile)).toBe(false);
   });
 
-  it('fails closed when the user database names no home, and never falls back to HOME', () => {
+  it.each([
+    ['no argument', []],
+    ['a relative path', ['.config/whatsoup/release-drift.env']],
+    ['two arguments', ['/nonexistent/a', '/nonexistent/b']],
+  ])('fails closed with %s for the label file, and never falls back to HOME', (_name, args) => {
     const release = fakeRelease(0);
-    const home = tmp.make('home');
-    writeLabelFile(home, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n');
     const result = runWrapper({
-      HOME: home,
       WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
       WHATSOUP_LAUNCHER: release.launcher,
       WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
-    }, { databaseHome: null });
+    }, { args });
 
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain('user database');
+    expect(result.stderr).toContain('label file as the only argument');
     expect(existsSync(release.argsFile)).toBe(false);
   });
 
@@ -363,7 +403,7 @@ describe('whatsoup-release-drift systemd unit', () => {
       WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
       WHATSOUP_LAUNCHER: release.launcher,
       WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
-    }, { databaseHome: tmp.make('database-home'), unsetHome: true });
+    }, { unsetHome: true });
 
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('HOME is not set');

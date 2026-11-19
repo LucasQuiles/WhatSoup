@@ -15,8 +15,6 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { writeGetentShim } from '../helpers/user-database-shim.ts';
-
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const setupSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
 const botErrorsSystemdUnits = [
@@ -176,14 +174,13 @@ function fakeObservedRelease(): { launcher: string; argsFile: string } {
  * environment first, then each EnvironmentFile in order (%h is HOME, a later file
  * overrides an earlier one, and a "-" prefix makes a missing file optional), then
  * ExecStart. The launcher points at a fake release, so nothing is observed or
- * emitted. A getent stand-in names HOME as this user's home, as the user
- * database does for the manager that resolves %h.
+ * emitted. Only column-1 KEY=VALUE lines are loaded, a subset of systemd's
+ * parser, so quoted, indented or spaced assignments are tested on the wrapper
+ * directly. ExecStart is split on whitespace into the program and its arguments.
  */
 function runInstalledReleaseDriftUnit(home: string, launcher: string, managerEnv: NodeJS.ProcessEnv = {}) {
   const unitFile = path.join(home, '.config', 'systemd', 'user', 'whatsoup-release-drift.service');
-  const shims = makeTempRoot('whatsoup-setup-getent-');
-  writeGetentShim(shims, home);
-  const env: NodeJS.ProcessEnv = { PATH: `${shims}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: home, ...managerEnv };
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, ...managerEnv };
   let execStart = '';
   for (const line of fs.readFileSync(unitFile, 'utf8').split('\n')) {
     const environmentFile = /^EnvironmentFile=(-?)(.+)$/.exec(line);
@@ -198,7 +195,8 @@ function runInstalledReleaseDriftUnit(home: string, launcher: string, managerEnv
     const exec = /^ExecStart=(.+)$/.exec(line);
     if (exec) execStart = exec[1].split('%h').join(home);
   }
-  return spawnSync(execStart, [], { encoding: 'utf8', env: { ...env, WHATSOUP_LAUNCHER: launcher } });
+  const [program, ...args] = execStart.split(/\s+/);
+  return spawnSync(program, args, { encoding: 'utf8', env: { ...env, WHATSOUP_LAUNCHER: launcher } });
 }
 
 /**
