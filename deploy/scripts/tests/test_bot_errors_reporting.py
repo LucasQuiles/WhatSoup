@@ -684,6 +684,117 @@ def test_help_abbreviation_keeps_its_meaning_and_lists_the_preview_options(tmp_p
     assert "--human-report-approved-root" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(("--help", "--format-human-report"), id="help-then-report-without-value"),
+        pytest.param(("--format-human-report", "--help"), id="report-without-value-then-help"),
+        pytest.param(("--human-report-approved-root", "--help"), id="root-without-value-then-help"),
+        pytest.param(("--human-report-max-characters=bad", "--h"), id="bad-limit-then-abbreviated-help"),
+        pytest.param(("--format-human-report=", "-h"), id="empty-report-then-short-help"),
+    ],
+)
+def test_help_wins_over_every_preview_option(tmp_path: Path, argv: tuple[str, ...]) -> None:
+    # On main a help option printed the help and exited 0 even with a preview
+    # option, unknown to main, beside it. A preview option used wrongly, before
+    # or after the help option, must not change that.
+    result = _dispatcher_cli(tmp_path, *argv)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.startswith("usage:")
+    assert "--format-human-report" in result.stdout
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(("--format-human-report",), id="report-without-value"),
+        pytest.param(("--human-report-approved-root",), id="root-without-value"),
+        pytest.param(("--human-report-max-characters=bad",), id="bad-limit-alone"),
+        pytest.param(("--format-human-report", "{request}", "--human-report-max-utf8-bytes", "many"), id="bad-limit-with-report"),
+    ],
+)
+def test_a_misused_preview_option_exits_2_with_the_usage_text(tmp_path: Path, argv: tuple[str, ...]) -> None:
+    request = tmp_path / "request.json"
+    result = _dispatcher_cli(tmp_path, *(value.format(request=request) for value in argv))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.stderr.startswith("usage: bot-errors-dispatcher.py"), result.stderr
+    assert "error:" in result.stderr
+    assert not (tmp_path / "state").exists()
+
+
+def _preview_request(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "evidence"
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(_document(root)), encoding="utf-8")
+    return request, root
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(("--format-human-report=first.json", "--format-human-report=second.json"), id="report-twice"),
+        pytest.param(("--format-human-report=", "--format-human-report={request}", "--human-report-approved-root={root}"), id="empty-report-first"),
+        pytest.param(("--format-human-report={request}", "--format-human-report=", "--human-report-approved-root={root}"), id="empty-report-last"),
+        pytest.param(("--format-human-report={request}", "--human-report-approved-root=", "--human-report-approved-root={root}"), id="empty-root-first"),
+        pytest.param(("--format-human-report={request}", "--human-report-approved-root={root}", "--human-report-approved-root="), id="empty-root-last"),
+        pytest.param(
+            ("--format-human-report={request}", "--human-report-approved-root={root}",
+             "--human-report-max-characters=900", "--human-report-max-characters=901"),
+            id="limit-twice",
+        ),
+        pytest.param(
+            ("--format-human-report={request}", "--human-report-approved-root={root}",
+             "--human-report-max-utf8-bytes=", "--human-report-max-utf8-bytes=900"),
+            id="empty-limit-first",
+        ),
+    ],
+)
+def test_a_preview_option_repeated_with_another_value_or_empty_is_refused(tmp_path: Path, argv: tuple[str, ...]) -> None:
+    # "Last wins" would hide the other value, and an empty value names nothing,
+    # so each command line is a usage error, refused before any preview runs.
+    request, root = _preview_request(tmp_path)
+    result = _dispatcher_cli(tmp_path, *(value.format(request=request, root=root) for value in argv))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.stderr.startswith("usage: bot-errors-dispatcher.py"), result.stderr
+    assert result.stdout == ""
+    assert not (tmp_path / "state").exists()
+
+
+def test_the_same_preview_value_twice_is_accepted_and_roots_stay_repeatable(tmp_path: Path) -> None:
+    request, root = _preview_request(tmp_path)
+    (tmp_path / "other").mkdir()
+    result = _dispatcher_cli(
+        tmp_path,
+        "--format-human-report", str(request), "--format-human-report", str(request),
+        "--human-report-approved-root", str(tmp_path / "other"), "--human-report-approved-root", str(root),
+        "--human-report-max-characters", "4000", "--human-report-max-characters", "4000",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Queue delivery delayed" in result.stdout
+    assert "Status: Accepted; investigation not started" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("argv", "option"),
+    [
+        pytest.param(("--interval", "--format-human-report=report.json", "30"), "--interval", id="interval"),
+        pytest.param(("--max-events", "--human-report-approved-root", "approved", "5"), "--max-events", id="max-events"),
+    ],
+)
+def test_preview_options_never_join_dispatcher_arguments_that_were_apart(
+    tmp_path: Path, argv: tuple[str, ...], option: str,
+) -> None:
+    # The option is left without a value, as on main: the value after the
+    # preview option is never taken across it.
+    alone = _dispatcher_cli(tmp_path, option)
+    assert alone.returncode == 2, alone.stderr
+    result = _dispatcher_cli(tmp_path, *argv)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert result.stderr.splitlines()[-1] == alone.stderr.splitlines()[-1]
+    assert not (tmp_path / "state").exists()
+
+
 def _manifest_tree_without_the_preview_module(tmp_path: Path) -> Path:
     repo = _SCRIPTS.parents[1]
     manifest = json.loads((repo / "deploy" / "bot-errors-runtime-manifest.json").read_text(encoding="utf-8"))
