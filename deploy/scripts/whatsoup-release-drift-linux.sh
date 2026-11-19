@@ -23,7 +23,9 @@
 set -uo pipefail
 
 LAUNCHER="${WHATSOUP_LAUNCHER:-$HOME/.local/bin/whatsoup}"
-TARGET_URL="${WHATSOUP_RELEASE_TARGET_URL:-git@github.com:LucasQuiles/WhatSoup.git}"
+# The macOS renderer's default (render-release-drift-launchd.sh). HTTPS, since a
+# systemd user unit has no SSH agent socket; set the variable for an SSH remote.
+TARGET_URL="${WHATSOUP_RELEASE_TARGET_URL:-https://github.com/LucasQuiles/WhatSoup.git}"
 TARGET_REF="${WHATSOUP_RELEASE_TARGET_REF:-refs/heads/main}"
 # The BOT ERRORS instance label of this host's release alerts and clears comes
 # only from WHATSOUP_RELEASE_DRIFT_INSTANCE in ~/.config/whatsoup/release-drift.env,
