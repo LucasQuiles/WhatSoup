@@ -671,14 +671,23 @@ else
     # A unit installed by hand took its label from WHATSOUP_INSTANCE, set in a
     # drop-in or in bot-errors.env, which it loaded. Setup has just replaced that
     # unit but keeps the setting, so every run exits 2 until the label file exists.
-    # Both checks sit in if conditions: a file setup cannot read must not end setup.
+    # A WHATSOUP_RELEASE_DRIFT_INSTANCE line in bot-errors.env labels no run
+    # either, since the wrapper reads the label only from the label file; its
+    # warning comes first, as the more specific mistake.
+    # All checks sit in if conditions: a file setup cannot read must not end setup.
     release_drift_old_label=""
-    if grep -qsE '^[[:space:]]*Environment[[:space:]]*=.*WHATSOUP_INSTANCE=' "$SYSTEMD_DIR/whatsoup-release-drift.service.d"/*.conf; then
+    release_drift_shared_label=""
+    if env_file_has_key "$HOME/.config/whatsoup/bot-errors.env" WHATSOUP_RELEASE_DRIFT_INSTANCE 2>/dev/null; then
+      release_drift_shared_label=1
+    elif grep -qsE '^[[:space:]]*Environment[[:space:]]*=.*WHATSOUP_INSTANCE=' "$SYSTEMD_DIR/whatsoup-release-drift.service.d"/*.conf; then
       release_drift_old_label="a drop-in in ~/.config/systemd/user/whatsoup-release-drift.service.d"
     elif env_file_has_key "$HOME/.config/whatsoup/bot-errors.env" WHATSOUP_INSTANCE 2>/dev/null; then
       release_drift_old_label="the file ~/.config/whatsoup/bot-errors.env"
     fi
-    if [ -n "$release_drift_old_label" ]; then
+    if [ -n "$release_drift_shared_label" ]; then
+      echo "  ⚠ whatsoup-release-drift.service never takes WHATSOUP_RELEASE_DRIFT_INSTANCE from ~/.config/whatsoup/bot-errors.env, which sets it: every run exits 2 without observing until ~/.config/whatsoup/release-drift.env holds the label. Write that file once, with the same instance:"
+      echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
+    elif [ -n "$release_drift_old_label" ]; then
       echo "  ⚠ whatsoup-release-drift.service no longer reads WHATSOUP_INSTANCE, which $release_drift_old_label sets: every run exits 2 without observing until ~/.config/whatsoup/release-drift.env holds the label. Write that file once, with the same instance:"
       echo "     (set -C; umask 077; echo WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> > ~/.config/whatsoup/release-drift.env)"
     else

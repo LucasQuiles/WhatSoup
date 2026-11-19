@@ -25,18 +25,44 @@ set -uo pipefail
 LAUNCHER="${WHATSOUP_LAUNCHER:-$HOME/.local/bin/whatsoup}"
 TARGET_URL="${WHATSOUP_RELEASE_TARGET_URL:-git@github.com:LucasQuiles/WhatSoup.git}"
 TARGET_REF="${WHATSOUP_RELEASE_TARGET_REF:-refs/heads/main}"
-# The BOT ERRORS instance label of this host's release alerts and clears. The
-# systemd unit loads it from ~/.config/whatsoup/release-drift.env (see the unit
-# file), the one file deploy/setup.sh writes this name to. WHATSOUP_INSTANCE is
-# never read: bot-errors.env, the user manager or a drop-in can set it for other
-# units and per-instance agent state, which would label alerts for another
-# instance.
-INSTANCE="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
+# The BOT ERRORS instance label of this host's release alerts and clears comes
+# only from WHATSOUP_RELEASE_DRIFT_INSTANCE in ~/.config/whatsoup/release-drift.env,
+# the one file deploy/setup.sh writes this name to. The value in the environment
+# is ignored: the unit also loads bot-errors.env, which every BOT ERRORS unit
+# loads, so a line there would supply the label whenever the label file is
+# absent. The path comes from HOME alone, because bot-errors.env could set any
+# override variable too. WHATSOUP_INSTANCE is never read: bot-errors.env, the
+# user manager or a drop-in can set it for other units and per-instance agent
+# state, which would label alerts for another instance.
+LABEL_FILE="$HOME/.config/whatsoup/release-drift.env"
 export WHATSOUP_RELEASE_DRIFT_LOG_DIR="${WHATSOUP_RELEASE_DRIFT_LOG_DIR:-$HOME/.local/state/whatsoup/logs}"
 
 fail(){ echo "whatsoup-release-drift-linux: $1" >&2; exit "${2:-2}"; }
 
-[ -n "$INSTANCE" ] || fail "WHATSOUP_RELEASE_DRIFT_INSTANCE is not set; write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env"
+# Read as deploy/setup.sh's read_env_file_value reads it: comment lines are
+# skipped and the last assignment wins, as in systemd. Quotes are kept, unlike
+# systemd, so a quoted value fails the label check below.
+read_label() {
+  awk -v key=WHATSOUP_RELEASE_DRIFT_INSTANCE '
+    /^[[:space:]]*#/ { next }
+    index($0, key "=") == 1 { value=substr($0, length(key) + 2) }
+    END { printf "%s", value }
+  ' "$LABEL_FILE"
+}
+
+INSTANCE=""
+if [ -e "$LABEL_FILE" ] || [ -L "$LABEL_FILE" ]; then
+  # Only a readable regular file is read, through a symlink as systemd reads it.
+  # A folder, a FIFO, which would block the read, or a dangling link fails here.
+  { [ -f "$LABEL_FILE" ] && [ -r "$LABEL_FILE" ] && INSTANCE="$(read_label)"; } \
+    || fail "cannot read the label file ~/.config/whatsoup/release-drift.env"
+fi
+if [ -z "$INSTANCE" ]; then
+  ignored=""
+  [ -z "${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}" ] \
+    || ignored=" (the value in the environment is ignored: bot-errors.env can set it)"
+  fail "WHATSOUP_RELEASE_DRIFT_INSTANCE is not set; write WHATSOUP_RELEASE_DRIFT_INSTANCE=<instance> to ~/.config/whatsoup/release-drift.env$ignored"
+fi
 # The label follows --instance, where a leading dash reads as another option:
 # the scheduler answers --help with exit 0 and observes nothing. deploy/setup.sh
 # refuses the same labels.
