@@ -24,7 +24,6 @@ import {
   type DistillState,
 } from './handoff-distill-gate.ts';
 import type { HandoffArtifact } from './handoff-prelude.ts';
-import { providerPreview } from './provider-preview-sanitizer.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { shortHash } from '../../lib/short-hash.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -40,15 +39,17 @@ export interface HandoffDistillLog {
 type DistillPhase = 'distill' | 'accounting' | 'persist';
 type DistillFailureClass = 'provider' | 'provider-usage' | 'timeout' | 'accounting' | 'persist';
 
-// Absolute, home-relative and drive paths, so a log line names no file system location.
-const PATH_LIKE = /~[\\/][^\s'"`]*|(?:[A-Za-z]:)?(?:[\\/][^\s'"`\\/]+){2,}[\\/]?/g;
-const REASON_INPUT_MAX = 4_096;
-const REASON_LOG_MAX = 160;
-
-/** Paths and secrets out first, then the cut, so the cut never strands part of a token. */
-function sanitizeDistillReason(reason: string): string {
-  return providerPreview(reason.slice(0, REASON_INPUT_MAX).replace(PATH_LIKE, '[path]'), REASON_LOG_MAX);
-}
+/**
+ * The fixed reason code each failure class logs. Never exception text: no
+ * sanitizer reliably removes every path, opaque value or digest it can carry.
+ */
+const DISTILL_FAILURE_REASON_CODES: Readonly<Record<DistillFailureClass, string>> = {
+  provider: 'provider-error',
+  'provider-usage': 'provider-usage-rejected',
+  timeout: 'provider-timeout',
+  accounting: 'token-accounting-error',
+  persist: 'persist-error',
+};
 
 function distillFailureClass(err: unknown, phase: DistillPhase): DistillFailureClass {
   if (phase !== 'distill') return phase;
@@ -169,13 +170,14 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
       tokensThisWindow: chargedTokens ?? decision.nextState.tokensThisWindow };
     const nextState = recordDistillFailure(failureState, deps.now, deps.config);
     const reason = errorMessage(err);
-    // One bounded line per failed run: hashed key, reason class, sanitized reason text.
+    // One line per failed run: hashed key, reason class and that class's fixed reason code.
     const sink: HandoffDistillLog = deps.log ?? log;
+    const reasonClass = distillFailureClass(err, phase);
     sink.warn({
       event: 'handoff_distill_failed',
       conversationKeyHash: shortHash(deps.conversationKey),
-      reasonClass: distillFailureClass(err, phase),
-      reason: sanitizeDistillReason(reason),
+      reasonClass,
+      reason: DISTILL_FAILURE_REASON_CODES[reasonClass],
     }, 'handoff distill failed');
     deps.onDegraded?.(`handoff distill failed: ${reason.slice(0, 160)}`);
     return { ran: false, denied: null, failed: true, nextState };

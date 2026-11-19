@@ -77,12 +77,13 @@ import {
   type PrimaryModelProbeAdapterDeps,
 } from './providers/primary-model-usability-adapters.ts';
 import {
-  isPrimaryProbeContextRefusal,
+  nextPrimaryTurnRecoveryHold,
   primaryModelUsabilityRequiresAlert,
   probeIncompatibilityAlertAction,
   probePrimaryModelUsability,
   type PrimaryProbeServiceContext,
   type PrimaryModelUsabilityResult,
+  type PrimaryTurnRecoveryHold,
 } from './providers/primary-model-usability.ts';
 import { fallbackRequiresPrimaryProbe, isProviderFallbackReason } from './runtime-presentation.ts';
 import {
@@ -1263,8 +1264,8 @@ export class RuntimeFallbackCoordinator {
   private chainCanarySweepInFlight = false;
   /** This process raised the alert for a CLI that cannot run an MCP-free model probe. */
   private probeIncompatibleAlertActive = false;
-  /** The last probe result refused on its service context; only a later probe result resets it. */
-  private probeContextRefusalActive = false;
+  /** Why turn successes may not recover primary usability now; only probe results move it. */
+  private turnRecoveryHold: PrimaryTurnRecoveryHold = null;
   /**
    * `fallback_chain_entry_unhealthy` incident state. The dispatcher keys the
    * incident per instance+source, not per entry, so one field covers every
@@ -2234,6 +2235,8 @@ export class RuntimeFallbackCoordinator {
   }
 
   schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual' | 'periodic'): void {
+    // A restarted process cannot know why an earlier alert is open: turns wait for its startup probe.
+    if (trigger === 'startup' && this.turnRecoveryHold === null) this.turnRecoveryHold = 'startup';
     const target = {
       provider: this.host.agentProvider,
       model: this.host.model ?? null,
@@ -2301,19 +2304,20 @@ export class RuntimeFallbackCoordinator {
     result: PrimaryModelUsabilityResult,
     trigger: 'startup' | 'manual' | 'periodic',
     source: 'probe' | 'turn-success' = 'probe',
-  ): void {
+  ): boolean {
     if (this.host.shutdownRequested) {
       // A probe started before shutdown resolved after it. Drop the result
       // whole: no evidence mutation, no alert emission or clear, no timer —
       // shutdown() already cleared the periodic loop and health is torn down.
       log.debug({ trigger, status: result.status }, 'primary model usability result dropped after shutdown');
-      return;
+      return false;
     }
     // A turn success is not a probe and says nothing about the probe's service
-    // context; an older child may still be serving. A context refusal keeps its
-    // record and alert until a probe result replaces them.
-    if (source === 'turn-success' && this.probeContextRefusalActive) return;
-    if (source === 'probe') this.probeContextRefusalActive = isPrimaryProbeContextRefusal(result);
+    // context; an older child may still be serving. A service-context refusal,
+    // or an unsettled startup probe, keeps the record and alert until a probe
+    // result replaces them. Returns whether this evidence was recorded.
+    if (source === 'turn-success' && this.turnRecoveryHold !== null) return false;
+    if (source === 'probe') this.turnRecoveryHold = nextPrimaryTurnRecoveryHold(this.turnRecoveryHold, result);
     this.host.primaryModelUsability = {
       ...result,
       checkedAt: Date.now(),
@@ -2376,10 +2380,10 @@ export class RuntimeFallbackCoordinator {
         `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
       );
       this.host.primaryModelUsabilityAlertActive = false;
-      return;
+      return true;
     }
 
-    if (!primaryModelUsabilityRequiresAlert(result)) return;
+    if (!primaryModelUsabilityRequiresAlert(result)) return true;
 
     this.host.primaryModelUsabilityAlertActive = true;
     emitAlertChecked(
@@ -2389,6 +2393,7 @@ export class RuntimeFallbackCoordinator {
       this.primaryModelUsabilityEvidence(result, trigger),
       'warning',
     );
+    return true;
   }
 
   private primaryModelUsabilityEvidence(result: PrimaryModelUsabilityResult, trigger: 'startup' | 'manual' | 'periodic'): string {

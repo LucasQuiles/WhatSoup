@@ -26,6 +26,7 @@ import {
 import { claudeRefreshLockGrace, refreshAheadDefersProbe, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
 import {
   CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG,
+  CONTEXT_BINARY_CHANGED_RESTART_REQUIRED,
   DEFERRED_REFRESH_IN_FLIGHT,
   REFRESH_AHEAD_FAILED,
   REFRESH_OWNER_UNAVAILABLE,
@@ -276,12 +277,13 @@ function comparePrimaryProbeContext(
   return null;
 }
 
-/**
- * A binary-only change that a required provider canary does not admit: new
- * sessions refuse the binary, so the probe keeps refusing under its own reason
- * until the service restarts with a fresh canary receipt.
- */
-export const CONTEXT_BINARY_CHANGED_RESTART_REQUIRED = 'context-binary-changed-restart-required';
+/** A binary identity a probe compares: the resolved path and its SHA-256. */
+type ProbeBinaryIdentity = Pick<PrimaryProbeInvocation, 'executablePath' | 'binarySha256'>;
+
+/** The binary claude-cli preparation ran refresh-ahead for; the next probe takes it once. */
+interface PreparedIdentitySlot {
+  identity: ProbeBinaryIdentity | null;
+}
 
 /** The service-context field each refusal reason names. */
 const CONTEXT_REFUSAL_FIELDS: Readonly<Record<string, string>> = {
@@ -298,9 +300,10 @@ const CONTEXT_REFUSAL_FIELDS: Readonly<Record<string, string>> = {
 };
 const HASHED_CONTEXT_FIELDS: ReadonlySet<string> = new Set(['launchContextHash', 'resolvedBinaryPathHash', 'binarySha256']);
 const BINARY_CHANGE_REASONS: ReadonlySet<string> = new Set(['context-mismatch-binary-path', 'context-mismatch-binary-sha']);
-const VERSION_LABEL = /^\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]{1,32})?$/;
+// Bounded numeric components only: a free suffix could carry private build metadata.
+const VERSION_LABEL = /^\d{1,6}(?:\.\d{1,6}){1,3}$/;
 
-/** The executable's file name when it is a version label (versioned installs); never a path. */
+/** The executable's file name when it is a numeric version label (versioned installs); never a path. */
 function binaryVersionLabel(executablePath: string | null): string | null {
   const name = executablePath?.split(/[\\/]/).pop() ?? '';
   return VERSION_LABEL.test(name) ? name : null;
@@ -312,21 +315,27 @@ function contextHashPrefix(context: PrimaryProbeServiceContext | null | undefine
   return typeof value === 'string' ? value.slice(0, 8) : null;
 }
 
-/** One content-free warn line per context refusal: a field name, short hash prefixes and a version label. */
+/**
+ * One content-free warn line per context refusal: the final reason, the
+ * mismatch it started from, that mismatch's field, short hash prefixes and a
+ * version label.
+ */
 function logContextRefusal(
   deps: PrimaryModelProbeAdapterDeps,
   provider: string,
-  reason: string,
+  mismatch: string,
   expected: PrimaryProbeServiceContext | null | undefined,
   current: PrimaryProbeServiceContext | null,
   executablePath: string | null,
+  finalReason: string = mismatch,
 ): void {
-  const field = CONTEXT_REFUSAL_FIELDS[reason] ?? null;
+  const field = CONTEXT_REFUSAL_FIELDS[mismatch] ?? null;
   const fields = {
     event: 'primary_model_probe_context_refused',
     trigger: deps.probeTrigger ?? 'unspecified',
     provider,
-    reason,
+    reason: finalReason,
+    mismatchReason: mismatch,
     field,
     expectedPrefix: contextHashPrefix(expected, field),
     currentPrefix: contextHashPrefix(current, field),
@@ -372,24 +381,42 @@ type BinaryContextRebind =
   | { readonly kind: 'adopted'; readonly context: PrimaryProbeServiceContext }
   | { readonly kind: 'declined'; readonly reason: string };
 
+/** A refusal a rebind may adopt: only the resolved binary changed. Admission, canary and compare-and-set come later. */
+function rebindCandidate(
+  target: { provider: string; model: string | null },
+  deps: PrimaryModelProbeAdapterDeps,
+  invocation: PrimaryProbeInvocation,
+): boolean {
+  const expected = deps.serviceContext;
+  return deps.rebindServiceContext !== undefined
+    && expected !== undefined
+    && invocation.blockedReason !== null
+    && BINARY_CHANGE_REASONS.has(invocation.blockedReason)
+    && binaryOnlyContextChange(target, expected, invocation.context);
+}
+
 /**
  * Adopt the probe's fresh context when only the resolved binary changed and
- * any required canary admits the new binary. Null keeps the refusal as it is;
- * 'declined' carries the reason for a binary change the canary does not admit.
+ * any required canary admits the new binary. For claude-cli, `admitted` is the
+ * binary preparation ran refresh-ahead for, and only that binary is adopted;
+ * undefined means no refresh-ahead applies. Null keeps the refusal as it is;
+ * 'declined' carries the final reason for a binary change that is not adopted.
  */
 async function rebindBinaryContext(
   target: { provider: string; model: string | null },
   deps: PrimaryModelProbeAdapterDeps,
   invocation: PrimaryProbeInvocation,
+  admitted: ProbeBinaryIdentity | null | undefined,
 ): Promise<BinaryContextRebind | null> {
   const expected = deps.serviceContext;
-  if (!deps.rebindServiceContext || !expected || invocation.blockedReason === null) return null;
-  if (!BINARY_CHANGE_REASONS.has(invocation.blockedReason)) return null;
-  if (!binaryOnlyContextChange(target, expected, invocation.context)) return null;
+  const rebind = deps.rebindServiceContext;
+  if (!expected || !rebind || !rebindCandidate(target, deps, invocation) || admitted === null) return null;
+  const drift = admitted === undefined ? null : primaryProbeIdentityDriftReason(admitted, invocation);
+  if (drift !== null) return { kind: 'declined', reason: drift };
   if (!(await canaryAdmitsBinary(deps, invocation.binarySha256))) {
     return { kind: 'declined', reason: CONTEXT_BINARY_CHANGED_RESTART_REQUIRED };
   }
-  if (!deps.rebindServiceContext(expected, invocation.context)) return null;
+  if (!rebind(expected, invocation.context)) return null;
   const sink: ProbeLifecycleLog = deps.log ?? log;
   sink.info({
     event: 'primary_model_probe_context_rebound',
@@ -475,10 +502,11 @@ export function createPrimaryModelProbeAdapters(
   providerConfig?: Record<string, unknown>,
   deps: PrimaryModelProbeAdapterDeps = {},
 ): PrimaryModelProbeAdapters {
+  const prepared: PreparedIdentitySlot = { identity: null };
   return {
-    prepareBinaryModel: (target) => prepareCliModelProbe(target, providerConfig, deps),
+    prepareBinaryModel: (target) => prepareCliModelProbe(target, providerConfig, deps, prepared),
     probeBinaryModel: (target, signal, onStage) =>
-      probeCliModel(target.provider, target.model, providerConfig, deps, signal, onStage),
+      probeCliModel(target.provider, target.model, providerConfig, deps, signal, onStage, prepared),
     probeApiModelAccess: (target, signal, onStage) => {
       const current = deps.currentServiceContext?.() ?? buildPrimaryProbeServiceContext({
         provider: target.provider,
@@ -515,14 +543,19 @@ async function prepareCliModelProbe(
   target: { provider: string; model: string | null },
   providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
+  prepared: PreparedIdentitySlot,
 ): Promise<void | { defer: string }> {
   if (target.provider !== 'claude-cli') return;
+  prepared.identity = null;
   try {
-    // This preflight only decides whether refresh-ahead may run. The final
-    // probe builds a fresh invocation and passes that exact resolved path to
-    // probeBinaryCommand; this preflight is never readiness evidence.
+    // This preflight decides whether refresh-ahead may run, and for which
+    // binary: the current one, or one a rebind may adopt. The probe builds a
+    // fresh invocation and adopts only the binary recorded here; this
+    // preflight is never readiness evidence.
     const invocation = buildPrimaryProbeInvocation(target, providerConfig, deps);
-    if (invocation.blockedReason !== null || !invocation.binaryToken || !invocation.executablePath) return;
+    if (!invocation.binaryToken || !invocation.executablePath) return;
+    if (invocation.blockedReason !== null && !rebindCandidate(target, deps, invocation)) return;
+    prepared.identity = { executablePath: invocation.executablePath, binarySha256: invocation.binarySha256 };
     const refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(invocation.binaryToken, invocation.env);
     // Only a currently held refresh suppresses alerts. Other refresh failures still block the
     // killable probe, but carry an alertable reason because no running child was established.
@@ -546,7 +579,11 @@ async function probeCliModel(
   deps: PrimaryModelProbeAdapterDeps,
   signal?: AbortSignal,
   onStage?: PrimaryModelProbeStageReporter,
+  prepared?: PreparedIdentitySlot,
 ): Promise<BinaryModelProbeResult> {
+  // A claude rebind adopts only the binary preparation ran refresh-ahead for; each probe takes it once.
+  const admitted = provider === 'claude-cli' ? (prepared?.identity ?? null) : undefined;
+  if (prepared) prepared.identity = null;
   if (signal?.aborted) return { status: 'timeout' };
   onStage?.('prepare');
 
@@ -604,12 +641,15 @@ async function probeCliModel(
     let probeDeps = deps;
     let invocation = buildPrimaryProbeInvocation({ provider, model }, providerConfig, probeDeps);
     if (invocation.blockedReason !== null) {
-      logContextRefusal(probeDeps, provider, invocation.blockedReason, probeDeps.serviceContext, invocation.context, invocation.executablePath);
+      const mismatch = invocation.blockedReason;
       // At most one rebind per probe: no check below rebinds again.
-      const rebind = await rebindBinaryContext({ provider, model }, probeDeps, invocation);
+      const rebind = await rebindBinaryContext({ provider, model }, probeDeps, invocation, admitted);
+      // Decided first, so the one warn line names the final reason and the mismatch it started from.
+      const finalReason = rebind?.kind === 'declined' ? rebind.reason : mismatch;
+      logContextRefusal(probeDeps, provider, mismatch, probeDeps.serviceContext, invocation.context, invocation.executablePath, finalReason);
       if (rebind === null || rebind.kind === 'declined') {
         releaseExecutionLease();
-        return { status: 'unknown', reason: rebind?.reason ?? invocation.blockedReason };
+        return { status: 'unknown', reason: finalReason };
       }
       if (signal?.aborted) {
         releaseExecutionLease();
@@ -770,8 +810,8 @@ function strictMcpConfigIdentity(invocation: PrimaryProbeInvocation): string | n
 }
 
 function primaryProbeIdentityDriftReason(
-  before: PrimaryProbeInvocation,
-  after: PrimaryProbeInvocation,
+  before: ProbeBinaryIdentity,
+  after: ProbeBinaryIdentity,
 ): string | null {
   if (before.executablePath !== after.executablePath) return 'context-mismatch-binary-path';
   if (before.binarySha256 !== after.binarySha256) return 'context-mismatch-binary-sha';
