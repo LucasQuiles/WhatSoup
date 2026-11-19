@@ -64,6 +64,7 @@ vi.mock('../../src/core/access-list.ts', async (importOriginal) => ({
 import { Database } from '../../src/core/database.ts';
 import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
 import { drainIngest } from './_helpers/ingest-drain.ts';
+import { makeMessenger, makeRuntime, makeIncomingMessage } from './_helpers/ingest-fixtures.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { ChatQueue } from '../../src/runtimes/chat/queue.ts';
 import { ChatRuntime } from '../../src/runtimes/chat/runtime.ts';
@@ -118,42 +119,6 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
-
-function makeMessenger(): Messenger {
-  return {
-    sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
-    sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
-  };
-}
-
-function makeRuntime(): Runtime {
-  return {
-    start: vi.fn().mockResolvedValue(undefined),
-    handleMessage: vi.fn().mockResolvedValue(undefined),
-    getHealthSnapshot: vi.fn().mockReturnValue({ status: 'healthy', details: {} }),
-    shutdown: vi.fn().mockResolvedValue(undefined),
-    setDurability: vi.fn(),
-  };
-}
-
-function makeIncomingMessage(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
-  return {
-    messageId: `msg-${randomBytes(3).toString('hex')}`,
-    chatJid: '15551230008@s.whatsapp.net',
-    senderJid: '15551230008@s.whatsapp.net',
-    senderName: 'Alice',
-    content: 'hello bot',
-    contentType: 'text',
-    isFromMe: false,
-    isGroup: false,
-    mentionedJids: [],
-    timestamp: Math.floor(Date.now() / 1000),
-    quotedMessageId: null,
-    contentText: null,
-    isResponseWorthy: true,
-    ...overrides,
-  };
-}
 
 const BOT_JID = '15551230004@s.whatsapp.net';
 const BOT_LID = '81536414179557@lid';
