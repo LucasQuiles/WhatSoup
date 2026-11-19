@@ -152,9 +152,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
     exact.close();
 
     const hardenedPath = currentSchemaPath();
-    const seedHardened = new Database(hardenedPath);
-    seedHardened.open();
-    seedHardened.close();
+    openWithoutMigration70(hardenedPath).close();
     const legacy = new DatabaseSync(hardenedPath);
     rewindToLegacyHardenedSchema42(legacy);
     expect(schemaObjectHash(legacy, 'view', 'operator_catchup_delivery_proofs')).toBe(
@@ -175,8 +173,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
   it('advances an already-hardened schema 42 from its witness after live proof becomes ambiguous', () => {
     const path = currentSchemaPath();
-    const db = new Database(path);
-    db.open();
+    const db = openWithoutMigration70(path);
     const fixture = installDirectClosure(db.raw, 'hardened-in-place');
     const originalWitness = db.raw.prepare(`
       SELECT target_seq, evidence_basis, terminal_record_id, selected_op_id,
@@ -235,9 +232,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
   it('rejects an already-hardened schema 42 when a required proof object is missing', () => {
     const path = currentSchemaPath();
-    const db = new Database(path);
-    db.open();
-    db.close();
+    openWithoutMigration70(path).close();
 
     const raw = new DatabaseSync(path);
     rewindToLegacyHardenedSchema42(raw);
@@ -250,9 +245,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
   it('rejects a same-name no-op replacement for a required hardened proof trigger', () => {
     const path = currentSchemaPath();
-    const db = new Database(path);
-    db.open();
-    db.close();
+    openWithoutMigration70(path).close();
 
     const raw = new DatabaseSync(path);
     rewindToLegacyHardenedSchema42(raw);
@@ -276,8 +269,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
   it('rejects an already-hardened schema 42 with a partially closed pending group', () => {
     const path = currentSchemaPath();
-    const db = new Database(path);
-    db.open();
+    const db = openWithoutMigration70(path);
     const planId = 'plan-hardened-partial';
     const conversationKey = 'conversation-hardened-partial';
     const chatJid = 'hardened-partial@g.us';
@@ -314,9 +306,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     db.raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor, original_fulfillment_confirmed
+        reason, evidence_ref, actor
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'partial closure', 'test://hardened-partial', 'operator:test', 1)
+                'partial closure', 'test://hardened-partial', 'operator:test')
     `).run(sourceOne, planId, target.targetSeq);
     db.close();
 
@@ -330,8 +322,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
   it('rejects an already-hardened schema 42 with an unwitnessed closure', () => {
     const path = currentSchemaPath();
-    const db = new Database(path);
-    db.open();
+    const db = openWithoutMigration70(path);
     const fixture = installDirectClosure(db.raw, 'hardened-unwitnessed');
     db.close();
 
@@ -357,8 +348,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
   it('rejects an already-hardened schema 42 with an orphaned closure witness', () => {
     const path = currentSchemaPath();
-    const db = new Database(path);
-    db.open();
+    const db = openWithoutMigration70(path);
     const fixture = installDirectClosure(db.raw, 'hardened-orphan-witness');
     db.close();
 
@@ -385,8 +375,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
   it('rejects an already-hardened witness whose proof anchors belong to another target', () => {
     const path = currentSchemaPath();
-    const db = new Database(path);
-    db.open();
+    const db = openWithoutMigration70(path);
     const fixture = installDirectClosure(db.raw, 'hardened-mismatched-anchors');
     const unrelated = installDirectTarget(db.raw, {
       conversationKey: fixture.conversationKey,
@@ -595,8 +584,9 @@ describe('migration 43 upgrade from historical schema 42', () => {
     expectRolledBackSchema42(path);
   });
 
-  // Receipts a schema-42 fixture keeps: 1 to 42, plus 44 to 69, which schema42Path
-  // cannot remove (see its comment). No 43 and no 70.
+  // Receipts both schema-42 fixtures keep, the exact one and the legacy-hardened
+  // one: 1 to 42, plus 44 to 69, which a test cannot remove (see schema42Path).
+  // No 43 and no 70.
   const SCHEMA_42_FIXTURE_LEDGER = Array.from({ length: 69 }, (_, i) => i + 1)
     .filter((version) => version !== 43);
 
@@ -605,18 +595,45 @@ describe('migration 43 upgrade from historical schema 42', () => {
       .all() as Array<{ version: number }>).map((row) => Number(row.version));
   }
 
-  // What a schema-42 fixture holds: exactly the receipts above, no migration-43
-  // witness table, and no migration-70 table, trigger or column.
-  function expectSchema42Fixture(raw: DatabaseSync): void {
+  // What a schema-42 fixture holds: exactly the receipts above and no migration-70
+  // table, trigger or column. Migration 43's witness table is absent from the
+  // exact fixture and present in the legacy-hardened one.
+  function expectSchema42Fixture(raw: DatabaseSync, witnessTable: 'absent' | 'present'): void {
     expect(ledgerVersions(raw)).toEqual(SCHEMA_42_FIXTURE_LEDGER);
-    expect(raw.prepare(`
-      SELECT type, name FROM sqlite_master
-      WHERE name = 'operator_catchup_closure_witnesses'
-        OR name LIKE 'operator_catchup_resolution%'
-    `).all()).toEqual([]);
+    expect(raw.prepare(
+      "SELECT type, name FROM sqlite_master WHERE name LIKE 'operator_catchup_resolution%'",
+    ).all()).toEqual([]);
     expect(raw.prepare(
       "SELECT name FROM pragma_table_info('inbound_disposition_links') WHERE name = 'original_fulfillment_confirmed'",
     ).all()).toEqual([]);
+    expect(raw.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'operator_catchup_closure_witnesses'",
+    ).all()).toEqual(witnessTable === 'present' ? [{ name: 'operator_catchup_closure_witnesses' }] : []);
+  }
+
+  // Remove migration 70 from a current file: its receipt, its guards on
+  // pre-existing tables, its table and its column. The guards name the column,
+  // so they go first.
+  function removeMigration70(raw: DatabaseSync): void {
+    raw.exec(`
+      DELETE FROM schema_migrations WHERE version = 70;
+      DROP TRIGGER operator_catchup_resolution_outbound_immutable;
+      DROP TRIGGER operator_catchup_resolution_source_immutable;
+      DROP TRIGGER operator_catchup_resolution_no_legacy_close;
+      DROP TRIGGER operator_catchup_resolution_fulfillment_required;
+      DROP TRIGGER operator_catchup_resolution_no_corroboration;
+      DROP TABLE operator_catchup_resolutions;
+      ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed;
+    `);
+  }
+
+  // An open current file without migration 70, as `main`'s current schema was.
+  // The hardened cases write their data here, then rewind it to schema 42.
+  function openWithoutMigration70(path: string): Database {
+    const db = new Database(path);
+    db.open();
+    removeMigration70(db.raw);
+    return db;
   }
 
   /**
@@ -639,16 +656,10 @@ describe('migration 43 upgrade from historical schema 42', () => {
 
     const raw = new DatabaseSync(path);
     raw.exec('PRAGMA foreign_keys = ON');
-    // Migration 70 first, newest to oldest; its triggers go before the column they name.
+    // Newest first: migration 70, then migration 43.
+    removeMigration70(raw);
     raw.exec(`
-      DELETE FROM schema_migrations WHERE version IN (43, 70);
-      DROP TRIGGER operator_catchup_resolution_outbound_immutable;
-      DROP TRIGGER operator_catchup_resolution_source_immutable;
-      DROP TRIGGER operator_catchup_resolution_no_legacy_close;
-      DROP TRIGGER operator_catchup_resolution_fulfillment_required;
-      DROP TRIGGER operator_catchup_resolution_no_corroboration;
-      DROP TABLE operator_catchup_resolutions;
-      ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed;
+      DELETE FROM schema_migrations WHERE version = 43;
       DROP TRIGGER IF EXISTS inbound_disposition_closure_validate_insert;
       DROP TRIGGER IF EXISTS operator_catchup_closure_materialize_witness;
       DROP TRIGGER IF EXISTS operator_catchup_closed_group_reject_pending;
@@ -676,7 +687,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
             AND superseded_by_seq IS NOT NULL;
       `);
     }
-    expectSchema42Fixture(raw);
+    expectSchema42Fixture(raw, 'absent');
     raw.close();
     return path;
   }
@@ -686,6 +697,12 @@ describe('migration 43 upgrade from historical schema 42', () => {
     return join(dir, 'bot.db');
   }
 
+  /**
+   * Rewind a file from openWithoutMigration70 to a legacy-hardened schema 42:
+   * receipt 43 goes and the proof view returns to its legacy form, while
+   * migration 43's other objects stay. Like schema42Path, the result keeps
+   * migrations 44 to 69.
+   */
   function rewindToLegacyHardenedSchema42(raw: DatabaseSync): void {
     raw.prepare('DELETE FROM schema_migrations WHERE version = 43').run();
     raw.exec(`
@@ -704,6 +721,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
       GROUP BY target_seq, conversation_key, chat_jid
       HAVING COUNT(*) = 1;
     `);
+    expectSchema42Fixture(raw, 'present');
   }
 
   function canonicalObjectHashes(path: string): Record<string, string> {
@@ -783,18 +801,12 @@ describe('migration 43 upgrade from historical schema 42', () => {
       conversationKey,
       chatJid,
     }, suffix);
-    // Like the closure writer (src/core/recovery-catchup-closure.ts), name migration
-    // 70's column only in a file that recorded it: the hardened cases install here
-    // before rewinding a current file, where 70's fulfillment guard requires it.
-    const storesFulfillment = raw.prepare(
-      'SELECT 1 FROM schema_migrations WHERE version = 70',
-    ).get() !== undefined;
     raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor${storesFulfillment ? ', original_fulfillment_confirmed' : ''}
+        reason, evidence_ref, actor
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'operator catch-up completed with echoed reply', ?, ?${storesFulfillment ? ', 1' : ''})
+                'operator catch-up completed with echoed reply', ?, ?)
     `).run(sourceSeq, planId, target.targetSeq, evidenceRef, actor);
     return {
       planId,
@@ -1005,7 +1017,7 @@ describe('migration 43 upgrade from historical schema 42', () => {
       `).get() as { sql: string };
       expect(index.sql).toContain('superseded_by_seq');
       // The failed upgrade left the whole fixture as built, migration 70 included.
-      expectSchema42Fixture(raw);
+      expectSchema42Fixture(raw, 'absent');
     } finally {
       raw.close();
     }
@@ -1024,6 +1036,8 @@ describe('migration 43 upgrade from historical schema 42', () => {
       `).get()).toEqual({ name: 'operator_catchup_closure_witnesses' });
       expect(raw.prepare('PRAGMA quick_check').get()).toEqual({ quick_check: 'ok' });
       expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      // The failed upgrade left the whole fixture as built, migration 70 included.
+      expectSchema42Fixture(raw, 'present');
     } finally {
       raw.close();
     }
