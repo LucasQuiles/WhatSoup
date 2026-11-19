@@ -486,9 +486,17 @@ function validateSystemd(
     let value = m[2].trim();
     // Strip the systemd exec prefixes before the executable: `-`, `@`, `+`, `!`
     // (and `!!`), and `:`, which turns off environment variable substitution.
+    const prefixed = value;
     value = value.replace(/^[-@+!:]+/, '');
     const tokens = value.split(/\s+/).filter(Boolean);
-    if (tokens.length === 0) continue;
+    if (tokens.length === 0) {
+      // An empty value resets the command list in a drop-in; prefixes with no
+      // executable after them, such as `ExecStart=:`, run nothing.
+      if (prefixed !== '') {
+        push('non-absolute-path', `${file} ${m[1]} has exec prefixes but no executable`);
+      }
+      continue;
+    }
     const exe = tokens[0];
 
     // ExecStart[0] must be absolute or a systemd specifier (%h/.local/bin/...).

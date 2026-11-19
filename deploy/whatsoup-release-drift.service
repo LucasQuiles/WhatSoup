@@ -13,8 +13,10 @@ EnvironmentFile=%h/.config/whatsoup/bot-errors.env
 # nowhere else. ExecStart passes the wrapper that same path, character for
 # character, with --label-file. Its ":" prefix turns off the environment
 # variable substitution ("$$", "$NAME", "${NAME}") that systemd applies to
-# ExecStart arguments and not to EnvironmentFile paths, so the argument is the
-# path systemd loads, whatever %h holds. The prefix needs systemd 244 or later;
+# ExecStart arguments and not to EnvironmentFile paths. The wrapper refuses a
+# path with a character outside A-Z a-z 0-9 / . _ - or a .. component, so for
+# every path it accepts, the loaded file and the argument are one file. The
+# prefix needs systemd 244 or later;
 # an older systemd does not load this unit, so nothing runs. The wrapper uses
 # the value systemd hands it only when that file assigns the same value;
 # otherwise it exits 2, so a label set only in bot-errors.env is refused.

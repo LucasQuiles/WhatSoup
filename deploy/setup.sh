@@ -665,6 +665,13 @@ else
   # link to one, is written into, since bash adds O_EXCL only when stat finds
   # nothing.
   release_drift_env="$HOME/.config/whatsoup/release-drift.env"
+  # The wrapper refuses a label file path outside this character set (the same
+  # list, without ranges); setup reports it and goes on.
+  case "$release_drift_env" in
+    *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._-]* | */../* | */..)
+      echo "  ⚠ whatsoup-release-drift.service refuses this home folder path for its label file: $release_drift_env holds a character other than A-Z, a-z, 0-9, /, ., _ and -, or a .. component, so every run exits 2"
+      ;;
+  esac
   if [ -e "$release_drift_env" ] || [ -L "$release_drift_env" ]; then
     # A failed read warns and never ends setup (set -e), which has already
     # linked the launchers, installed the units and reloaded systemd. Only a
