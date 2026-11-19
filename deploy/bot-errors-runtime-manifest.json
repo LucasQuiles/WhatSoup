@@ -558,6 +558,19 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_submission.py",
+      "sha256": "aa022519919218180e38e9775f09179f0aef186db522eef4cdfebfdb94b15c20",
+      "mustContain": [
+        "bot-errors-submission-result/1",
+        "class MonitorSubmissionRequest",
+        "class SignalSubmissionRequest",
+        "def normalize_monitor_submission(",
+        "def normalize_signal_submission(",
+        "retained_receipt_missing",
+        "signal_identity_conflict"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/bounded_jsonl.py",
       "sha256": "1d0aae38e1c95d9c9c3e7761113a8c295a8d10e9add499161335405f29b66231",
       "mustContain": [
