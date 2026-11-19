@@ -2059,3 +2059,73 @@ The token carries only the exception class, so a single `DurableWriteError`
 covers a mode-locked receipt, a corrupted payload and a payload that is not a
 JSON object alike. Stat the file to separate them: `0600` and `0700` are
 accepted, `0640`, `0604` and `0660` are not.
+
+## OPERATIONAL — Qualified human-report preview
+
+`bot-errors-dispatcher.py --format-human-report REQUEST.json
+--human-report-approved-root DIR` is an explicit, non-emitting preview. It
+reads a `bot-errors-human-report/v2` request and requires one or more approved
+roots selected by the trusted launch configuration. An arbitrary locator does
+not grant read access: every record must be under one of those roots, local to
+the caller's host, a regular file, free of symlink traversal, at most 65,536
+bytes, and match its supplied SHA-256 before JSON is decoded. Passing a root
+only bounds which bytes this preview may read; it never conveys caller identity
+or authority, so the invoking wrapper must source the root from trusted config.
+
+On success the preview prints the rendered report on stdout and exits 0. A
+request it cannot qualify or render prints one JSON line,
+`{"outcome": "inconclusive", "reason": "<code>"}`, on stderr and exits 3; the
+reason is a stable code such as `missing_approved_evidence_root` or
+`evidence_hash_mismatch`.
+
+The request's binding contains the incident id, generation, scope (`target`,
+or `all-hosts`, which requires complete coverage) and coverage state. It names
+facts-bound `bot-errors-human-report-record/v1` records: `handling`,
+`ownership`, and, only for a recovery claim, `recovery`. Every record must
+carry the same binding. The request itself may not carry `next` or
+`readerAction`; both come only from the handling record.
+
+The handling record supplies the condition, condition ids, target, impact,
+severity, lifecycle state, next action, optional reader action, and
+owner-decision facts. Its permitted lifecycle states are `accepted`,
+`investigating`, `recovered`, `closed`, `failed`, `retained/unaccepted`,
+`waiting_approval`, `paused`, and `recovery_unverified`. It also carries the
+required `workStarted` flag: `accepted` requires it false and `investigating`
+requires it true. `closed` requires `administrativeClosure: true`, and no other
+state may carry it. `accepted` and `investigating` each require an ownership
+record with `facts.acceptance: "accepted"` and a nonblank
+`facts.ownerIdentity`; that is a consistency check over retained local bytes,
+not authenticated permission or caller identity. `open` owner decisions require
+an owner action and render it as the sole reader action. If a `readerAction` is
+also supplied, it must be byte-for-byte the same action; closed or not-required
+decisions must carry neither action. `waiting_approval` requires an open
+decision and its action.
+
+A `recovered` report also requires `facts.recoveryProof: true` plus a complete,
+passed recovery observation with nonempty verified condition ids matching the
+handling record, the matching target and scope, and a timezone-qualified
+observation time. A proof flag alone cannot claim service restoration. Severity
+is independent of handling: its icon remains critical/error/warning/info except
+for the check icon on verified recovery, the neutral administrative-closure
+icon, and the pause icon. A paused record says `Paused; recovery not verified`.
+This preview has no authenticated maintenance-authority mechanism, so a paused
+request that names a `maintenanceRecord` is refused rather than turning local
+hash-valid bytes into a maintenance claim. An arbitrary JSON field saying
+accepted is never permission or authenticated authority.
+
+The preview does not call WhatsApp, alter dispatcher configuration, select a
+fallback, or change `format_event` and send behavior. Verified local bytes and
+matching facts prove neither caller identity, phone rendering, the remediation
+agent's identity, provider acceptance, nor fallback-reader behavior; those
+remain unqualified.
+
+The optional `--human-report-max-characters` and
+`--human-report-max-utf8-bytes` are separate caller policy bounds. They do not
+claim a universal WhatsApp limit and the renderer rejects an over-limit report
+instead of truncating its required facts or evidence locator.
+
+Rendered condition, target, impact, and action fields reject controls, WhatsApp
+markup delimiters, and raw 64-hex SHA-256 values. They do not reject incidental
+words such as `Haystack`; the host-qualified evidence locator remains the exact
+verified local path and may contain Unicode or ordinary path components such as
+`stack` or `receiptsha`.
