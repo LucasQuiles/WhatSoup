@@ -213,6 +213,42 @@ describe('release-pinned launchd plists (#3829)', () => {
     expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
   });
 
+  // restart_self asks isReleasePinned first and refuses a release-pinned job
+  // before it sends or stops anything: kickstart -k would stop the running
+  // process before the launcher's boot checks run.
+  it('reports a validated release-pinned plist as release-pinned, with no launchctl call', async () => {
+    fsMocks.readFileSync.mockReturnValue(pinnedPlist(await makeRelease(releases())));
+    const { createServiceManager } = await importPlatform();
+
+    expect(createServiceManager().isReleasePinned?.('agent')).toBe(true);
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it('reports a shared-wrapper plist as not release-pinned, and its self-restart is one kickstart -k', async () => {
+    fsMocks.readFileSync.mockReturnValue(pinnedPlist(`${SERVICE_HOME}/.local/bin/whatsoup`));
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+
+    expect(manager.isReleasePinned?.('agent')).toBe(false);
+    await expect(manager.restartSelf('agent')).resolves.toBeUndefined();
+
+    expect(childProcessMocks.execFile.mock.calls.map((call) => [call[0], call[1]])).toEqual([
+      ['launchctl', ['kickstart', '-k', `gui/${currentUid()}/com.whatsoup.agent`]],
+    ]);
+  });
+
+  it('leaves an unreadable plist to restartSelf, which refuses it as before', async () => {
+    const { createServiceManager } = await importPlatform();
+    const manager = createServiceManager();
+    fsMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    });
+
+    expect(manager.isReleasePinned?.('agent')).toBe(false);
+    await expect(manager.restartSelf('agent')).rejects.toThrow('permission denied');
+    expect(childProcessMocks.execFile).not.toHaveBeenCalled();
+  });
+
   const refusals: Array<[string, () => Promise<string>]> = [
     ['the manifest is absent', async () => pinnedPlist(await makeRelease(releases(), { manifest: 'absent' }))],
     ['the manifest is a directory', async () => pinnedPlist(await makeRelease(releases(), { manifest: 'directory' }))],
@@ -279,6 +315,8 @@ describe('release-pinned launchd plists (#3829)', () => {
       const { createServiceManager } = await importPlatform();
       const manager = createServiceManager();
 
+      // Not a release this manager can confirm, so restartSelf refuses it as before.
+      expect(manager.isReleasePinned?.('agent')).toBe(false);
       await expect(manager.restartSelf('agent')).rejects.toThrow(RELEASE_REFUSAL);
       await expect(manager.stop('agent')).rejects.toThrow(RELEASE_REFUSAL);
       await expect(manager.disable('agent')).rejects.toThrow(RELEASE_REFUSAL);

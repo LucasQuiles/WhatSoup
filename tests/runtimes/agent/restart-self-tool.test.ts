@@ -200,6 +200,58 @@ describe('restart_self MCP tool', () => {
       expect(order).toEqual(['owed', 'ack', 'restartSelf']);
     });
 
+    // kickstart -k would stop a release-pinned launchd job before the launcher's
+    // boot checks run, so the job is refused before anything is sent or stopped.
+    it('refuses a release-pinned job before the owed reply, the ack, the marker and restartSelf', async () => {
+      const restartSelf = vi.fn(async (_name: string) => {});
+      const isReleasePinned = vi.fn((_name: string) => true);
+      const { deps: d, sendAck, deliverOwedReply } = deps({
+        instanceName: 'bot-a',
+        dataRoot,
+        trigger: triggerSelfRestart,
+        serviceManager: { restartSelf, isReleasePinned },
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'load merged main', code: 'redeploy' }, SESSION);
+
+      expect(isReleasePinned).toHaveBeenCalledWith('bot-a');
+      expect(result).toEqual({
+        ok: false,
+        restarting: false,
+        reason: 'load merged main',
+        code: 'redeploy',
+        cause: 'release_pinned',
+        text: 'Restart not started: this job is release-pinned, so the service was not restarted for: load merged main. Restart a release-pinned job through the release procedure.',
+      });
+      expect(deliverOwedReply).not.toHaveBeenCalled();
+      expect(sendAck).not.toHaveBeenCalled();
+      expect(restartSelf).not.toHaveBeenCalled();
+      expect(existsSync(join(dataRoot, 'intentional-restart.marker'))).toBe(false);
+    });
+
+    it('keeps the owed reply, ack, marker and restartSelf order for a job that is not release-pinned', async () => {
+      const order: string[] = [];
+      const marker = join(dataRoot, 'intentional-restart.marker');
+      const { deps: d } = deps({
+        dataRoot,
+        trigger: triggerSelfRestart,
+        deliverOwedReply: vi.fn(async (): Promise<OwedReplyDelivery> => { order.push('owed'); return { delivered: true }; }),
+        sendAck: vi.fn(async () => { order.push('ack'); }),
+        serviceManager: {
+          isReleasePinned: vi.fn(() => { order.push('release-pinned check'); return false; }),
+          restartSelf: vi.fn(async () => {
+            order.push(existsSync(marker) ? 'marker' : 'no marker');
+            order.push('restartSelf');
+          }),
+        },
+      });
+
+      const result = await buildRestartSelfTool(d).handler({ reason: 'r' }, SESSION);
+
+      expect(result).toMatchObject({ ok: true, restarting: true });
+      expect(order).toEqual(['release-pinned check', 'owed', 'ack', 'marker', 'restartSelf']);
+    });
+
     // #3829: an unconfirmed owed reply must stop the restart — no ack, no
     // marker, no restartSelf — so the shutdown cannot destroy or orphan it.
     function expectRestartNotStarted(
