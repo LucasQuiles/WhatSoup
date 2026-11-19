@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { createContext, runInContext, type Context } from 'node:vm';
 
 // Black-box tests of the standalone console unlock helper. Each test runs the
 // helper as a child process with a temporary HOME. The CDP endpoint is either a
@@ -109,7 +110,12 @@ function runHelperAsync(env: NodeJS.ProcessEnv): Promise<HelperRun> {
   });
 }
 
-// --- Minimal CDP stand-in: GET /json plus one WebSocket per page target. ---
+// --- CDP stand-in: GET /json, PUT /json/new and one WebSocket per page target.
+// It keeps the tab's live document and runs every Runtime.evaluate expression
+// and the unlock function in a node:vm context made from that document as it
+// is at that moment, with a fetch that records each page request. A test can
+// move the document at a chosen step, as a navigation the helper did not
+// cause would. ---
 
 interface CdpTab {
   id: string;
@@ -121,8 +127,30 @@ interface MockCdpConfig {
   lists: CdpTab[][];
   /** Answer of the page's own POST /api/auth-ticket probe. */
   authTicket: 'valid' | 'locked';
-  /** Answer to a bare `location.origin === ...` check (not the readiness check). */
-  liveOriginMatches?: boolean;
+  /** Live document when the helper connects; default: the connected tab's URL. */
+  liveUrl?: string;
+  /** The live document moves to settleUrl after this many expression evaluations. */
+  settleAfter?: number;
+  settleUrl?: string;
+  /** The live document moves here right after the session probe is answered. */
+  moveAfterProbe?: string;
+  /** The live document moves here when the helper asks for `window`. */
+  moveOnWindow?: string;
+  /** The page's unlock request rejects with this text. */
+  unlockFetchError?: string;
+  /** The unlock call throws in the page with this text. */
+  unlockException?: string;
+}
+
+interface PageRequest {
+  /** The URL exactly as the page code passed it to fetch. */
+  url: string;
+  path: string;
+  method: string;
+  authorization: string | null;
+  mode: string | null;
+  /** The live document the request was made from. */
+  documentUrl: string;
 }
 
 interface MockCdpRecord {
@@ -132,6 +160,12 @@ interface MockCdpRecord {
   tokensSent: unknown[];
   /** Every text frame the helper sent. */
   frames: string[];
+  /** Every fetch the page made. */
+  requests: PageRequest[];
+  /** URLs the helper asked PUT /json/new to open. */
+  newTabs: string[];
+  /** URLs passed to Page.navigate. */
+  navigations: string[];
 }
 
 interface MockCdp {
@@ -144,21 +178,108 @@ interface MockCdp {
 interface CdpMessage {
   id: number;
   method: string;
-  params?: { expression?: string; arguments?: Array<{ value?: unknown }> };
+  params?: {
+    expression?: string;
+    url?: string;
+    objectId?: string;
+    functionDeclaration?: string;
+    arguments?: Array<{ value?: unknown }>;
+  };
 }
 
-function answerCdp(config: MockCdpConfig, record: MockCdpRecord, message: CdpMessage): unknown {
-  if (message.method === 'Runtime.callFunctionOn') {
-    record.tokensSent.push(message.params?.arguments?.[0]?.value);
-    return { result: { value: 'unlocked' } };
+interface LiveDocument {
+  url: string;
+  /** Raised on every move; the window object id names it. */
+  generation: number;
+  evaluations: number;
+  moves: Set<string>;
+}
+
+type CdpAnswer = { result: unknown } | { error: { code: number; message: string } };
+
+interface PageFetchInit {
+  method?: string;
+  headers?: Record<string, string>;
+  mode?: string;
+}
+
+function pageContext(live: LiveDocument, config: MockCdpConfig, record: MockCdpRecord): Context {
+  const documentUrl = live.url;
+  const location = new URL(documentUrl);
+  const pageFetch = (input: unknown, init: PageFetchInit = {}): Promise<{ ok: boolean; status: number }> => {
+    let path: string;
+    try {
+      path = new URL(String(input), documentUrl).pathname;
+    } catch {
+      return Promise.reject(new Error('bad request URL'));
+    }
+    record.requests.push({
+      url: String(input),
+      path,
+      method: init.method ?? 'GET',
+      authorization: init.headers?.Authorization ?? null,
+      mode: init.mode ?? null,
+      documentUrl,
+    });
+    if (path === '/api/auth-ticket') {
+      return Promise.resolve(config.authTicket === 'valid' ? { ok: true, status: 200 } : { ok: false, status: 401 });
+    }
+    if (config.unlockFetchError) return Promise.reject(new Error(config.unlockFetchError));
+    return Promise.resolve({ ok: true, status: 200 });
+  };
+  return createContext({
+    location: { origin: location.origin, href: location.href, pathname: location.pathname },
+    document: { readyState: 'complete' },
+    fetch: pageFetch,
+  });
+}
+
+function moveOnce(live: LiveDocument, key: string, url: string | undefined): void {
+  if (url === undefined || live.moves.has(key)) return;
+  live.moves.add(key);
+  live.url = url;
+  live.generation += 1;
+}
+
+async function answerCdp(live: LiveDocument, config: MockCdpConfig, record: MockCdpRecord, message: CdpMessage): Promise<CdpAnswer> {
+  const params = message.params ?? {};
+  if (message.method === 'Page.navigate') {
+    record.navigations.push(String(params.url));
+    live.url = String(params.url);
+    live.generation += 1;
+    return { result: {} };
   }
-  if (message.method !== 'Runtime.evaluate') return {};
-  const expression = message.params?.expression ?? '';
-  if (expression === 'window') return { result: { objectId: 'window-object' } };
-  if (expression.includes('document.readyState')) return { result: { value: true } };
-  if (expression.includes('/api/auth-ticket')) return { result: { value: config.authTicket } };
-  if (expression.includes('location.origin')) return { result: { value: config.liveOriginMatches ?? true } };
-  return { result: {} };
+  if (message.method === 'Runtime.callFunctionOn') {
+    const values = (params.arguments ?? []).map((argument) => argument.value);
+    record.tokensSent.push(values[0]);
+    // As in a browser, a window object of an earlier document is gone.
+    if (params.objectId !== `window-${live.generation}`) {
+      return { error: { code: -32000, message: 'Cannot find context with specified id' } };
+    }
+    if (config.unlockException) {
+      const text = config.unlockException;
+      return { result: { result: { type: 'object' }, exceptionDetails: { text, exception: { description: text } } } };
+    }
+    const context = pageContext(live, config, record);
+    const unlock = runInContext(`(${params.functionDeclaration ?? ''})`, context) as (...args: unknown[]) => unknown;
+    return { result: { result: { value: await unlock.apply(context, values) } } };
+  }
+  if (message.method !== 'Runtime.evaluate') return { result: {} };
+  const expression = params.expression ?? '';
+  if (expression === 'window') {
+    moveOnce(live, 'window', config.moveOnWindow);
+    return { result: { result: { type: 'object', objectId: `window-${live.generation}` } } };
+  }
+  live.evaluations += 1;
+  if (live.evaluations > (config.settleAfter ?? 0)) moveOnce(live, 'settle', config.settleUrl);
+  let value: unknown;
+  try {
+    value = await runInContext(expression, pageContext(live, config, record));
+  } catch (error) {
+    return { result: { result: { type: 'undefined' }, exceptionDetails: { text: String(error) } } };
+  }
+  if (expression.includes('/api/auth-ticket')) moveOnce(live, 'probe', config.moveAfterProbe);
+  return { result: { result: { value } } };
 }
 
 function sendFrame(socket: Duplex, value: unknown): void {
@@ -200,32 +321,46 @@ function readClientFrames(reader: FrameReader, chunk: Buffer, onText: (text: str
 }
 
 async function startMockCdp(configure: (origin: string) => MockCdpConfig): Promise<MockCdp> {
-  const record: MockCdpRecord = { connectionPaths: [], tokensSent: [], frames: [] };
+  const record: MockCdpRecord = { connectionPaths: [], tokensSent: [], frames: [], requests: [], newTabs: [], navigations: [] };
   const sockets = new Set<Duplex>();
+  const tabUrls = new Map<string, string>();
+  const live: LiveDocument = { url: 'about:blank', generation: 0, evaluations: 0, moves: new Set() };
   let config: MockCdpConfig = { lists: [], authTicket: 'valid' };
   let listRequests = 0;
   let port = 0;
+  const tabJson = (tab: CdpTab) => ({
+    id: tab.id,
+    type: 'page',
+    url: tab.url,
+    webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${tab.id}`,
+  });
 
   const server = createServer((request, response) => {
-    if (request.url !== '/json') {
+    const url = request.url ?? '';
+    if (url.startsWith('/json/new?')) {
+      // A new tab reports about:blank until the helper navigates it.
+      record.newTabs.push(decodeURIComponent(url.slice('/json/new?'.length)));
+      tabUrls.set('new', 'about:blank');
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify(tabJson({ id: 'new', url: 'about:blank' })));
+      return;
+    }
+    if (url !== '/json') {
       response.writeHead(404).end();
       return;
     }
     const list = config.lists[Math.min(listRequests, config.lists.length - 1)] ?? [];
     listRequests += 1;
+    for (const tab of list) if (!tabUrls.has(tab.id)) tabUrls.set(tab.id, tab.url);
     response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify(list.map((tab) => ({
-      id: tab.id,
-      type: 'page',
-      url: tab.url,
-      webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${tab.id}`,
-    }))));
+    response.end(JSON.stringify(list.map(tabJson)));
   });
   server.on('connection', (socket) => { sockets.add(socket); });
   server.on('upgrade', (request, socket, head) => {
     sockets.add(socket);
     socket.on('error', () => undefined);
     record.connectionPaths.push(request.url ?? '');
+    live.url = config.liveUrl ?? tabUrls.get((request.url ?? '').split('/').pop() ?? '') ?? 'about:blank';
     const key = String(request.headers['sec-websocket-key'] ?? '');
     const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
@@ -236,7 +371,7 @@ async function startMockCdp(configure: (origin: string) => MockCdpConfig): Promi
       (text) => {
         record.frames.push(text);
         const message = JSON.parse(text) as CdpMessage;
-        sendFrame(socket, { id: message.id, result: answerCdp(config, record, message) });
+        void answerCdp(live, config, record, message).then((answer) => sendFrame(socket, { id: message.id, ...answer }));
       },
       () => socket.end(),
     );
@@ -261,6 +396,10 @@ async function startMockCdp(configure: (origin: string) => MockCdpConfig): Promi
 
 function cdpEnv(cdp: MockCdp, overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
   return helperEnv({ CDP_PORT: String(cdp.port), FLEET: cdp.origin, ...overrides });
+}
+
+function unlockRequests(cdp: MockCdp): PageRequest[] {
+  return cdp.record.requests.filter((request) => request.path === '/api/console-session');
 }
 
 beforeEach(() => {
@@ -443,11 +582,34 @@ describe('whatsoup-console-unlock.mjs fleet-token file checks', () => {
 });
 
 describe('whatsoup-console-unlock.mjs fleet target', () => {
-  it('refuses a FLEET URL whose host is not loopback before contacting CDP', () => {
+  it('accepts an https FLEET on a configured remote host and plain http on any loopback address', () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
 
+    for (const fleetUrl of [
+      'https://console.example.invalid',
+      'https://console.example.invalid:8443/agents/',
+      'http://127.0.0.2:9227',
+      'http://[::1]:9227',
+      'http://localhost.:9227',
+    ]) {
+      expectPastTokenRead(runHelper({ FLEET: fleetUrl }));
+    }
+  });
+
+  it('refuses a plain-http FLEET on a host that is not loopback before contacting CDP', () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+
+    // The root token would cross the network unencrypted.
     expect(runHelper({ FLEET: 'http://localhost.example.invalid:9227/agents' }))
-      .toEqual({ status: 1, stdout: 'invalid-fleet-url\n', stderr: '' });
+      .toEqual({ status: 1, stdout: 'insecure-fleet-url\n', stderr: '' });
+  });
+
+  it('refuses a FLEET that is not an http or https URL', () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+
+    for (const fleetUrl of ['not a url', 'file:///fleet', 'data:text/html,fleet']) {
+      expect(runHelper({ FLEET: fleetUrl })).toEqual({ status: 1, stdout: 'invalid-fleet-url\n', stderr: '' });
+    }
   });
 
   it('refuses a CDP_PORT that is not a port number', () => {
@@ -522,19 +684,132 @@ describe('whatsoup-console-unlock.mjs fleet target', () => {
     }
   });
 
-  it('withholds the token when the live document left the fleet origin before the unlock', async () => {
+  it('withholds the token from a document that left the fleet origin after the session probe', async () => {
     writeTokenFile(join(configDir, 'fleet-tokens.json'));
     const cdp = await startMockCdp((origin) => ({
       lists: [[{ id: 'fleet', url: `${origin}/` }]],
       authTicket: 'locked',
-      liveOriginMatches: false,
+      moveAfterProbe: 'http://example.invalid/',
     }));
     try {
       const result = await runHelperAsync(cdpEnv(cdp));
 
       expect(result).toEqual({ status: 1, stdout: 'origin-mismatch\n', stderr: '' });
+      // The check before the unlock call stops it: the token never reaches the page.
       expect(cdp.record.tokensSent).toEqual([]);
       expect(cdp.record.frames.join('\n')).not.toContain(FILE_TOKEN);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('opens and navigates a new tab to the FLEET path with one trailing slash', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    for (const fleetPath of ['/agents', '/agents/']) {
+      const cdp = await startMockCdp((origin) => ({
+        // No tab is open; once the helper opens one, CDP lists it on the target.
+        lists: [[], [{ id: 'new', url: `${origin}/agents/` }]],
+        authTicket: 'locked',
+      }));
+      try {
+        const result = await runHelperAsync(cdpEnv(cdp, { FLEET: `${cdp.origin}${fleetPath}` }));
+
+        expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
+        expect(cdp.record.newTabs).toEqual([`${cdp.origin}/agents/`]);
+        expect(cdp.record.navigations).toEqual([`${cdp.origin}/agents/`]);
+        expect(cdp.record.connectionPaths).toEqual(['/devtools/page/new']);
+        expect(cdp.record.tokensSent).toEqual([FILE_TOKEN]);
+      } finally {
+        await cdp.close();
+      }
+    }
+  });
+
+  it('waits until the live document is on the FLEET path, not only on the fleet origin', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      // CDP already reports the target while an earlier page of the same origin is live.
+      lists: [[{ id: 'fleet', url: `${origin}/agents` }]],
+      authTicket: 'locked',
+      liveUrl: `${origin}/other`,
+      settleAfter: 4,
+      settleUrl: `${origin}/agents/`,
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp, { FLEET: `${cdp.origin}/agents` }));
+
+      expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
+      expect(unlockRequests(cdp).map((request) => request.documentUrl)).toEqual([`${cdp.origin}/agents/`]);
+    } finally {
+      await cdp.close();
+    }
+  });
+});
+
+describe('whatsoup-console-unlock.mjs unlock call', () => {
+  const PAGE_TEXT = 'page-error-canary';
+
+  it('sends the unlock request to the absolute fleet endpoint in same-origin mode', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({ lists: [[{ id: 'fleet', url: `${origin}/agents/` }]], authTicket: 'locked' }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp, { FLEET: `${cdp.origin}/agents` }));
+
+      expect(result).toEqual({ status: 0, stdout: 'unlocked\n', stderr: '' });
+      expect(unlockRequests(cdp)).toEqual([{
+        url: `${cdp.origin}/api/console-session`,
+        path: '/api/console-session',
+        method: 'POST',
+        authorization: `Bearer ${FILE_TOKEN}`,
+        mode: 'same-origin',
+        documentUrl: `${cdp.origin}/agents/`,
+      }]);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('sends nothing when the document changes between the last check and the unlock call', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      lists: [[{ id: 'fleet', url: `${origin}/` }]],
+      authTicket: 'locked',
+      // A navigation commits after the last check, before the helper asks for window.
+      moveOnWindow: 'http://example.invalid/',
+    }));
+    try {
+      const result = await runHelperAsync(cdpEnv(cdp));
+
+      expect(result).toEqual({ status: 1, stdout: 'origin-mismatch\n', stderr: '' });
+      expect(unlockRequests(cdp)).toEqual([]);
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('prints a fixed outcome, not the page error text, when the unlock request fails', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      lists: [[{ id: 'fleet', url: `${origin}/` }]],
+      authTicket: 'locked',
+      unlockFetchError: PAGE_TEXT,
+    }));
+    try {
+      expect(await runHelperAsync(cdpEnv(cdp))).toEqual({ status: 1, stdout: 'unlock-exc\n', stderr: '' });
+    } finally {
+      await cdp.close();
+    }
+  });
+
+  it('prints a fixed outcome, not the page exception text, when the unlock call throws', async () => {
+    writeTokenFile(join(configDir, 'fleet-tokens.json'));
+    const cdp = await startMockCdp((origin) => ({
+      lists: [[{ id: 'fleet', url: `${origin}/` }]],
+      authTicket: 'locked',
+      unlockException: PAGE_TEXT,
+    }));
+    try {
+      expect(await runHelperAsync(cdpEnv(cdp))).toEqual({ status: 1, stdout: 'err:unlock-exception\n', stderr: '' });
     } finally {
       await cdp.close();
     }
