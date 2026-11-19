@@ -138,12 +138,18 @@ async function manifestCommit(root: string, fs: ToolCommitFs, deadline: Deadline
   }
 }
 
-async function checkoutCommit(
+/**
+ * The HEAD of the work tree whose top level IS `root` (compared by realpath),
+ * asked with the clean git environment; null for any other answer.
+ * release:activate-host resolves a manifestless old release with it
+ * (host-unit-plan.ts), where no tool-wide deadline applies.
+ */
+export async function checkoutCommit(
   root: string,
   exec: ToolCommitExec,
-  fs: ToolCommitFs,
-  timeoutMs: number,
-  deadline: Deadline,
+  fs = DEFAULT_FS,
+  timeoutMs = TOOL_COMMIT_TIMEOUT_MS,
+  deadline: Deadline = { expired: false },
 ): Promise<string | null> {
   try {
     live(deadline);

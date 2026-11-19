@@ -95,8 +95,8 @@ describe('static handler confines served files to distDir (#2291 M11)', () => {
     expect(res.body).toContain('app');
   });
 
-  it('still serves the SPA fallback for an extensionless route', async () => {
-    const res = await get('/some/client/route');
+  it('still serves a declared SPA route after rejecting escaped symlinks', async () => {
+    const res = await get('/metrics');
     expect(res.status).toBe(200);
     expect(res.body).toContain('app');
   });
