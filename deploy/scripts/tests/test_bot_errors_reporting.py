@@ -456,6 +456,60 @@ def test_ordinary_unicode_text_still_renders(tmp_path: Path) -> None:
     assert f"*Queue delivery delayed — {target}*" in rendered
 
 
+# Characters that render as nothing, as escapes so the bytes stay reviewable.
+_INVISIBLE_CHARACTERS = (
+    "­",  # soft hyphen
+    "᠎",  # Mongolian vowel separator
+    "​", "‌", "‍",  # zero width space, non-joiner, joiner
+    "⁠",  # word joiner
+    "﻿",  # zero width no-break space
+    "᠋", "️", "\U000e0100",  # variation selectors
+    "\U000e0041",  # a tag character
+)
+
+
+@pytest.mark.parametrize("character", _INVISIBLE_CHARACTERS, ids=lambda character: f"U+{ord(character):04X}")
+def test_a_field_made_only_of_invisible_characters_counts_as_missing(tmp_path: Path, character: str) -> None:
+    # Spaces and this character alone would render an empty "Next:" line.
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(next=f" {character}{character} "))
+    with pytest.raises(reporting.ReportQualificationError, match="missing_next"):
+        _qualify(document, tmp_path)
+
+
+_WITHOUT_ORDINARY_USE = (
+    "﻿",  # zero width no-break space
+    "᠎",  # Mongolian vowel separator
+    "\U000e0001", "\U000e0020", "\U000e0041", "\U000e007f",  # tag characters: first, space, letter, cancel
+)
+
+
+@pytest.mark.parametrize("character", _WITHOUT_ORDINARY_USE, ids=lambda character: f"U+{ord(character):04X}")
+def test_characters_without_ordinary_use_are_refused_in_text_and_locators(tmp_path: Path, character: str) -> None:
+    # Inside otherwise visible text, where only the refusal rule can catch it.
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(target=f"host-a{character} queue"))
+    with pytest.raises(reporting.ReportQualificationError, match="unsafe_target"):
+        _qualify(document, tmp_path)
+
+    document = _document(tmp_path / "locator")
+    document["handlingRecord"] = _record(
+        tmp_path / "locator" / f"handling-{character}.json", kind="handling", binding=_binding(), facts=_handling_facts(),
+    )
+    with pytest.raises(reporting.ReportQualificationError, match="locator_control_character"):
+        _qualify(document, tmp_path / "locator")
+
+
+def test_joiners_and_variation_selectors_stay_accepted_inside_visible_text(tmp_path: Path) -> None:
+    # Emoji and ideographic variation sequences need U+200D and the variation
+    # selectors; soft hyphen and non-joiner stay accepted beside visible text.
+    target = "host-a queue ❤️ \U0001F469‍\U0001F4BB 葛\U000e0100 re­try می‌خواهم"
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(target=target))
+    rendered = reporting.render_human_report(_qualify(document, tmp_path))
+    assert f"*Queue delivery delayed — {target}*" in rendered
+
+
 # Every case below that starts the dispatcher does so in a child interpreter
 # running _DISPATCHER_PROBE, in the environment that _dispatcher_env builds.
 # What is isolated, exactly:
