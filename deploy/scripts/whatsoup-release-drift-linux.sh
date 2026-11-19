@@ -38,15 +38,14 @@ export WHATSOUP_RELEASE_DRIFT_LOG_DIR="${WHATSOUP_RELEASE_DRIFT_LOG_DIR:-$HOME/.
 
 # The BOT ERRORS instance label of this host's release alerts and clears. systemd
 # is the only parser of its value: the label is WHATSOUP_RELEASE_DRIFT_INSTANCE as
-# systemd hands it over, and it is used only when the label file,
-# .config/whatsoup/release-drift.env in the home folder the user database names
-# for this user, assigns that same value. Otherwise the run exits 2: no label
+# systemd hands it over, and it is used only when the label file named by the
+# only argument assigns that same value. Otherwise the run exits 2: no label
 # file, a file that cannot be read, no assignment there, or a different value.
 # The unit also loads bot-errors.env, which every BOT ERRORS unit loads, so a
 # label set only there is refused, and a value this reader takes differently
-# from systemd ends in a refusal, never in another label. WHATSOUP_INSTANCE is
-# never read: bot-errors.env, the user manager or a drop-in can set it for other
-# units and per-instance agent state.
+# from systemd ends in a refusal unless both readings are equal.
+# WHATSOUP_INSTANCE is never read: bot-errors.env, the user manager or a drop-in
+# can set it for other units and per-instance agent state.
 
 # The last assignment of a key in an environment file, read as systemd reads
 # the ordinary forms. deploy/setup.sh holds the same function.
@@ -71,21 +70,13 @@ read_env_label() {
   ' "$1"
 }
 
-# The home folder the user database names for this user. systemd's %h is the
-# user manager's own HOME, which a manager started from the user database takes
-# from there and which no unit setting changes; the HOME of this run can come
-# from bot-errors.env or a drop-in. There is no fallback to HOME.
-database_home() {
-  local entry name password uid gid gecos home shell
-  entry="$(getent passwd "$(id -u)")" || return 1
-  IFS=: read -r name password uid gid gecos home shell <<<"$entry"
-  [[ "$home" == /* ]] || return 1
-  printf '%s\n' "$home"
-}
-
-DATABASE_HOME="$(database_home)" \
-  || fail "cannot find this user's home folder in the user database (getent passwd)"
-LABEL_FILE="$DATABASE_HOME/.config/whatsoup/release-drift.env"
+# The label file is the only argument. The unit passes
+# %h/.config/whatsoup/release-drift.env, the specifier and path of its own
+# EnvironmentFile line, so both name the file systemd loaded. bot-errors.env or
+# a drop-in can change HOME but not this argument; there is no default.
+[ "$#" -eq 1 ] && [[ "$1" == /* ]] \
+  || fail "pass the label file as the only argument, an absolute path, as whatsoup-release-drift.service passes %h/.config/whatsoup/release-drift.env"
+LABEL_FILE="$1"
 ENV_LABEL="${WHATSOUP_RELEASE_DRIFT_INSTANCE:-}"
 ignored=""
 [ -z "$ENV_LABEL" ] || ignored=" (the value in the environment is ignored: bot-errors.env can set it)"
