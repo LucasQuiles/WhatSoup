@@ -4,8 +4,9 @@ import path from 'node:path';
 /**
  * Write a getent stand-in to `dir` that answers `getent passwd <this uid>` with an
  * entry whose home folder is `home`, and fails for anything else or when `home`
- * is null. With `dir` first in PATH, the Linux release-drift wrapper finds the
- * home folder of its label file without the host's user database.
+ * is null. The Linux release-drift wrapper looks nothing up: a test puts `dir`
+ * first in PATH to show that such a getent does not change which label file the
+ * wrapper reads.
  */
 export function writeGetentShim(dir: string, home: string | null): void {
   const shim = path.join(dir, 'getent');

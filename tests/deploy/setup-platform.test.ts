@@ -147,7 +147,7 @@ const releaseDriftWrapper = 'whatsoup-release-drift-linux.sh';
 // The migration warning for a label still set as WHATSOUP_INSTANCE, and the command it prints.
 const oldLabelWarning = 'no longer reads WHATSOUP_INSTANCE';
 // The warning for a label set in the shared file that every BOT ERRORS unit loads.
-const sharedFileLabelWarning = 'bot-errors.env sets WHATSOUP_RELEASE_DRIFT_INSTANCE, which is not read for the label';
+const sharedFileLabelWarning = 'bot-errors.env contains WHATSOUP_RELEASE_DRIFT_INSTANCE, which is not read for the label';
 // The one neutral instruction after the label warnings; setup never names an instance to copy.
 const labelInstruction = "Choose the instance this host's bot runs as";
 
@@ -187,7 +187,11 @@ function fakeObservedRelease(): { launcher: string; argsFile: string } {
  * ExecStart. The launcher points at a fake release, so nothing is observed or
  * emitted. Only column-1 KEY=VALUE lines are loaded, a subset of systemd's
  * parser, so quoted, indented or spaced assignments are tested on the wrapper
- * directly. ExecStart is split on whitespace into the program and its arguments.
+ * directly. ExecStart runs as systemd runs it: the line is split into words
+ * first and %h is expanded in each word, so a home with a space stays one
+ * argument. Unless the executable carries the ":" prefix, systemd then also
+ * substitutes environment variables in the arguments; this harness applies only
+ * the "$$" to "$" part of that, enough to show a home whose name holds "$$".
  */
 function runInstalledReleaseDriftUnit(home: string, launcher: string, managerEnv: NodeJS.ProcessEnv = {}) {
   const unitFile = path.join(home, '.config', 'systemd', 'user', 'whatsoup-release-drift.service');
@@ -204,9 +208,15 @@ function runInstalledReleaseDriftUnit(home: string, launcher: string, managerEnv
       }
     }
     const exec = /^ExecStart=(.+)$/.exec(line);
-    if (exec) execStart = exec[1].split('%h').join(home);
+    if (exec) execStart = exec[1];
   }
-  const [program, ...args] = execStart.split(/\s+/);
+  const [executable, ...words] = execStart.split(/\s+/).filter(Boolean);
+  const substitutes = !executable.startsWith(':');
+  const program = executable.replace(/^:/, '').split('%h').join(home);
+  const args = words.map((word) => {
+    const expanded = word.split('%h').join(home);
+    return substitutes ? expanded.split('$$').join('$') : expanded;
+  });
   return spawnSync(program, args, { encoding: 'utf8', env: { ...env, WHATSOUP_LAUNCHER: launcher } });
 }
 
@@ -697,6 +707,29 @@ describe('deploy/setup.sh platform portability', () => {
     expect(fs.readFileSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'), 'utf8'))
       .not.toMatch(/^WHATSOUP_(RELEASE_DRIFT_)?INSTANCE=/m);
     expect(result.stdout).toContain('systemctl --user enable --now whatsoup-release-drift.timer');
+
+    const release = fakeObservedRelease();
+    const observed = runInstalledReleaseDriftUnit(home, release.launcher);
+    expect(observed.status, observed.stderr).toBe(0);
+    const args = fs.readFileSync(release.argsFile, 'utf8').trim().split('\n');
+    expect(args[args.indexOf('--instance') + 1]).toBe('bot-a');
+  });
+
+  it.each([
+    ['"$$" in its name', 'agent$$'],
+    ['a space in its name', 'agent home'],
+  ])('the installed release-drift unit hands the wrapper the label file its EnvironmentFile line loads, for a home with %s', (_name, folder) => {
+    // systemd substitutes "$$" to "$" in ExecStart arguments, not in an
+    // EnvironmentFile path, unless the executable carries the ":" prefix.
+    const home = path.join(makeTempRoot('whatsoup-unit-home-'), folder);
+    const unitDir = path.join(home, '.config', 'systemd', 'user');
+    const configDir = path.join(home, '.config', 'whatsoup');
+    const binDir = path.join(home, '.local', 'bin');
+    for (const dir of [unitDir, configDir, binDir]) fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, 'deploy', 'whatsoup-release-drift.service'), path.join(unitDir, 'whatsoup-release-drift.service'));
+    fs.symlinkSync(path.join(repoRoot, 'deploy', 'scripts', releaseDriftWrapper), path.join(binDir, releaseDriftWrapper));
+    fs.writeFileSync(path.join(configDir, 'bot-errors.env'), '');
+    fs.writeFileSync(path.join(configDir, 'release-drift.env'), 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n');
 
     const release = fakeObservedRelease();
     const observed = runInstalledReleaseDriftUnit(home, release.launcher);

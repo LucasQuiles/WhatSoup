@@ -176,14 +176,16 @@ describe('whatsoup-release-drift systemd unit', () => {
     ]);
   });
 
-  it('passes the wrapper, with --label-file, the path its EnvironmentFile line loads, character for character', () => {
+  it('passes the wrapper, with --label-file, the path its EnvironmentFile line loads, character for character, with substitution off', () => {
     // systemd resolves the one specifier for both lines, so the wrapper reads the
-    // file systemd loaded; bot-errors.env can change HOME or PATH but not an argument.
+    // file systemd loaded; bot-errors.env can change HOME or PATH but not an
+    // argument. The ":" prefix turns off the "$" substitution systemd applies to
+    // ExecStart arguments and not to EnvironmentFile paths.
     const unit = readFileSync(unitPath, 'utf8');
     const labelFile = /^EnvironmentFile=-(.*\/release-drift\.env)$/m.exec(unit)?.[1];
     expect(labelFile).toBe('%h/.config/whatsoup/release-drift.env');
     const execStart = /^ExecStart=(.*)$/m.exec(unit)?.[1].split(/\s+/) ?? [];
-    expect(execStart).toEqual(['%h/.local/bin/whatsoup-release-drift-linux.sh', '--label-file', labelFile]);
+    expect(execStart).toEqual([':%h/.local/bin/whatsoup-release-drift-linux.sh', '--label-file', labelFile]);
     expect(execStart[2] === labelFile).toBe(true);
   });
 

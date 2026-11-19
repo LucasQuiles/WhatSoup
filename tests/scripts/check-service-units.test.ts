@@ -273,6 +273,25 @@ ExecStart=%h/.local/bin/whatsoup-reply-guarantee-drain
     expect(codes(dir)).toEqual([]);
   });
 
+  it('accepts the ":" exec prefix, which turns off environment substitution, before a specifier path', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+Type=oneshot
+ExecStart=:%h/.local/bin/whatsoup-release-drift-linux.sh --label-file %h/.config/whatsoup/release-drift.env
+`,
+    });
+    expect(codes(dir)).toEqual([]);
+  });
+
+  it('still fails a relative executable behind the ":" exec prefix', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+ExecStart=:relative/bin/whatsoup-release-drift-linux.sh
+`,
+    });
+    expect(codes(dir)).toContain('non-absolute-path');
+  });
+
   it('fails a systemd unit that execs bare homebrew node', () => {
     const dir = makeRepo({
       'whatsoup-fleet.service': `[Unit]
