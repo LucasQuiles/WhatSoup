@@ -885,6 +885,12 @@ export interface ServiceManager {
    * run in the caller. Restarts issued from another process use restart().
    */
   restartSelf(name: string): Promise<void>;
+  /**
+   * True only when the job's plist on disk is a validated release-pinned
+   * launchd plist. restart_self asks this first and refuses such a job before
+   * it sends or stops anything.
+   */
+  isReleasePinned?(name: string): boolean;
   /** Fire-and-forget start with optional error callback (used in auth flow). */
   startFire(name: string, onError?: (err: Error | null) => void): void;
   /** Optional auth teardown hook; false means there was no job to restore after a failed pairing. */
@@ -1102,12 +1108,32 @@ class LaunchdServiceManager extends BaseServiceManager {
   }
 
   /**
+   * kickstart -k stops this process before the launcher's boot checks run, so a
+   * release-pinned job that cannot boot again would stay down. restart_self
+   * refuses such a job on this answer. Any other plist is left to restartSelf(),
+   * which refuses an absent, unowned or unreadable one before any launchctl call.
+   */
+  isReleasePinned(name: string): boolean {
+    if (!isValidInstanceName(name)) return false;
+    let contents: string | null;
+    try {
+      contents = readExistingLaunchdPlist(plistPath(name));
+    } catch {
+      // intentional: restartSelf() reads the plist again and refuses an unreadable one.
+      return false;
+    }
+    return contents !== null && isReleasePinnedLaunchdPlist(name, contents);
+  }
+
+  /**
    * #3829: restart() boots out the job and then bootstraps it from the calling
    * process. Called from inside the job, the bootout terminates the caller, so
    * the bootstrap never runs and the job stays unloaded (KeepAlive does not
    * apply to an unloaded job). `kickstart -k` asks launchd to kill and relaunch
    * the loaded job itself; the caller issues nothing after it. There is no
    * bootstrap fallback: an absent job means this process is not that job.
+   * restart_self asks isReleasePinned() first and never calls this for a
+   * release-pinned job.
    */
   async restartSelf(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);

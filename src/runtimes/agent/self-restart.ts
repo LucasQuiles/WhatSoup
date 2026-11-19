@@ -45,6 +45,12 @@ const log = createChildLogger('self-restart');
  */
 export interface ServiceRestarter {
   restartSelf(name: string): Promise<void>;
+  /**
+   * True when the job is release-pinned (launchd). restart_self then refuses
+   * before it sends or stops anything: `kickstart -k` would stop this process
+   * before the launcher's boot checks run. A manager without it is not asked.
+   */
+  isReleasePinned?(name: string): boolean;
 }
 
 /** Stable filename of the intentional-restart marker inside an instance dataRoot. */
@@ -374,10 +380,11 @@ export interface RestartSelfToolDeps {
 
 /**
  * Build the `restart_self` tool declaration. The handler is intentionally thin:
- * resolve the originating chat, deliver the turn's owed text, send an immediate
- * ack, then delegate to `triggerSelfRestart` (marker write + alert +
- * ServiceManager.restartSelf). If the owed text is not confirmed sent, it stops
- * before the ack and returns `ok: false` / `restarting: false`.
+ * refuse a release-pinned job, resolve the originating chat, deliver the turn's
+ * owed text, send an immediate ack, then delegate to `triggerSelfRestart`
+ * (marker write + alert + ServiceManager.restartSelf). If the job is
+ * release-pinned or the owed text is not confirmed sent, it stops before the ack
+ * and returns `ok: false` / `restarting: false`.
  */
 export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration {
   return {
@@ -401,6 +408,22 @@ export function buildRestartSelfTool(deps: RestartSelfToolDeps): ToolDeclaration
       // Matches the assertAdmin discipline of substrate.ts.
       deps.assertAdmin(session);
       const { reason, code } = RestartSelfSchema.parse(params);
+
+      // Before the owed reply, which sends the held answer and aborts the turn:
+      // a release-pinned job is refused with nothing sent, no marker and nothing
+      // stopped, and the turn finishes normally.
+      if (deps.serviceManager.isReleasePinned?.(deps.instanceName)) {
+        log.warn({ instance: deps.instanceName, cause: 'release_pinned' }, 'restart_self refused for a release-pinned job; restart not started');
+        return {
+          ok: false,
+          restarting: false,
+          reason,
+          code: code ?? 'self_restart',
+          cause: 'release_pinned',
+          text: `Restart not started: this job is release-pinned, so the service was not restarted for: ${reason}. Restart a release-pinned job through the release procedure.`,
+        };
+      }
+
       const chatJid = deps.resolveChatJid();
 
       // #3829: before the ack, so the reply the model wrote arrives first and
