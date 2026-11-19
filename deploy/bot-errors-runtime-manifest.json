@@ -549,6 +549,21 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_reporting.py",
+      "sha256": "d3f2e17df329e60d4d11c0dc85206b34d3963252b58d87452c4cbc1e6d576ca4",
+      "mustContain": [
+        "bot-errors-human-report/v2",
+        "bot-errors-human-report-record/v1",
+        "class ReportQualificationError",
+        "def qualify_report(",
+        "def qualify_report_file(",
+        "def render_human_report(",
+        "O_NOFOLLOW",
+        "evidence_hash_mismatch",
+        "maintenance_authority_unqualified"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/bot_errors_roster.py",
       "sha256": "882b41b4e1eb2cccea2717f1a054651d9c705d249f9ddd791578094b3e668431",
       "mustContain": [
