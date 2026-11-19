@@ -3,8 +3,10 @@
 # Triggered on any v* tag push. Runs the guard-only subset of verify:release
 # that is meaningful at release time and does not require deploy-key secrets
 # (test-integrity is not run here: after the tag's Quality run completes,
-# private-test-integrity.yml scans the tag and uploads a receipt; this
-# workflow neither waits for nor reads that result).
+# private-test-integrity.yml scans a tag named v plus 1-127 letters, digits,
+# '.', '_' or '-' and uploads a receipt; its driver refuses any other v* tag,
+# such as one holding '+', before scanning and writes no receipt, so that
+# trusted run fails; this workflow neither waits for nor reads either result).
 #
 # This complements the pre-push hook (scripts/pre-push-guard.ts) which runs
 # verify:release locally — but cannot be relied upon for pushes from the
