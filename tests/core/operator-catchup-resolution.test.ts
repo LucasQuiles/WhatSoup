@@ -184,6 +184,28 @@ describe('bound operator catch-up resolution', () => {
     expect(engine.getTurnRecoverySupervisorCounts().openRecoveries).toBe(1);
   });
 
+  it('rejects a provider id that another request in the same chat also claims', async () => {
+    const opId = await send();
+    // A second request in the same chat, stored under the key a later phone mapping
+    // produced, claims the same provider id: one stored echo cannot prove both.
+    const other = engine.createOutboundOp({
+      conversationKey: 'different-conversation', chatJid: jid, opType: 'text',
+      payload: '{"text":"Another answer"}', replayPolicy: 'unsafe',
+    });
+    engine.markSending(other);
+    engine.markSubmitted(other, 'WA_CATCHUP');
+    engine.markEchoed(other);
+
+    expect(() => resolveOperatorCatchup(db.raw, resolution(opId))).toThrow('bound echoed');
+    // The schema guard applies the same proof to a direct write.
+    expect(() => db.raw.prepare(`INSERT INTO operator_catchup_resolutions
+      (recovery_plan_id, source_seq, outbound_op_id, actor, evidence_ref)
+      VALUES ('pending-plan', ?, ?, 'operator:test', 'test://direct-write')`).run(seq, opId))
+      .toThrow('requires its bound echoed operation');
+    expect(db.raw.prepare('SELECT * FROM operator_catchup_resolutions').all()).toEqual([]);
+    expect(engine.getTurnRecoverySupervisorCounts().openRecoveries).toBe(1);
+  });
+
   it.each(['15550000003', 'different-conversation'])('recovers a same-chat self echo with stored conversation key %s', async (conversation) => {
     const opId = await send(false);
     engine.markMaybeSent(opId, 'ambiguous transport');

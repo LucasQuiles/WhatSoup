@@ -160,4 +160,49 @@ describe.each(['startup', 'live'] as const)('%s stored echo reconciliation', (ph
     expect(recovery.outboundReplayed).toBe(status === 'pending' ? 1 : 0);
     expect(recovery.outboundQuarantined).toBe(status === 'quarantined' ? 1 : 0);
   });
+
+  // The lookup is bound to the send's chat, so a row in another chat never confirms it.
+  // That row still occupies the provider ID, so it is conflicting evidence, not
+  // permission to replay, whoever authored it.
+  it.each([
+    { replayPolicy: 'safe', isFromMe: false },
+    { replayPolicy: 'safe', isFromMe: true },
+    { replayPolicy: 'read_only', isFromMe: false },
+    { replayPolicy: 'read_only', isFromMe: true },
+  ] as const)('a $replayPolicy send whose ID another chat holds is quarantined, not replayed (self row: $isFromMe)', ({ replayPolicy, isFromMe }) => {
+    const chatJid = 'peer@s.whatsapp.net';
+    const otherChatJid = 'other-peer@s.whatsapp.net';
+    const conversationKey = canonicalConversationKey(chatJid, db);
+    const seq = engine.journalInbound('request', conversationKey, chatJid, 'agent');
+    const op = engine.createOutboundOp({
+      conversationKey, chatJid, opType: 'text', payload: '{"text":"answer"}',
+      replayPolicy, sourceInboundSeq: seq, isTerminal: true,
+    });
+    expect(engine.markSending(op)).toBe(true);
+    expect(engine.markMaybeSent(op, 'transport interrupted', 'receipt')).toBe(true);
+    expect(storeMessageIfNew(db, {
+      chatJid: otherChatJid, conversationKey: canonicalConversationKey(otherChatJid, db),
+      senderJid: isFromMe ? 'self' : otherChatJid, messageId: 'receipt', isFromMe,
+      timestamp: 1, contentType: 'text', content: 'answer',
+    })).toBe(true);
+
+    let recovery;
+    if (phase === 'startup') {
+      db.close();
+      db = new Database(join(directory, 'test.db'));
+      db.open();
+      engine = new DurabilityEngine(db);
+      recovery = engine.postConnectRecovery();
+    } else {
+      db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-60 seconds') WHERE id = ?").run(op);
+      recovery = engine.reconcileLiveMaybeSent();
+    }
+
+    expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(op)).toEqual({ status: 'quarantined' });
+    expect(engine.getInboundStatus(seq)).toBe('processing');
+    expect(recovery.outboundReplayed).toBe(0);
+    expect(recovery.outboundQuarantined).toBe(1);
+    expect(db.raw.prepare('SELECT chat_jid, is_from_me FROM messages WHERE message_id = ?').get('receipt'))
+      .toEqual({ chat_jid: otherChatJid, is_from_me: isFromMe ? 1 : 0 });
+  });
 });
