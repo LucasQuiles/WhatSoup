@@ -293,10 +293,11 @@ For each `maybe_sent` op (including those promoted in Step 1):
 
 Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
-When a full history message replaces an envelope-only placeholder, its `fromMe`
-value replaces the placeholder's persisted authorship together with the body.
-This corrects either direction of stale authorship. History replay leaves an
-existing non-placeholder row unchanged; previously upgraded rows are not backfilled.
+A full history message replaces an envelope-only placeholder only when it comes
+from the placeholder's chat; its `fromMe` value then replaces the placeholder's
+persisted authorship together with the body. This corrects either direction of
+stale authorship. History replay leaves an existing non-placeholder row unchanged;
+previously upgraded rows are not backfilled.
 
 Here, a conflict means a row occupying the exact stored `message_id` used by the
 outbound receipt. Ordinary Signal peer messages use a composite `signal:` storage
@@ -1380,7 +1381,8 @@ on each aged record's inbound to preserve unanswered terminal records and their 
 beyond the normal age window; age alone cannot clear debt. Both reads reach debt rows through the
 partial index `idx_turn_terminal_failed_reply_debt`, whose WHERE clause repeats the selector's terminal
 predicates, then use row-id, recovery-source-key and pending-link lookups. Counts are not truncated.
-Only the existing proof-based closure removes a catch-up from that gauge. These reads
+Two routes remove a catch-up from that gauge: the existing proof-based closure and a direct
+operator resolution (an append-only `operator_catchup_resolutions` row, schema 70). These reads
 neither reset attempts nor replay work. The reply-guarantee observer's `failedTerminalDebt` is a
 raw terminal-row diagnostic; its count may overlap jobs or catch-ups and is not added to this health gauge.
 Only user-facing catch-ups count as historical catch-ups: a link whose source is a synthetic

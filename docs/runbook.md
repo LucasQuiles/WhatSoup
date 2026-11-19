@@ -2495,9 +2495,9 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
 ```
 
 The old binary creates the database at its own ceiling, this release migrates it to 70, and the old
-binary reopens it. From a schema-68 previous release, exit `0` means the old binary refused with
+binary reopens it. From a schema-69 previous release, exit `0` means the old binary refused with
 `DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 70 exceeds binary
-ceiling 68; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
+ceiling 69; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
 hashes of every file in the work directory, including the WAL and shared-memory sidecars, as
 `filesBeforeOldReopen` and `filesAfterOldReopen`; the exit code does not compare them, so read them
 there.
