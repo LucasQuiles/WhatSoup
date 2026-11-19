@@ -75,10 +75,11 @@ variable, then a hostname-derived default under `deploy/health-profiles/`) and
 exits 2 with a descriptive message if the resolved path fails the same three
 conditions.
 
-The installers attempt to auto-detect a host profile at
-`<REPO_ROOT>/deploy/health-profiles/<hostname-lowercase>.json` before
-falling back to the env file, but this auto-detection only populates
-`HEALTH_PROFILE` if the file already exists — it does not suppress the guard.
+The installers take `BOT_ERRORS_HEALTH_PROFILE` from the environment, then from
+the env file, and only then a host profile auto-detected at
+`<REPO_ROOT>/deploy/health-profiles/<hostname-lowercase>.json`. That
+auto-detection only populates `HEALTH_PROFILE` if the file already exists — it
+does not suppress the guard.
 
 ### Preserve an existing daily-health job when changing its release
 
@@ -101,10 +102,13 @@ exit 2 before any change. For such a job, run this installer without arguments
 and with `BOT_ERRORS_REPO_ROOT` set to the new release instead: it renders a
 fresh job whose runner, checker and working directory are in that release,
 without the wrapper. That reinstall replaces the job file without keeping a
-backup, then reloads and enables the job. It takes the health profile from
+backup, reloads the job and attempts to enable it (it does not check that
+enabling succeeded). It takes the health profile from
 `BOT_ERRORS_HEALTH_PROFILE` (the environment first, then `bot-errors.env`), or
-else the host's profile in the new release, and it writes the settings it reads
-into the job at install time. A wrapper job that is not re-pinned is read as
+else the host's profile in the new release; the label and the state folder come
+from the environment only (`BOT_ERRORS_HEALTH_LABEL`, `BOT_ERRORS_STATE_DIR`) or
+their defaults; and it writes the settings it reads into the job at install
+time. A wrapper job that is not re-pinned is read as
 before: activation accepts it when the release it runs from meets the
 requirement.
 

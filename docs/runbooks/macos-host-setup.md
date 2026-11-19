@@ -289,9 +289,10 @@ The release observer (`scripts/live-release-observers.ts`) prints release
 integrity and release currency separately. Exit status 0 means clean release
 integrity, including when `release currency: target-differs` reports a
 difference from the moving target branch; that difference is advisory. Exit
-status 1 means integrity drift: drifted release files, or, for the scheduled
-launchd job, a `WorkingDirectory` that names another release than the one the
-job runs (`launchd-working-directory-mismatch`). Exit status 2 means an
+status 1 means integrity drift: drifted release files, or, when the observer
+reads a bot's launchd job (`--launchd-plist`), a `WorkingDirectory` in that job
+that names another release than the one the job runs
+(`launchd-working-directory-mismatch`). Exit status 2 means an
 inconclusive integrity or currency observation, or an alert that could not be
 published, even when integrity also drifted. An observer from before
 `target-differs` became advisory exits 1 for clean files and a differing target,
