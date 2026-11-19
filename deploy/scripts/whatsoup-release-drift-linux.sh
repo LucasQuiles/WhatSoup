@@ -73,7 +73,10 @@ esac
   fail "release root missing observer entrypoints: $RELEASE_ROOT"
 
 SCHEDULER="$RELEASE_ROOT/deploy/scripts/run-release-drift-schedule.sh"
-bash "$SCHEDULER" \
+# Pin the scheduler's rotation, runner and observer to this release: it takes
+# them from WHATSOUP_REPO_ROOT, which the unit's environment may set to another
+# tree whose runner exits 1 without observing.
+WHATSOUP_REPO_ROOT="$RELEASE_ROOT" bash "$SCHEDULER" \
   --release "$RELEASE_ROOT" \
   --repo-root "$RELEASE_ROOT" \
   --target-url "$TARGET_URL" \
