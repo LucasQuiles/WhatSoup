@@ -1539,6 +1539,15 @@ findings under `release-currency`. `--clear-on-ok` clears each source only from
 its own successful observation. Installing or updating the rendered job remains
 a separately approved live-host mutation.
 
+On Linux, `deploy/scripts/whatsoup-release-drift-linux.sh` runs the same
+observers from `whatsoup-release-drift.service`. Its target is HTTPS by
+default: the same URL as the macOS renderer's default, with
+`refs/heads/main`. `WHATSOUP_RELEASE_TARGET_URL` and
+`WHATSOUP_RELEASE_TARGET_REF` in the unit's environment replace them. An SSH
+URL works only with a key the unit can use without an agent, because a systemd
+user unit has no SSH agent socket; otherwise every currency check is
+inconclusive and the unit exits 2.
+
 ## Pinned npm toolchain in `verify:release`
 
 The `verify:release` npm script routes all `npm ci`, `run typecheck`, `test`,
