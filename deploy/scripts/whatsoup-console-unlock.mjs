@@ -1,13 +1,86 @@
 // Console auto-unlock via CDP. Prints ONE status line; exits 0 ONLY on
 // "already-valid" or "unlocked" — every other outcome exits 1 (review finding #1).
-// The root token crosses CDP as a Runtime.callFunctionOn structured argument,
-// never inlined in evaluatable JS source (finding #2). Only fleet-origin tabs
+// The root token is read here from the private fleet-token file and crosses
+// CDP only as a Runtime.callFunctionOn structured argument, never in argv, the
+// environment or evaluatable JS source (finding #2). Only fleet-origin tabs
 // are ever touched (finding #3). All CDP calls carry timeouts (finding #4).
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
 const PORT  = process.env.CDP_PORT || "9333";
 const FLEET = process.env.FLEET || "http://localhost:9227";
-const TOKEN = process.env.WHATSOUP_CONSOLE_TOKEN || "";
 const fail = (msg) => { console.log(msg); process.exit(1); };
-if (!TOKEN) fail("no-token");
+
+const FLEET_TOKEN_RE = /^[0-9a-f]{64}$/;
+const MAX_FLEET_TOKEN_FILE_BYTES = 4096;
+
+function rejectFleetToken() {
+  throw new Error("fleet-token-invalid");
+}
+
+// Folder and file must belong to this uid and neither may be a symlink. The
+// folder may not be open to group or others; the file must be exactly 0600.
+function assertPrivateTokenDirectory(stat, uid) {
+  if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o077) !== 0) rejectFleetToken();
+}
+
+function assertPrivateTokenFile(stat, uid) {
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.uid !== uid || (stat.mode & 0o7777) !== 0o600) rejectFleetToken();
+}
+
+function assertSameIdentity(before, after) {
+  if (before.dev !== after.dev || before.ino !== after.ino) rejectFleetToken();
+}
+
+function readBoundedUtf8(fd) {
+  const buffer = Buffer.alloc(MAX_FLEET_TOKEN_FILE_BYTES + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const count = readSync(fd, buffer, offset, buffer.length - offset, null);
+    if (count === 0) break;
+    offset += count;
+  }
+  if (offset > MAX_FLEET_TOKEN_FILE_BYTES) rejectFleetToken();
+  return buffer.subarray(0, offset).toString("utf8");
+}
+
+// This helper is installed on its own in ~/.local/bin, so it cannot import
+// src/fleet/token-storage.ts from a release checkout. It keeps that module's
+// no-symlink rule, adds owner-only checks on the folder and the file, checks
+// both again after opening the file without following links, and never
+// creates, migrates or writes a token.
+function readFleetConsoleToken() {
+  const uid = process.getuid?.();
+  if (uid === undefined || typeof constants.O_NOFOLLOW !== "number") rejectFleetToken();
+  const filePath = process.env.WHATSOUP_FLEET_TOKEN_FILE || join(homedir(), ".config", "whatsoup", "fleet-tokens.json");
+  const directory = dirname(filePath);
+  const directoryBefore = lstatSync(directory);
+  assertPrivateTokenDirectory(directoryBefore, uid);
+  const fileBefore = lstatSync(filePath);
+  assertPrivateTokenFile(fileBefore, uid);
+  const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const opened = fstatSync(fd);
+    assertPrivateTokenFile(opened, uid);
+    assertSameIdentity(fileBefore, opened);
+    const directoryAfter = lstatSync(directory);
+    assertPrivateTokenDirectory(directoryAfter, uid);
+    assertSameIdentity(directoryBefore, directoryAfter);
+    const parsed = JSON.parse(readBoundedUtf8(fd));
+    if (typeof parsed?.active !== "string" || !FLEET_TOKEN_RE.test(parsed.active)) rejectFleetToken();
+    return parsed.active;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+let TOKEN = "";
+try {
+  TOKEN = readFleetConsoleToken();
+} catch {
+  fail("no-fleet-token");
+}
 const watchdog = setTimeout(() => fail("timeout"), 45000);
 
 let ws;
