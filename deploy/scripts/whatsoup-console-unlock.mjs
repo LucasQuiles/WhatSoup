@@ -6,9 +6,11 @@
 // ~/.config/whatsoup/fleet-tokens.json), so that token passes through no
 // environment. Marker read by the wrapper: reads-fleet-token-file
 // The token crosses CDP only as a Runtime.callFunctionOn structured argument,
-// never in argv or evaluatable JS source (finding #2). Only tabs on the exact
-// loopback fleet origin are ever touched, checked again right before each
-// credential-bearing step (finding #3). All CDP calls carry timeouts (finding #4).
+// never in argv or evaluatable JS source (finding #2). The helper uses only a
+// tab on the exact fleet origin and FLEET path, or opens and navigates a new
+// one; it re-checks the tab before each credential-bearing step, and the
+// unlock call itself compares the page's origin before it sends (finding #3).
+// All CDP calls carry timeouts (finding #4).
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,20 +25,29 @@ function parseCdpPort(value) {
   return port > 0 && port <= 65535 ? port : null;
 }
 
-// FLEET must be a plain loopback http URL. Its exact origin, and its path when
-// it has one, is the only place the token may go: a text prefix test would also
-// accept http://localhost:9227@example.invalid/ or a sibling path.
-function parseLoopbackFleetUrl(value) {
+// FLEET is operator configuration, as before. Its exact origin is the only place
+// the token may go, and its path selects the tab: a text prefix test would also
+// accept http://localhost:9227@example.invalid/ or a sibling path. https is
+// accepted on any host. Plain http only on loopback: elsewhere the root token
+// would cross the network unencrypted, which the fleet server itself refuses
+// to serve without an explicit override (FLEET_BIND_ADDRESS in
+// docs/configuration.md).
+const LOOPBACK_HOST_RE = /^(localhost\.?|127(\.[0-9]{1,3}){3}|\[::1\])$/;
+
+function parseFleetUrl(value) {
   let url;
   try {
     url = new URL(value);
   } catch {
-    return null;
+    return { refusal: "invalid-fleet-url" };
   }
-  const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  if (url.protocol !== "http:" || !loopback || url.username || url.password || url.search || url.hash) return null;
+  if (url.protocol === "http:" && !LOOPBACK_HOST_RE.test(url.hostname)) return { refusal: "insecure-fleet-url" };
+  if (url.protocol !== "http:" && url.protocol !== "https:") return { refusal: "invalid-fleet-url" };
   const pathname = url.pathname.replace(/\/+$/, "") || "/";
-  return { origin: url.origin, pathname, targetUrl: `${url.origin}${pathname}` };
+  // The tab opens the FLEET path with one trailing slash, as FLEET + "/" did;
+  // a query or fragment stays on that page URL only. User-info is dropped.
+  const targetPath = pathname === "/" ? "/" : `${pathname}/`;
+  return { origin: url.origin, pathname, targetUrl: `${url.origin}${targetPath}${url.search}${url.hash}` };
 }
 
 function matchesFleetTarget(value, fleet) {
@@ -50,10 +61,13 @@ function matchesFleetTarget(value, fleet) {
   return fleet.pathname === "/" || url.pathname === fleet.pathname || url.pathname.startsWith(`${fleet.pathname}/`);
 }
 
+const UNLOCK_OUTCOME_RE = /^(unlocked|origin-mismatch|unlock-exc|unlock-failed:[0-9]{3})$/;
+const SAFE_ERROR_RE = /^(ws-connect|no-window-object|cdp-timeout:[A-Za-z.]+|fetch failed)$/;
+
 const cdpPort = parseCdpPort(PORT);
 if (cdpPort === null) fail("invalid-cdp-port");
-const fleet = parseLoopbackFleetUrl(FLEET);
-if (fleet === null) fail("invalid-fleet-url");
+const fleet = parseFleetUrl(FLEET);
+if (fleet.refusal) fail(fleet.refusal);
 const CDP = `http://localhost:${cdpPort}`;
 
 const FLEET_TOKEN_RE = /^[0-9a-f]{64}$/;
@@ -171,13 +185,17 @@ try {
   };
   await send("Page.enable"); await send("Runtime.enable");
   // Navigate only if the tab isn't already on the fleet target (preserves SPA state).
-  // A tab opened above may not report the fleet URL yet; the checks below gate the token.
+  // A tab opened above can report about:blank or the requested URL; either way
+  // the readiness check and the checks below gate the token.
   if (!matchesFleetTarget(page.url, fleet)) await send("Page.navigate", { url: fleet.targetUrl });
-  // Wait until the LIVE document is on the fleet origin AND complete — target.url can
-  // report the requested URL before the navigation commits (about:blank race).
+  // Wait until the LIVE document is on the fleet origin and FLEET path AND complete —
+  // target.url can report the requested URL before the navigation commits (about:blank race).
+  const livePath = fleet.pathname === "/"
+    ? "true"
+    : `(location.pathname === ${JSON.stringify(fleet.pathname)} || location.pathname.startsWith(${JSON.stringify(`${fleet.pathname}/`)}))`;
   let ready = false;
   for (let i = 0; i < 60; i++) {
-    const rs = await ev(`location.origin === ${JSON.stringify(fleet.origin)} && document.readyState === "complete"`);
+    const rs = await ev(`location.origin === ${JSON.stringify(fleet.origin)} && ${livePath} && document.readyState === "complete"`);
     if (rs.val === true) { ready = true; break; }
     await new Promise(r => setTimeout(r, 250));
   }
@@ -200,17 +218,24 @@ try {
   else {
     if (!(await atExpectedFleetTarget())) fail("origin-mismatch");
     // 2. unlock — token passed as a structured argument, not as source text.
+    // In one call the page compares its own origin with the fleet origin and
+    // only then sends, so a navigation after the check above cannot receive
+    // the token. The endpoint is absolute and same-origin, so a <base> element
+    // or a cross-origin redirect cannot move the request. Page error text is
+    // never returned or printed.
     const win = (await send("Runtime.evaluate", { expression: "window" }))?.result?.result;
     if (!win?.objectId) throw new Error("no-window-object");
     const r = (await send("Runtime.callFunctionOn", {
       objectId: win.objectId,
-      functionDeclaration: 'function(tok){return fetch("/api/console-session",{method:"POST",headers:{"Authorization":"Bearer "+tok},credentials:"same-origin"}).then(function(r){return r.ok?"unlocked":("unlock-failed:"+r.status)}).catch(function(e){return "unlock-exc:"+String(e)})}',
-      arguments: [{ value: TOKEN }],
+      functionDeclaration: 'function(tok,origin){if(location.origin!==origin)return "origin-mismatch";return fetch(origin+"/api/console-session",{method:"POST",headers:{"Authorization":"Bearer "+tok},credentials:"same-origin",mode:"same-origin"}).then(function(r){return r.ok?"unlocked":("unlock-failed:"+r.status)}).catch(function(){return "unlock-exc"})}',
+      arguments: [{ value: TOKEN }, { value: fleet.origin }],
       awaitPromise: true,
       returnByValue: true,
     }))?.result;
-    if (r?.exceptionDetails) outcome = "err:" + String(r.exceptionDetails.exception?.description || r.exceptionDetails.text || "?").slice(0, 120);
-    else outcome = r?.result?.value || "err:empty-cdp-result";
+    const value = r?.result?.value;
+    if (r?.exceptionDetails) outcome = "err:unlock-exception";
+    else if (value === undefined) outcome = "err:empty-cdp-result";
+    else outcome = typeof value === "string" && UNLOCK_OUTCOME_RE.test(value) ? value : "err:unexpected-unlock-result";
     // Cosmetic follow-ups must not convert a real success into a reported failure.
     if (outcome === "unlocked") { try { await send("Page.reload"); await new Promise(r2 => setTimeout(r2, 600)); } catch {} }
   }
@@ -222,5 +247,8 @@ try {
   process.exit((outcome === "already-valid" || outcome === "unlocked") ? 0 : 1);
 } catch (e) {
   try { ws && ws.close(); } catch {}
-  fail("err:" + String(e?.message || e).slice(0, 160));
+  // Only the helper's own messages are printed: other error text (a CDP answer
+  // that is not JSON, for example) can carry browser-supplied content.
+  const message = String(e?.message || e);
+  fail("err:" + (SAFE_ERROR_RE.test(message) ? message : `unexpected-${e instanceof Error ? e.name : "error"}`));
 }
