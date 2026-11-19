@@ -727,10 +727,10 @@ else
       release_drift_old_label="the file ~/.config/whatsoup/bot-errors.env"
     fi
     if [ -n "$release_drift_old_label" ]; then
-      echo "  ⚠ whatsoup-release-drift.service no longer reads WHATSOUP_INSTANCE, which $release_drift_old_label sets: a release-drift unit installed by hand took its label from that setting."
+      echo "  ⚠ whatsoup-release-drift.service no longer reads WHATSOUP_INSTANCE, which $release_drift_old_label contains: a release-drift unit installed by hand took its label from that setting."
     fi
     if [ -n "$release_drift_shared_label" ]; then
-      echo "  ⚠ ~/.config/whatsoup/bot-errors.env sets WHATSOUP_RELEASE_DRIFT_INSTANCE, which is not read for the label: whatsoup-release-drift.service takes it only from ~/.config/whatsoup/release-drift.env."
+      echo "  ⚠ ~/.config/whatsoup/bot-errors.env contains WHATSOUP_RELEASE_DRIFT_INSTANCE, which is not read for the label: whatsoup-release-drift.service takes it only from ~/.config/whatsoup/release-drift.env."
     fi
     if [ -n "$release_drift_old_label" ] || [ -n "$release_drift_shared_label" ]; then
       echo "  ⚠ Every run exits 2 without observing until ~/.config/whatsoup/release-drift.env holds the label. Choose the instance this host's bot runs as and write it there once:"

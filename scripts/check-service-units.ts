@@ -484,8 +484,9 @@ function validateSystemd(
     const m = line.match(EXEC_DIRECTIVE);
     if (!m) continue;
     let value = m[2].trim();
-    // Strip a leading `-` / `@` / `+` exec prefix (systemd modifiers).
-    value = value.replace(/^[-@+!]+/, '');
+    // Strip the systemd exec prefixes before the executable: `-`, `@`, `+`, `!`
+    // (and `!!`), and `:`, which turns off environment variable substitution.
+    value = value.replace(/^[-@+!:]+/, '');
     const tokens = value.split(/\s+/).filter(Boolean);
     if (tokens.length === 0) continue;
     const exe = tokens[0];
