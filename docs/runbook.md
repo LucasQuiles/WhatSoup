@@ -878,6 +878,16 @@ also covers a loopback read that could not start: a connect-stage
 `EADDRNOTAVAIL` (local ephemeral-port exhaustion) on the bot or fleet-console
 read, or a bound health reader that is missing or fails its digest check at
 the run's start or when a confirm window ends (below).
+The fleet console's main read is healthy only for an HTTP 200 `/livez`
+body that is a JSON object with `alive: true` and a `pid` equal to the single
+running pid launchd reports for the fleet job (`launchctl print`, 15 s
+limit). An HTTP answer below 400 without that proof restarts nothing and logs
+`HEALTH-UNKNOWN: fleet liveness contract or PID unverified`, or `HEALTH-UNKNOWN:
+fleet loaded PID unavailable or invalid` when launchd reports no single
+running pid (not running, more than one pid, or the limit); when the run's
+state so far is `ERROR`, that missing-pid case only logs its line. An HTTP
+400-599 answer restarts the fleet console whatever its body says, also when
+the launchd pid cannot be read.
 Ordinary connection refusal, and every other connect- or request-stage
 failure, is still restart evidence on its first observation. A target that
 accepts the connection but does not answer gives a *silent* read: an OS-level
@@ -906,15 +916,20 @@ acts:
   at that moment or starts then. Each read logs `<label> confirm read N: …`.
 - A trusted answer ends the window and cancels the restart: `<label> answered
   on confirm read N; restart avoided: …` and the state `RESTART-AVOIDED`. A
-  trusted answer is an HTTP status below 400 from the fleet console, or a bot
-  body the decision block reads without a restart verdict (healthy,
-  credential-dead, credential-unknown or outbound-poison). That read's own
+  trusted answer is, from the fleet console, an HTTP 200 `/livez` body that is
+  a JSON object with `alive: true` and a `pid` equal to the single running pid
+  launchd reports for the fleet job, read first with an 8 s limit (`<label>
+  confirm read N: loaded process liveness verified`); or a bot body the
+  decision block reads without a restart verdict (healthy, credential-dead,
+  credential-unknown or outbound-poison). That read's own
   verdict is not acted on in this run: a credential-dead or outbound-poisoned
   bot is reported by the next run whose main read answers.
 - Every other result continues the window and changes nothing else in the run:
   another silent read, a refusal, `EADDRNOTAVAIL`, an unavailable or
   unverifiable reader or token, an empty, oversized or untrusted body, a bot
-  restart verdict, or a fleet HTTP error status.
+  restart verdict, or any other fleet answer: an HTTP error or any other
+  status, a body without that proof, or a fleet launchd pid that cannot be
+  read (`<label> confirm read N: liveness unverified (reader exit N)`).
 - A `sleep` that fails ends the window at once: `<label> confirm window ended:
   sleep failed (exit N) after M confirm reads; restart still due: …`. The
   checks below follow as at any window's end.
@@ -980,18 +995,24 @@ on a read in the same run, through the gates as they stand at that moment.
 Compared with restarting at once:
 
 - A restart comes later, or not at all when the target answers within the
-  window. On a steady clock the window lasts at most 90 s plus one 8 s read
-  deadline. It is measured by the clock, with at most six confirm reads: a
+  window. A bot confirm read has an 8 s read deadline. A fleet console
+  confirm read first queries the launchd pid (8 s limit), then reads with the
+  same 8 s deadline, so it takes up to 16 s. On a steady clock the window
+  lasts at most 90 s plus one confirm read: 8 s for the bot, 16 s for the
+  fleet console. It is measured by the clock, with at most six confirm reads: a
   forward clock step shortens it, and a backward one lengthens it up to six
-  full 15 s steps and 8 s reads, about 138 s. `launchctl print` for the job's
+  full 15 s steps and confirm reads, about 138 s for the bot and 186 s for the
+  fleet console. `launchctl print` for the job's
   identity at both ends and for the second gate pass (15 s limit each) and the
   binding check (8 s) add to that, so a restart comes at most about 191 s
-  later than an immediate restart, and about 90 to 100 s later when nothing
-  hangs. These figures count the timed reads, the `launchctl print` queries
-  and the binding check only. The per-read token and decision steps, and the
-  restart path's own `launchctl print` in `ensure_loaded` (as at base), have
-  no deadline. Counting the bounded steps alone, a run with a bot and a fleet
-  window takes at most about 500 s, inside the invocation lock's 600 s.
+  (bot) or 239 s (fleet console) later than an immediate restart, and about
+  90 to 100 s later when nothing hangs. These figures count the timed reads,
+  the `launchctl print` queries and the binding check only. The per-read token
+  and decision steps, and the restart path's own `launchctl print` in
+  `ensure_loaded` (as at base), have no deadline, so no figure here bounds a
+  whole run. The invocation lock's 600 s is the age after which another
+  invocation may reclaim it as stale; it is not an execution deadline, and
+  nothing stops a run at 600 s.
 - An avoided restart arms no cooldown, so a restart-worthy read in the next 5
   minutes (a refusal, an HTTP error, a silent read confirmed silent) is not
   held back by the cooldown an immediate restart would have armed.
@@ -1006,8 +1027,9 @@ Compared with restarting at once:
   verifies at the window's end ends the run.
 
 Every recorded restart of a live target followed a silence of 20.5 to 83.2 s.
-On a steady clock the last confirm read starts about 82 to 90 s after the
-window opens (the window less one read deadline, up to the window). Before
+On a steady clock the last confirm read starts about 82 to 90 s (bot) or 74
+to 90 s (fleet console) after the window opens (the window less one confirm
+read's 8 s or 16 s limit, up to the window). Before
 the window opened, the silence had already lasted the silent read's own wait:
 5 s for a reader timeout, 8 s at the deadline, none for a reset or EOF.
 
@@ -1027,12 +1049,16 @@ path when no stronger credential, health-evidence, or restart outcome applies.
     (subject to the cooldown). This is intended: each answer shows the target
     serving. The `restart avoided` lines in the watchdog log are where to see
     it; nothing alerts on them.
-  - Each silent target adds about 90 to 100 s to a run, at most about 191 s,
-    and the bot and the fleet console can both read silent in one run (the
+  - Each silent target adds about 90 to 100 s to a run, at most about 191 s
+    for the bot or 239 s for the fleet console (bounded steps only), and the
+    bot and the fleet console can both read silent in one run (the
     fleet console is read after the bot section, as before). That can exceed
     the 120 s `StartInterval`: launchd never runs two instances of one job, so
-    the next run then starts late. The invocation lock is reclaimed as stale
-    only after 600 s, and the restart mutex is not held during the window.
+    the next run then starts late. The invocation lock is reclaimed at once
+    when its stamped holder process has exited; while the holder is alive, or
+    when no valid pid is stamped yet, it is reclaimed only after 600 s. That
+    age is not an execution deadline, and the restart mutex is not held during
+    the window.
 - `<label> restart deferred: job changed during the confirm window` (state
   `RESTART-SUPPRESSED`) → the job was unloaded, loaded or respawned while a
   silent read was being confirmed, for example by an operator, a release
@@ -3804,7 +3830,10 @@ recovery have been verified; stopping containers alone does not migrate their da
 
 ## Restart-safety preflight blocked a start
 
-`deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. Recovery:
+`deploy/whatsoup` exits `78` when `scripts/restart-safety-preflight.ts` blocks a boot. To see this
+refusal before stopping a running instance, run `deploy/preflight-check.sh <repo-root> <instance>`: it
+runs the same start check and exits `3` on a block (at boot the wrapper defers that copy to its own
+exit-`78` gate). Recovery:
 
 - `reason=missing_database` without the `initial-database-create` marker: an instance DB is expected but
   absent — restore the DB from the host backup path before restarting; creating a fresh DB silently

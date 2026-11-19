@@ -22,6 +22,7 @@
 //   1  USAGE   — no instance-name argument
 
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { configRoot } from '../src/fleet/paths.ts';
 import { validateInstanceConfig } from '../src/core/agent-config-validator.ts';
@@ -54,7 +55,7 @@ try {
   process.exit(3);
 }
 
-const error = validateInstanceConfig(parsed, { name, mode: 'load' });
+const error = validateInstanceConfig(parsed, { name, mode: 'load', filesystem: { homeDirectory: homedir() } });
 if (error) {
   console.error(`PREFLIGHT-INSTANCE: INVALID — config for "${name}" rejected at ${error.field}: ${error.message}`);
   process.exit(3);

@@ -12,6 +12,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
+import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
 import { escapeRegExp } from '../../lib/regex-utils.ts';
@@ -420,7 +421,7 @@ export async function handleCreateLine(
   {
     const validationError = validateInstanceConfig(
       { ...config, claudeMd: body.claudeMd },
-      { name, mode: 'create', existingHealthPorts: portInventory.ports },
+      { name, mode: 'create', existingHealthPorts: portInventory.ports, filesystem: { homeDirectory: homedir() } },
     );
     if (validationError) {
       jsonResponse(res, validationError.status ?? 400, { error: validationError.message });

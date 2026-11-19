@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
+  sandboxInstructionsPathKind,
   validateAgentInstructionsPath,
   type AgentInstructionsPathFailureReason,
 } from './lib/agent-instructions-path.ts';
@@ -16,17 +17,21 @@ export interface InstructionsPathPreflightResult {
   reason:
     | 'not_configured'
     | 'configured_file_ready'
+    | 'read_from_chat_workspace'
+    | 'outside_chat_workspace'
     | 'unsafe_config_file'
     | 'invalid_config'
     | AgentInstructionsPathFailureReason;
 }
 
-function allow(reason: 'not_configured' | 'configured_file_ready'): InstructionsPathPreflightResult {
+type AllowReason = 'not_configured' | 'configured_file_ready' | 'read_from_chat_workspace';
+
+function allow(reason: AllowReason): InstructionsPathPreflightResult {
   return { schemaVersion: 1, ok: true, decision: 'allow', reason };
 }
 
 function block(
-  reason: Exclude<InstructionsPathPreflightResult['reason'], 'not_configured' | 'configured_file_ready'>,
+  reason: Exclude<InstructionsPathPreflightResult['reason'], AllowReason>,
 ): InstructionsPathPreflightResult {
   return { schemaVersion: 1, ok: false, decision: 'block', reason };
 }
@@ -60,6 +65,15 @@ export function inspectInstructionsPathConfig(
 
   const cwd = agentOptions['cwd'];
   if (cwd !== undefined && typeof cwd !== 'string') return block('invalid_config');
+
+  // As config load does (src/core/agent-config-validator.ts): a sandboxPerChat
+  // path that is not lexically inside the chat workspace blocks, and a confined
+  // relative path is left to the session's own read in its workspace.
+  if (agentOptions['sandboxPerChat'] === true) {
+    const sandboxPath = sandboxInstructionsPathKind(instructionsPath);
+    if (sandboxPath === 'outside_chat_workspace') return block('outside_chat_workspace');
+    if (sandboxPath === 'chat_workspace') return allow('read_from_chat_workspace');
+  }
 
   const result = validateAgentInstructionsPath({
     instructionsPath,

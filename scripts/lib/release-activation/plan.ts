@@ -50,6 +50,8 @@ export interface ActivationArgs {
   mode: 'plan' | 'apply';
   exitTimeoutSeconds: number;
   verifyTimeoutSeconds: number;
+  /** Host-unit planning proves shared-wrapper ownership separately. */
+  skipWrapperLinkPrecondition?: boolean;
 }
 
 export interface Precondition {
@@ -192,6 +194,24 @@ function sha256(bytes: Buffer): string {
 /** Digest of plist text, for comparing installed plists without keeping their credentials. */
 export function plistDigest(text: string): string {
   return sha256(Buffer.from(text, 'utf8'));
+}
+
+export const BACKUP_DIR_ABSENT = 'backup directory is absent';
+
+/**
+ * Why `--backup-dir` is not private to the current user: it must be a real
+ * directory (never a symlink), owned by this uid, with no group or other
+ * permission bits. Null when it is; BACKUP_DIR_ABSENT when it does not exist.
+ */
+export function backupDirectoryFailure(backupDir: string): string | null {
+  let stat;
+  try { stat = lstatSync(backupDir); } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? BACKUP_DIR_ABSENT : 'backup directory cannot be inspected';
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return 'backup directory is a symlink or not a directory';
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return 'backup directory is not owned by the current user';
+  if ((stat.mode & 0o077) !== 0) return 'backup directory grants group or other access';
+  return null;
 }
 
 function positiveInteger(value: unknown): number | null {
@@ -381,8 +401,11 @@ function isTrustedHealthPython(python: string): boolean {
   }
 }
 
-/** Validate the immutable runner/checker suffix shared by the historical wrapper and direct installer grammars. */
-function parseHealthRunnerSuffix(values: string[], start: number, home: string): { root: string } | null {
+/**
+ * Validate the immutable runner/checker suffix shared by the historical wrapper and direct installer grammars.
+ * Host activation reuses it for the installer form (legacy-host-auxiliaries.ts), so both read one grammar.
+ */
+export function parseHealthRunnerSuffix(values: string[], start: number, home: string): { root: string } | null {
   const python = values[start];
   if (python === undefined || !isTrustedHealthPython(python)) return null;
   const runner = values[start + 1];
@@ -797,8 +820,10 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
   };
 
   const linkTarget = readLinkOrNull(wrapperLink);
-  check('wrapper-link-on-expected-release', linkTarget === wrapperTargetFor(args.expectCurrent),
-    linkTarget === null ? 'wrapper symlink missing or not a symlink' : `wrapper symlink -> ${linkTarget}`);
+  if (!args.skipWrapperLinkPrecondition) {
+    check('wrapper-link-on-expected-release', linkTarget === wrapperTargetFor(args.expectCurrent),
+      linkTarget === null ? 'wrapper symlink missing or not a symlink' : `wrapper symlink -> ${linkTarget}`);
+  }
 
   const port = resolveHealthPort(args);
   context.healthPort = port.port;
@@ -810,6 +835,12 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
   check('database-present', isRegularFile(context.dbPath), 'instance bot.db is a regular file');
   check('backup-dir-set', args.backupDir !== null && path.isAbsolute(args.backupDir),
     args.backupDir === null ? '--backup-dir is required for --apply' : 'absolute');
+  if (args.backupDir !== null && path.isAbsolute(args.backupDir)) {
+    // An absent directory is created 0700 by apply; an existing one must already be private.
+    const backupDir = backupDirectoryFailure(args.backupDir);
+    check('backup-dir-private-owned', backupDir === null || backupDir === BACKUP_DIR_ABSENT,
+      backupDir === BACKUP_DIR_ABSENT ? 'absent; apply creates it 0700' : backupDir ?? 'current-user private');
+  }
 
   // Instance plist.
   const instancePlistPath = path.join(launchAgentsDir, `${instanceLabel}.plist`);
@@ -864,6 +895,10 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
       } else if (mentionsReleaseRoot(rendered.staged!, args.expectCurrent)) {
         stagedOk = false;
         detail = 'rendered plist still references the expected-current release';
+      } else if (stagedParsed.label !== spec.label) {
+        // Apply writes this content to <spec.label>.plist and reloads that label; another Label is another job.
+        stagedOk = false;
+        detail = 'rendered plist Label is not the declared auxiliary label';
       }
     }
     check(`aux-plist-staged:${spec.label}`, stagedOk, detail);

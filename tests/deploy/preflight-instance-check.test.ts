@@ -99,6 +99,23 @@ describe('deploy/preflight-instance-check.ts (#1862)', () => {
     expect(stderr).toContain('PREFLIGHT-INSTANCE: VALID');
   });
 
+  it('exits 3 before a restart when the configured instructions file is missing', () => {
+    const configHome = makeConfigHome();
+    const home = makeConfigHome();
+    const cwd = join(home, 'workspace');
+    mkdirSync(cwd);
+    const config = validAgentConfig({ name: 'bot-a', agentOptions: { sessionScope: 'single', cwd, instructionsPath: 'missing.md' } });
+    writeInstance(configHome, 'bot-a', config);
+    const missing = runInstanceCheck('bot-a', { XDG_CONFIG_HOME: configHome, HOME: home });
+    expect(missing.status).toBe(3);
+    expect(missing.stderr).toContain('agentOptions.instructionsPath');
+    expect(missing.stderr).not.toContain(home);
+
+    writeFileSync(join(cwd, 'missing.md'), 'instructions\n', 'utf8');
+    const ready = runInstanceCheck('bot-a', { XDG_CONFIG_HOME: configHome, HOME: home });
+    expect(ready.status, ready.stderr).toBe(0);
+  });
+
   it('exits 1 with no instance-name argument', () => {
     const configHome = makeConfigHome();
     const { status, stderr } = runInstanceCheck(undefined, { XDG_CONFIG_HOME: configHome });

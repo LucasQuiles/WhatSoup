@@ -242,6 +242,16 @@ npm --silent run release:activate -- \
   that differ from the installed plist beyond the release root), and the ordered
   actions. It exits `0` only when every precondition holds. It runs the new
   release's renderers to capture their output, and writes nothing.
+- `--backup-dir` must either be absent, in which case `--apply` creates it with
+  mode 0700, or be a real directory (not a symlink) owned by the current user
+  with no group or other permission bits. Planning (precondition
+  `backup-dir-private-owned`) and `--apply` both refuse any other directory;
+  neither changes its mode. `--apply` re-runs that precondition and makes its
+  last check just after creating or finding the directory, before the first
+  backup write; a process running as the same user that replaces or loosens it
+  after that last check is not detected. Each
+  activation writes its backups into a new child directory created with mode
+  0700 (the process umask can only remove bits from that mode).
 - `--apply` re-checks every precondition, then:
   1. takes a quick_check-verified SQLite backup, records the backup's schema
      migration level (`schemaMigration.before` in the receipt), records
@@ -519,6 +529,403 @@ restore required; `5` activation failed and the automatic rollback was blocked
 by an incompatible or unreadable sealed refresh fence — outcome
 `rollback-blocked-refresh-fence`, manual recovery required.
 
+### `npm run release:activate-host`
+
+Host activation is a separate, explicitly declared transaction for one or
+more launchd members and their declared shared host consumers. It is not
+permission to discover a wider member set or to run `release:activate --apply`
+once per instance:
+
+```bash
+npm --silent run release:activate-host -- \
+  --unit /absolute/path/host-unit.json \
+  --release /absolute/path/to/exported-release \
+  --backup-dir /absolute/private/retained-backups --plan
+```
+
+The schema-v1 declaration lists each instance, its reviewed current release,
+and each owned auxiliary label plus its renderer. An auxiliary label cannot be
+another configured instance's primary label (`com.whatsoup.<name>` where
+`<name>/config.json` exists under the instance config root): a declared
+member's label refuses when the declaration is read, any other instance's when
+planning. A rendered auxiliary plist must carry the declared `Label`, because
+`--apply` writes it to `<label>.plist` and reloads that label.
+Planning re-reads installed and loaded launchd definitions, refuses disagreement, and proves every
+installed consumer of a selected shared wrapper is declared (the limits are
+below). It prints only paths,
+digests, membership, port numbers, and state; it never prints health tokens,
+config contents, plist environment values, or health bodies.
+`--backup-dir` has the `release:activate` rule: absent, or a real directory
+owned by the current user with no group or other access, checked for each
+member (`<instance>:backup-dir-private-owned`) when planning and again by
+`--apply`. Its parent directory must also be owned by the current user with no
+group or other access (`backup-root-private-owned`).
+
+Schema version 2 adds an explicit `hostAuxiliaries` array for the closed host
+jobs that are not owned by one member. It accepts only these label/mode pairs:
+`com.bot-errors.health` with `path-rebase`;
+`com.whatsoup.harness-maintenance` or `com.whatsoup.reply-guarantee` with
+`setup-timer` or their closed legacy `path-rebase` form;
+`com.whatsoup.whatsoup-fleet` with `fleet-wrapper`; and a declared member's
+`com.whatsoup.<instance>-watchdog` with `quiesce`.
+Planning gives each host auxiliary label the member auxiliary check above: one
+that is another configured instance's primary label refuses
+(`host-aux-not-instance:<label>`).
+Selector-bearing entries name their reviewed `expectCurrent`; the fleet entry
+also names its absolute wrapper link. The planner proves the installed and
+loaded path, executable, and complete argument list agree before switching.
+A staged host-auxiliary plist must carry its declared `Label`.
+For a host `setup-timer`, its newly rendered complete `ProgramArguments` must
+also equal the installed list after only exact `expectCurrent` path values are
+rebased to the target release. An external guard or other argument the template
+does not render is a drift refusal; this coordinator does not preserve or
+reconstruct it.
+It refuses an undeclared loaded `com.bot-errors.health` job, including when
+its definition cannot be read reliably.
+
+Schema version 3 adds a closed `outsideUnits` array for reviewed, unrelated
+LaunchAgents that the transaction must prove are outside the host unit but must
+never edit, reload, stop, or start. Each entry pins `label`, the installed
+`plistSha256`, and either `loadState: "loaded"` or `"unloaded-113"`. Its
+`reviewInputs` lists lexically ordered, normalized absolute `roots`, `links`,
+and `{ path, sha256 }` source files, plus ordered
+`argumentBindings: [{ index, path, kind }]`. The roots must exactly equal the
+target release plus every declared `expectCurrent` (members and host
+auxiliaries). The links must exactly equal the members' standard
+`~/.local/bin/whatsoup` launcher path (listed once) plus every declared
+host-auxiliary link, whether or not that standard launcher joins the
+transaction.
+Each source file must remain outside those paths both by spelling and after
+symlink resolution; it is reread and rehashed from the same bytes during
+planning and immediately before the first `--apply` filesystem or launchd
+mutation. Every selected root and launcher must itself resolve, so an
+unresolvable selected path is a refusal.
+
+An outside label cannot be `com.whatsoup.*` or a closed host consumer such as
+`com.bot-errors.health`. The pinned plist and every reviewed input must contain
+no raw or XML-escaped reference to a selected root or launcher. A `loaded`
+entry must have a matching plist label and exact installed/loaded path,
+program, and argv. Planning reads a `loaded` entry's plist with the strict
+plist reader described under `path-rebase` below; a plist it cannot read
+exactly refuses (`installed loaded plist is unreadable: <reason>`), for
+example one that spells a `PYTHON*` environment key with a numeric character
+reference. The reader takes `Label`, `ProgramArguments`,
+`EnvironmentVariables` and `WorkingDirectory` only from the root dictionary of
+the plist; the same keys at any other depth do not count. A `ProgramArguments`
+entry that is not a `<string>` refuses (`installed loaded plist is unreadable
+or has a mismatched label`).
+
+For an interpreter, every absolute argv value after argv[0]
+must have one exact index-and-path binding: `review-file` must name a hashed
+source input, and `runtime-data` explicitly declares a generated data path.
+Runtime data is checked against selected roots and launchers by its lexical
+path and nearest existing realpath ancestor; it cannot reuse a reviewed source
+path. Every loaded interpreter needs at least one reviewed source input.
+Shell `-c` and `-lc` forms remain opaque commands pinned
+by the reviewed plist and still need a reviewed source input. The sole module
+form is exact Python `[python, -m, dotted.package.module]`, with no other
+argument. Its normalized absolute installed `WorkingDirectory` must be an
+existing directory outside every selected root and launcher, must exactly match
+the loaded working directory, and must have no `PYTHON*` variable in the plist
+or the loaded inherited, default, or explicit environment. The reviewed files
+must hash-bind the resulting `module.py` and every parent package
+`__init__.py`; namespace packages and package-as-entry forms refuse. Other module
+or option forms refuse. The reviewed declaration must classify any script,
+environment, or other input that can affect release selection as `review-file`;
+the bounded checker does not discover arbitrary dynamic dependencies. It does
+not prove Python import hooks, `sitecustomize`, `.pth` files, native extensions,
+or same-name package precedence; those remain separate transitive review
+inputs. An `unloaded-113` entry is accepted only for a digest-pinned zero-byte
+plist stub, which may use `files: []` and `argumentBindings: []`, and only if
+the bounded `launchctl print gui/<uid>/<label>` check returns exactly exit 113.
+Any other plist under `unloaded-113`, whatever its content, refuses before that
+check (`unloaded-113 plist is not a zero-byte stub`): a non-empty plist left in
+`~/Library/LaunchAgents` can load at the next login. This is a
+review-bound exception, not general dependency discovery: any changed plist,
+runtime definition, review input, root/link tuple, unreadable input, or new
+consumer refuses the transaction and requires a new review declaration. Plan
+output and the apply receipt retain `reviewTupleSha256`, over the normalized
+label, plist digest, load state, roots, links, files, and argument bindings.
+
+`path-rebase` admits exactly four closed contracts; planning refuses any other
+plist declared in that mode:
+
+- `com.bot-errors.health` as both BOT ERRORS installers write it
+  (`deploy/scripts/install-bot-errors-health-launchd.sh` and
+  `deploy/scripts/install-bot-errors-launchd.sh`): `/usr/bin/python3` runs the
+  root's `deploy/scripts/bot-errors-runner.py`, and the runner forwards
+  `/usr/bin/python3` with the root's
+  `deploy/scripts/bot-errors-health-check.py --daily`. Host activation reads
+  this argv with the runner grammar of single-member activation
+  (`parseHealthRunnerSuffix` in `scripts/lib/release-activation/plan.ts`),
+  including its fixed `--log-hint`
+  (`<home>/.local/state/bot-errors/logs/health.err.log`, where `<home>` is the
+  planning user's home folder) and `launchd_label=com.bot-errors.health`. The
+  root the runner names must equal the declared `expectCurrent` byte for byte,
+  so a case variant of the path refuses, and `WorkingDirectory` must equal
+  that root;
+- the closed legacy `com.bot-errors.health` shell wrapper;
+- the closed legacy argv of `com.whatsoup.harness-maintenance`;
+- the closed legacy argv of `com.whatsoup.reply-guarantee`.
+
+The last three are described below.
+
+In the installer form, host activation admits only `/usr/bin/python3`, at both
+interpreter positions, and that file must also pass the interpreter check of
+the shared grammar (`isTrustedHealthPython`). Single-member activation
+(`release:activate`) still reads the loaded health job with that grammar
+alone, so its interpreter needs only to pass `isTrustedHealthPython`. Any other
+health-job shape, except a `/bin/bash -c` wrapper whose script starts with a
+`BOT_ERRORS_ENV_FILE=` assignment other than the expected one (below), refuses
+with a detail that names the two installers: a script
+run directly, the short runner form, a `/bin/sh` or `/bin/bash` script, a
+`bash -c` command, another interpreter (one inside the release, or another
+trusted `python3` such as one set through `BOT_ERRORS_PYTHON`), a log hint from
+a non-default `BOT_ERRORS_STATE_DIR`, or a `WorkingDirectory` other than the
+root. Rerun either installer with `BOT_ERRORS_REPO_ROOT` set to the job's
+current root and without `BOT_ERRORS_PYTHON`, `BOT_ERRORS_STATE_DIR` or
+`BOT_ERRORS_HEALTH_LABEL`, then plan again. A timer outside its contract
+refuses (`legacy host auxiliary does not match reviewed path-rebase
+contract`): re-render it from the repository template and declare it in
+`setup-timer` mode instead.
+
+Planning reads every path-rebase plist with a strict reader
+(`scripts/lib/release-activation/strict-plist.ts`). launchd reads plists
+through CFPropertyList, which also accepts binary plists, other encodings,
+numeric character references and CDATA, so the reader admits only UTF-8 XML
+that starts at its first byte with an XML declaration or `<plist>`, holds
+exactly one root `<dict>` inside `<plist version="1.0">`, has unique keys at
+every level, and has `<string>` entries in `ProgramArguments` and `<string>`
+environment values. A DOCTYPE is optional, and the only one admitted is
+Apple's: `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">`, or the older
+`-//Apple Computer//DTD PLIST 1.0//EN` public identifier with the same system
+identifier, in double quotes with any whitespace between the tokens. Both BOT
+ERRORS installers write it on one line and the timer templates on two. Any
+other DOCTYPE refuses: a quoted literal can hold `>` and a whole plist,
+`plutil -p` reads a plist
+written inside a `SYSTEM` literal as the document, and `plutil -lint` passes
+those bytes, so this reader, not `plutil -lint`, refuses them. A comment
+that starts with `<!---` refuses too (`plist holds a comment that starts with
+<!---`). That narrows the form; it does not fix an observed difference:
+`plutil -p` ended such a comment where this reader does, but a reader that
+starts its search for `-->` at the opener's second dash ends `<!--->` at once
+and reads what follows. No repository writer emits either form. Among other
+forms, it refuses a binary plist, a byte-order mark, a declared encoding other
+than UTF-8, a numeric character reference, a CDATA section, a DOCTYPE internal
+subset or entity declaration, a processing instruction other than the XML
+declaration, an entity, comment, other markup or surrounding whitespace in key
+text, and markup inside a value. Other comments outside a key or value are
+skipped, each ending at the first `-->` after its opener. The reader does not
+prove that launchd reads the same dictionary from the bytes it admits.
+Planning reports the reader's refusals, like the contract, key and path
+refusals in this section, under `host-aux-plist-staged:<label>`.
+
+The root keys may only be `Label`, `ProgramArguments`, `EnvironmentVariables`,
+`WorkingDirectory`, `RunAtLoad`, `KeepAlive`, `StartCalendarInterval`,
+`StartInterval`, `StandardOutPath` and `StandardErrorPath`. Any other key
+refuses, and the detail names it under the key rule below (`plist root key
+<key> is not admitted for a path-rebase job`): for example `Program`, which
+launchd runs in place of
+`ProgramArguments[0]`, whether or not it equals that argument and even while
+the loaded definition still matches the installed argv; `BundleProgram`;
+`UserName`; or `EnableGlobbing`. Environment key names are pinned per job to
+the keys some committed version of that job's repository writer set; only the
+path rules below read their values:
+
+- the health job, in both forms: `PATH`, `BOT_ERRORS_STATE_DIR`,
+  `BOT_ERRORS_JID`, `BOT_ERRORS_EXPECTED_JID`, `BOT_ERRORS_SOCKET_PATH`,
+  `BOT_ERRORS_SOCKET`, `BOT_ERRORS_DB`, `BOT_ERRORS_HEALTH_PROFILE` and
+  `BOT_ERRORS_DISPATCHER_SERVICE`;
+- harness maintenance: `PATH`, `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR`;
+- reply guarantee: `PATH` and `CLAUDE_CONFIG_DIR`.
+
+Any other key refuses, naming it (`environment key <key> is not admitted for
+<label>`): for example `BASH_ENV`, `SHELLOPTS`, `PS4`, `DYLD_INSERT_LIBRARIES`,
+`__PYVENV_LAUNCHER__`, `HOME`, or a key from another job's list. Reinstall the
+health job or re-render the timer in `setup-timer` mode, as for a shape
+refusal. A detail names a key only when the key matches
+`^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`. Any other key, one that holds a path for
+example, prints as `(a name outside [A-Za-z_][A-Za-z0-9_.-]{0,63}, not shown)`,
+so key text cannot carry a host path into plan output or the receipt. The same
+rule covers the reader's duplicate-key detail (`plist has a duplicate key
+<key>`), which the outside-unit refusal also prints, and its detail for an
+environment value that is not a `<string>`.
+
+`path-rebase` changes only plist string values that are exactly the reviewed
+root or a path below it, and only when the value is a shell-token path matching
+`^/[A-Za-z0-9._/-]+$`, because no value can be proven never to reach a shell.
+The values are the strict reader's decoded strings, so text inside a comment is
+not a value. Every shell-token value, whether or not it contains the root,
+must also be in closed form: `path.posix.normalize` leaves it unchanged and it
+has no trailing slash, so it has no empty, `.` or `..` segment. Otherwise it
+names a path other than its spelling and refuses: `<root>/../x` leaves the
+root, while `<root>.bak/../<name>/x` and `<parent>/./<name>/x` name it. A field
+containing a prefix-sibling path such as `<root>2/x` is retained unchanged only
+when its value is such a closed-form shell-token path. Any other value that
+contains the root, including a command that starts with it, is an embedded
+shell-style reference and refuses. The target release lands in every rewritten
+value, so a release that is not a closed-form shell-token path refuses too. The
+closed-form rule covers the shell-token string values of the three legacy
+contracts as well, so a legacy plist with a trailing slash or a `.`, `..` or
+empty segment in a shell-token path (in `WorkingDirectory` or a log path, for
+example) refuses at planning where `bfc01318` admitted it; reinstall the health
+job or re-render the timer from its template. A value outside the shell-token
+grammar, such as a path with a space, is not checked for closed form; it
+refuses only if it contains the root. `--apply` checks the staged bytes
+against the
+same contract, with the target release as the root, before its first write
+(`recheck-staged-path-rebase:<label>`).
+
+For these four contracts, planning proves that the plist is in the strict form
+above, that its argv is exactly the contract's, that its root keys and
+environment key names are in the closed sets, that every shell-token string
+value is in closed form, and that the legacy wrapper sources the environment
+file in the planning user's home folder. It does not prove:
+
+- what the release's own scripts start later;
+- the contents of files in the job user's home folder that a contract names
+  or an interpreter reads: the legacy wrapper's environment file, the
+  maintenance guard script and the pinned node binary (all three below), and
+  Python's user-site `.pth` files (`/usr/bin/python3` runs without `-I` or
+  `-s`);
+- environment values, including `PATH` and the data paths
+  `BOT_ERRORS_HEALTH_PROFILE`, `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR`; the last two choose the agent
+  command-line tool's configuration and credential folders, whose settings
+  can start commands;
+- that no folder in a rewritten path is a symlink; the path rules compare
+  strings.
+
+The three named files are bound to the planning user's home folder: the
+contracts fix the guard script's and the node binary's paths under `<home>`,
+and the legacy wrapper must source `<home>/.config/whatsoup/bot-errors.env`.
+Writing those files, or the folders of a rewritten path, takes the job user's
+own access, which, like the other same-user writers this runbook names,
+planning does not detect. Environment values are not bound to any folder.
+
+The shared-wrapper consumer proof reads installed plists only. For each
+selected shared wrapper, the plists in `~/Library/LaunchAgents` whose
+`ProgramArguments[0]` is that link must be exactly the declared members'
+primary plists that use it, and an unreadable installed plist refuses. For
+the fleet wrapper's declared link they must be exactly that auxiliary's plist;
+there an unreadable plist is not counted. Loaded
+definitions are not read for this proof. The loaded-domain inventory keeps
+only `com.whatsoup.*` labels and `com.bot-errors.health`, which planning
+proves against their installed plists or refuses; a loaded job under any
+other label, for
+example one bootstrapped from a plist outside `~/Library/LaunchAgents`, can
+use a selected wrapper without being detected. Planning's proof that an
+undeclared job or a watchdog uses no release root
+(`unowned-selector:<label>`, `host-watchdog-outside-unit:<label>`) reads XML
+text, so a job whose plist hides a release path in a binary or encoded form
+is not detected and keeps running what it ran before; writing such a plist
+needs the same user's access.
+
+A missing link is also outside the transaction, but
+an unreadable path or a non-symlink is a preflight refusal rather than evidence
+that no launcher exists. A declaration with `outsideUnits` cannot use the
+missing-link case today: the review `links` must still list the standard link,
+and every listed link must resolve, so a missing standard link, or one whose
+target does not exist, refuses every outside unit (`selected root or launcher
+unavailable`) and with it the plan. A standard link that resolves to an
+existing undeclared root passes that check, but it stays in the outside units'
+review tuple and their no-reference checks.
+
+The only shell-style exception is the closed, legacy
+`com.bot-errors.health` host wrapper: its exact reviewed argv and wrapper shape
+may carry the default `BOT_ERRORS_HEALTH_PROFILE` at
+`<expect-current>/deploy/health-profiles/<profile>.json`, where the file name
+matches `^[a-z][a-z0-9]{0,31}\.json$`. The grammar only keeps the name inert in
+the shell wrapper; which profiles exist is host inventory, not code. Planning
+changes only that default to the target release, then applies the
+ordinary embedded-reference refusal to every remaining value. A malformed
+wrapper, non-canonical profile path, or any additional embedded release
+reference refuses. The wrapper runs `source` on
+`<home>/.config/whatsoup/bot-errors.env` under `set -a`, where `<home>` is the
+planning user's home folder, and its log hint and `BOT_ERRORS_STATE_DIR`
+default must name `<home>/.local/state/bot-errors`. A `/bin/bash -c` wrapper
+whose script starts with `BOT_ERRORS_ENV_FILE=` but not with exactly
+`BOT_ERRORS_ENV_FILE=<home>/.config/whatsoup/bot-errors.env; ` refuses
+(`bot-errors health legacy wrapper does not source the BOT ERRORS environment
+file in the job user's home folder`), whether it names another file or spells
+this one another way, quoted for example; reinstall the health job with either
+installer, as for a shape refusal. The sourced file is shell
+code planning does not read, and the variables it sets reach the runner
+without passing the environment-key allowlist, which reads only the plist.
+Both selected release roots must also be normalized absolute
+shell-token paths matching `^/[A-Za-z0-9._/-]+$`; whitespace or shell metacharacters
+refuse rather than being interpolated into the wrapper.
+
+The two legacy timer contracts pin the observed installed argv.
+`com.whatsoup.harness-maintenance` must be exactly
+`[/bin/bash, <home>/.local/libexec/fleet-reauth/maint-ccd-guard.sh, /bin/bash,
+<expect-current>/deploy/scripts/harness-maintenance.sh]`.
+`com.whatsoup.reply-guarantee` must be exactly
+`[<home>/.nvm/versions/node/vX.Y.Z/bin/node,
+<expect-current>/deploy/hooks/drain-stuck-replies.mjs]`, optionally followed by
+the sole literal `--once`. The planner rebases only the exact selected-root path
+and preserves every other installed plist byte, including launchd schedule
+fields and the optional-argument form. A mismatched home, node shape, guard,
+hook, extra argument, or embedded selected-root reference refuses. These are
+closed installed-argv validators, not a general wrapper-preservation facility.
+
+The guard script and the pinned node executable are transitive reviewed inputs.
+This path-rebase check intentionally validates their literal installed paths and
+does not read, hash, execute, or resolve their symlinks; the owner must qualify
+those inputs separately before a native apply.
+
+`--apply` takes the same activation lock as `release:activate`, so a held lock
+refuses before any effect. It rebuilds that proof, snapshots every database
+with `quick_check`, backs up all changed plists and each shared link, then
+changes the group. Before the switch it makes the `release:activate` checks: a
+root-owned plist that it writes needs the pinned root helper installed, each
+member's candidate refresh rollback fence must be unchanged, a sealed BOT
+ERRORS health consumer must be unchanged, and the live identity must still be
+what the plan read. The identity is every shared wrapper link and the fleet
+wrapper link on its planned old release, and the digest of every plist the
+plan read: the member and host auxiliary plists it writes, and the fleet
+wrapper and watchdog plists it only reloads. The identity is checked before any
+watchdog is stopped and again immediately before the switch. Any of these
+stops the activation with no selector moved: it refuses, unless a stopped
+watchdog cannot be restored (for example, its plist changed while it was
+stopped, or its bootstrap or kickstart failed), which ends it
+`rollback-unverified` (below). A later identity check
+(`verify-live-identity`) compares a digest of each plist's text on disk with
+the digest this activation expects: it can find a rewrite only while the
+rewrite is still on disk, and it cannot show what launchd loaded. It reloads all primary
+labels before auxiliaries and verifies each primary's new pid, argv,
+authenticated commit and WhatsApp connection. Any failure checks the schema
+level of every member before restoration and again after quiescing the group.
+A change or unreadable schema blocks restoration for the whole host; no old
+member is restarted. Each member's rollback target must also still provide the
+candidate's refresh rollback fence, checked before the group is stopped and
+again before restoration; otherwise the rollback stops with the new release
+selected (`rollback-blocked-refresh-fence`). A root-helper run that did not
+confirm plist protection makes the rollback `rollback-unverified`. One private
+`receipt.json` in the host backup directory records the group outcome, written
+only when this run created that directory. The directory is created
+exclusively: a path that already exists, such as one an earlier run made in
+the same second, refuses and keeps that run's receipt unchanged. A refusal
+before the directory exists prints the outcome without writing a receipt. The
+exit codes are those of `release:activate`: 0 activated, 1 rolled back,
+2 refused, 3 rollback unverified, 4 rollback blocked by a migration and 5
+rollback blocked by the refresh rollback fence. A receipt write that fails
+prints `release:activate-host: receipt-write-failed <ERRNO>` with the errno
+name only (never the path or the error text). As for `release:activate`, the
+exit code is unchanged, because it reports the live activation, which a lost
+receipt does not change.
+Schema-v2 watchdogs are quiesced before selectors move. They are restored only
+after the new terminal is verified, or after every old member, auxiliary, and
+host selector is verified during rollback. A migration block or an unverified
+old terminal leaves them stopped and reports the non-success rollback outcome.
+A watchdog whose plist no longer has its planned digest at the checks before
+its bootout and bootstrap is not restored: it stays stopped and the outcome is
+`rollback-unverified`, also when no selector moved, unless a migration or
+refresh-fence block already set a `rollback-blocked-*` outcome. A change found
+before the watchdogs are stopped refuses instead.
+
 #### Health invariants verdict (report-only, #2481)
 
 Under `--apply`, after the outcome is final, `receipt.json` (and the stdout
@@ -650,8 +1057,9 @@ It relies on the instance being the launchd job's own process:
 module in that same process, and `src/core/health.ts` reports that
 `process.pid` as `instance.pid`.
 
-**What the receipt holds.** `receipt.json` is a local operator record in the
-private backup directory (mode 0600). The activation record already carries
+**What the receipt holds.** `receipt.json` (mode 0600) is a local operator
+record in the activation's mode-0700 directory under the private
+`--backup-dir`. The activation record already carries
 host data: release and backup paths, commits, the instance name, and the
 launchd pids. Nothing #2481 adds carries a producer string, a pid, or host
 data: the added fields are the tool's constants (schema, floor ids), enums

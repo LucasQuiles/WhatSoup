@@ -68,6 +68,7 @@ import {
 } from './transport-authority-config-validation.ts';
 import { validateSignalConfig } from './signal-config-validation.ts';
 import { validateProtectedDeliveryBinding } from './protected-delivery-config.ts';
+import { sandboxInstructionsPathKind, validateAgentInstructionsPath } from './agent-instructions-path.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -120,6 +121,15 @@ export interface ValidatorContext {
   originalType?: unknown;
   /** When true (loader auth-only flow), skip agentOptions/systemPrompt-shape rules. */
   authOnly?: boolean;
+  /**
+   * Present only at live boundaries (config load, restart preflight, discovery,
+   * fleet create/patch). Omission keeps validation schema-only, so committed
+   * examples and offline lints do not depend on this host's files.
+   */
+  filesystem?: {
+    /** Home directory of the user that will run the instance. */
+    homeDirectory: string;
+  };
 }
 
 function err(field: string, message: string, status = 400): ValidationError {
@@ -873,6 +883,39 @@ function validateAgentOptions(
   // instructionsPath must be a string when present.
   if (opts['instructionsPath'] !== undefined && typeof opts['instructionsPath'] !== 'string') {
     return err('agentOptions.instructionsPath', 'agentOptions.instructionsPath must be a string');
+  }
+  // A sandboxPerChat session resolves a relative path against its chat
+  // workspace. One that is not lexically inside that workspace refuses here,
+  // with or without the filesystem, since the rule reads only the path.
+  const sandboxPath = opts['sandboxPerChat'] === true && typeof opts['instructionsPath'] === 'string'
+    ? sandboxInstructionsPathKind(opts['instructionsPath'])
+    : 'checked_at_load';
+  if (sandboxPath === 'outside_chat_workspace') {
+    return err(
+      'agentOptions.instructionsPath',
+      'agentOptions.instructionsPath must stay inside the chat workspace when sandboxPerChat is true: a relative path must be in normal form with no ".." segment',
+    );
+  }
+  // The session reads this file on every spawn; refusing it here stops a restart
+  // before the service is replaced, instead of failing each turn afterwards.
+  // A confined path a sandboxPerChat session reads only from its chat workspace
+  // has no load-time location, so the session's own read decides it.
+  if (
+    typeof opts['instructionsPath'] === 'string'
+    && ctx.filesystem
+    && sandboxPath === 'checked_at_load'
+  ) {
+    const pathResult = validateAgentInstructionsPath({
+      instructionsPath: opts['instructionsPath'],
+      cwd: typeof opts['cwd'] === 'string' ? opts['cwd'] : undefined,
+      homeDirectory: ctx.filesystem.homeDirectory,
+    });
+    if (!pathResult.ok) {
+      return err(
+        'agentOptions.instructionsPath',
+        `agentOptions.instructionsPath must resolve within the service-user home to a readable regular file (${pathResult.reason})`,
+      );
+    }
   }
 
   // pluginDirs: array of strings (home-confinement check is route-specific).

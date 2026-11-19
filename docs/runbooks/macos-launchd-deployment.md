@@ -562,6 +562,16 @@ gates, and a successful bootstrap does not also kickstart the newly loaded job.
 A mixed cycle can restart the refused target while leaving the target that saw
 `EADDRNOTAVAIL` untouched.
 
+The fleet console's main read is healthy only for an HTTP 200 `/livez` body
+that is a JSON object with `alive: true` and a `pid` equal to the single
+running pid launchd reports for the fleet job (`launchctl print`, 15 s limit).
+An HTTP 400-599 answer restarts the fleet console whatever its body says, also
+when that pid cannot be read. An HTTP answer below 400 without that proof
+restarts nothing and logs `HEALTH-UNKNOWN: fleet liveness contract or PID
+unverified`, or `HEALTH-UNKNOWN: fleet loaded PID unavailable or invalid` when
+launchd reports no single running pid (not running, more than one pid, or the
+limit).
+
 Review the final watchdog status and the per-target log lines together. The
 reader's socket timeout (`HEALTH_READ_TIMEOUT_SECONDS`, 5 s) is deliberately
 below the eight-second process deadline (`HEALTH_READ_DEADLINE_SECONDS`), so a
@@ -585,14 +595,17 @@ and the watchdog confirms them in the same run before it restarts:
   (`CONFIRM_WINDOW_SECONDS`) have passed. The window ends with the first read
   that finishes at or after 90 s, so on a steady clock a read is running at
   that moment or starts then. Each read logs `<label> confirm read N: …`.
-- A trusted answer (an HTTP status below 400 from the fleet console, or a bot
-  body the decision block reads without a restart verdict) cancels the
-  restart: `<label> answered on confirm read N; restart avoided: …`, state
-  `RESTART-AVOIDED`. That answer's own credential or outbound-poison verdict
-  is acted on by the next run whose main read answers.
+- A trusted answer cancels the restart: `<label> answered on confirm read N;
+  restart avoided: …`, state `RESTART-AVOIDED`. From the fleet console it is
+  an HTTP 200 `/livez` JSON object with `alive: true` and a `pid` equal to the
+  single running pid launchd reports for the fleet job, which the confirm read
+  queries first with an 8 s limit; from the bot it is a body the decision
+  block reads without a restart verdict. That answer's own credential or
+  outbound-poison verdict is acted on by the next run whose main read answers.
 - Every other result (silent again, refused, `EADDRNOTAVAIL`, an unavailable or
   unverifiable reader or token, an empty, oversized or untrusted body, a bot
-  restart verdict, a fleet HTTP error) continues the window and changes
+  restart verdict, any other fleet answer, an HTTP error included, or a fleet
+  launchd pid that cannot be read) continues the window and changes
   nothing else in the run. A `sleep` that fails ends the window at once
   (`<label> confirm window ended: sleep failed …`).
 - Without a trusted answer, the restart runs when the window ends only if the
@@ -638,16 +651,20 @@ not at all for that target when it answered within the window, its identity
 changed or could not be read, or a job loaded at both ends was not confirmed
 loaded when the restart acted; only a reader that no longer verifies ends
 the run.
-On a steady clock the window lasts at most 90 s plus one 8 s read deadline; a
-forward clock step shortens it, and a backward one lengthens it up to six
-full steps and reads, about 138 s. With the `launchctl print` identity and
+A bot confirm read has an 8 s read deadline; a fleet console confirm read
+queries the launchd pid (8 s limit) and then reads with the same deadline, up
+to 16 s. On a steady clock the window lasts at most 90 s plus one confirm read
+(8 s bot, 16 s fleet console); a forward clock step shortens it, and a
+backward one lengthens it up to six full steps and reads, about 138 s (bot) or
+186 s (fleet console). With the `launchctl print` identity and
 gate checks (15 s limit each) and the binding check (8 s) around it, a
-restart comes at most about 191 s later than an immediate restart, and about
-90 to 100 s later when nothing hangs. These figures count the timed reads,
-the `launchctl print` queries and the binding check only: the per-read token
-and decision steps, and `ensure_loaded`'s own `launchctl print` (as at base),
-have no deadline. Counting the bounded steps alone, a run with a bot and a
-fleet window takes at most about 500 s, inside the invocation lock's 600 s. A
+restart comes at most about 191 s (bot) or 239 s (fleet console) later than
+an immediate restart, and about 90 to 100 s later when nothing hangs. These
+figures count the timed reads, the `launchctl print` queries and the binding
+check only: the per-read token and decision steps, and `ensure_loaded`'s own
+`launchctl print` (as at base), have no deadline, so no figure here bounds a
+whole run. The invocation lock's 600 s is the age after which another
+invocation may reclaim it as stale, not an execution deadline. A
 watchdog killed during a window performs no restart for that read; the next
 run decides again from its own read. An avoided restart arms no cooldown, so
 a restart-worthy read in the next 5 minutes is not held back by the cooldown
@@ -655,12 +672,14 @@ an immediate restart would have armed. A deferred restart arms none either,
 so the next run may act on a respawned or reloaded job sooner than that
 cooldown would have allowed. Every recorded restart of a live target followed
 a silence of 20.5 to 83.2 s. On a steady clock the last confirm read starts
-about 82 to 90 s after the window opens; before the window opened, the
+about 82 to 90 s (bot) or 74 to 90 s (fleet console) after the window opens;
+before the window opened, the
 silence had already lasted the silent read's own wait (5 s for a reader
 timeout, 8 s at the deadline, none for a reset or EOF). A target whose
 silences always end within the window is never restarted (the `restart
 avoided` lines in the watchdog log show it; nothing alerts on them). Each
-silent target adds about 90 to 100 s to a run, at most about 191 s, and the
+silent target adds about 90 to 100 s to a run, at most about 191 s (bot) or
+239 s (fleet console) counting bounded steps only, and the
 bot and the fleet console can both be silent in one run (the fleet console is
 still read after the bot section). That can exceed the 120 s
 `StartInterval`: launchd never runs two instances of one job, so the next run

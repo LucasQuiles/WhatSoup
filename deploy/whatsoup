@@ -317,7 +317,9 @@ unset DATABASE_COMPATIBILITY_STATUS DATABASE_COMPATIBILITY_RC \
 if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" = "1" ]; then
   echo "WARN: WHATSOUP_SKIP_PREFLIGHT=1 — restart-safety pre-flight gate BYPASSED for instance '$INSTANCE'" >&2
 else
-  if ! WHATSOUP_NODE="$NODE" "$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"; then
+  # The ledger gate below owns the restart-safety refusal at boot (terminal exit
+  # 78), so preflight-check.sh defers its copy of that check to it.
+  if ! WHATSOUP_NODE="$NODE" WHATSOUP_PREFLIGHT_RESTART_SAFETY=wrapper "$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"; then
     echo "FATAL: restart-safety pre-flight gate refused to start instance '$INSTANCE' (see PREFLIGHT-FAIL above)." >&2
     echo "       Set WHATSOUP_SKIP_PREFLIGHT=1 to override in an emergency (this is logged)." >&2
     exit 1

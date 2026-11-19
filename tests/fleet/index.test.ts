@@ -8,7 +8,7 @@
  * the `?token=` query-param auth path that EventSource clients depend on.
  *
  * Scope is intentionally narrow: this file proves the *shell* (startup,
- * bearer + query auth, 404, static fallback, dispatch on representative HTTP
+ * bearer + query auth, 404, declared static fallback, dispatch on representative HTTP
  * verbs/param shapes) plus loadOrCreateFleetToken. Long-tail per-route
  * coverage lives in integration.test.ts and future per-route test files.
  */
@@ -237,7 +237,7 @@ beforeAll(async () => {
   selfDb.exec(SCHEMA_SQL);
 
   // The real factory resolves distDir relative to src/fleet/index.ts. Make sure
-  // an index.html exists so the static handler can serve the SPA fallback.
+  // an index.html exists so the static handler can serve declared SPA routes.
   distDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'dist');
   distExisted = fs.existsSync(distDir);
   fs.mkdirSync(distDir, { recursive: true });
@@ -974,13 +974,20 @@ describe('fleet server -- static file serving', () => {
     expect(body).toContain('<meta name="fleet-auth-mode" content="session">');
   });
 
-  it('SPA fallback: extensionless non-API paths serve index.html', async () => {
-    const res = await fetch(`${baseUrl}/dashboard`);
+  it('SPA fallback serves declared console routes', async () => {
+    const res = await fetch(`${baseUrl}/metrics`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
     const body = await res.text();
     expect(body).not.toContain('fleet-token');
     expect(body).toContain('<meta name="fleet-version" content="abc1234">');
+  });
+
+  it('does not turn undeclared extensionless paths into console HTML', async () => {
+    const res = await fetch(`${baseUrl}/dashboard`);
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type')).not.toContain('text/html');
+    expect(await res.text()).not.toContain('fleet-token');
   });
 });
 

@@ -66,6 +66,52 @@ describe('inspectInstructionsPathConfig', () => {
     });
   });
 
+  it('leaves a path a sandboxPerChat session reads only from its chat workspace to that session, as config load does', () => {
+    const { home, configPath } = fixture({
+      name: 'agent',
+      agentOptions: { cwd: 'workspace', instructionsPath: 'runtime.md', sandboxPerChat: true },
+    });
+    expect(inspectInstructionsPathConfig(configPath, home)).toMatchObject({
+      ok: true,
+      decision: 'allow',
+      reason: 'read_from_chat_workspace',
+    });
+
+    // Config load still checks these forms, so the preflight blocks them too.
+    for (const agentOptions of [
+      { cwd: 'workspace', instructionsPath: 'runtime.md', sandboxPerChat: false },
+      { cwd: home, instructionsPath: 'CLAUDE.md', sandboxPerChat: true },
+      { cwd: home, instructionsPath: path.join(home, 'runtime.md'), sandboxPerChat: true },
+    ]) {
+      writeFileSync(configPath, JSON.stringify({ name: 'agent', agentOptions }), { mode: 0o600 });
+      expect(inspectInstructionsPathConfig(configPath, home)).toMatchObject({ ok: false, decision: 'block' });
+    }
+  });
+
+  it('blocks a sandboxPerChat relative path that is not lexically inside the chat workspace, as config load refuses it', () => {
+    const { home, configPath } = fixture({ name: 'agent', agentOptions: {} });
+    const cwd = path.join(home, 'workspace');
+    mkdirSync(path.join(cwd, 'notes'), { recursive: true });
+    // Readable files inside home, so only the chat-workspace rule blocks a path that reaches them.
+    for (const file of [path.join(home, 'x.md'), path.join(cwd, 'x.md'), path.join(cwd, 'notes', 'agent.md')]) {
+      writeFileSync(file, 'instructions', { mode: 0o600 });
+    }
+    const inspect = (agentOptions: Record<string, unknown>) => {
+      writeFileSync(configPath, JSON.stringify({ name: 'agent', agentOptions }), { mode: 0o600 });
+      return inspectInstructionsPathConfig(configPath, home);
+    };
+
+    for (const instructionsPath of ['../x.md', 'notes/../../x.md', './../x.md', 'notes/..', './x.md', 'notes//agent.md', 'notes/./agent.md']) {
+      expect(inspect({ cwd, instructionsPath, sandboxPerChat: true }), instructionsPath).toEqual({
+        schemaVersion: 1, ok: false, decision: 'block', reason: 'outside_chat_workspace',
+      });
+    }
+    // Unchanged: a confined path, CLAUDE.md, and every path without sandboxPerChat.
+    expect(inspect({ cwd, instructionsPath: 'notes/agent.md', sandboxPerChat: true })).toMatchObject({ ok: true, reason: 'read_from_chat_workspace' });
+    expect(inspect({ cwd, instructionsPath: 'CLAUDE.md', sandboxPerChat: true })).toMatchObject({ ok: false, reason: 'missing' });
+    expect(inspect({ cwd, instructionsPath: '../x.md', sandboxPerChat: false })).toMatchObject({ ok: true, reason: 'configured_file_ready' });
+  });
+
   it('fails closed for a symlinked config file', () => {
     const { root, home, configPath } = fixture({ name: 'agent', agentOptions: {} });
     const linkPath = path.join(root, 'config-link.json');

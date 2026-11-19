@@ -48,6 +48,7 @@ _spec.loader.exec_module(reader)
 _OK_BODY = json.dumps({"status": "healthy", "whatsapp": {"connected": True, "connection": {"state": "connected"}}})
 _BOT_LABEL = "com.whatsoup.hang-agent"
 _FLEET_LABEL = "com.whatsoup.whatsoup-fleet"
+_FLEET_BODY = json.dumps({"alive": True, "pid": 4242})
 
 
 @contextmanager
@@ -159,7 +160,7 @@ def _run(tmp_path: Path, bot_port: int, fleet_port: int, *, timeouts: tuple[int,
     bindir.mkdir(parents=True)
     calls = home / "launchctl.calls"
     launchctl = bindir / "launchctl"
-    launchctl.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\nexit 0\n')
+    launchctl.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\n[ "$1" = print ] && printf "pid = 4242\\n"\nexit 0\n')
     launchctl.chmod(0o755)
     token = home / ".config/whatsoup/instances/hang-agent/tokens.env"
     token.parent.mkdir(parents=True)
@@ -223,7 +224,7 @@ def _assert_confirmed_then_restarted(log: str, label: str, reader_exit: int):
 @given(bot_hangs=st.booleans(), fleet_hangs=st.booleans())
 def test_hung_target_is_restarted_not_unknown(bot_hangs, fleet_hangs):
     with private_case() as (tmp_path, monkeypatch), _silent_server() as silent, \
-            _answering_server(_OK_BODY) as bot_ok, _answering_server("ok") as fleet_ok:
+            _answering_server(_OK_BODY) as bot_ok, _answering_server(_FLEET_BODY) as fleet_ok:
         proc, calls, log, _ = _run(tmp_path, silent if bot_hangs else bot_ok,
                                    silent if fleet_hangs else fleet_ok, timeouts=(1, 3))
     assert proc.returncode == 0, (proc.stderr, log)
@@ -237,7 +238,7 @@ def test_hung_target_is_restarted_not_unknown(bot_hangs, fleet_hangs):
 
 
 def test_hung_bot_is_restarted_with_the_shipped_timeouts(tmp_path):
-    with _silent_server() as silent, _answering_server("ok") as fleet_ok:
+    with _silent_server() as silent, _answering_server(_FLEET_BODY) as fleet_ok:
         proc, calls, log, elapsed = _run(tmp_path, silent, fleet_ok, timeouts=None)
     assert proc.returncode == 0, (proc.stderr, log)
     assert _kickstarts(calls, _BOT_LABEL) == 1
@@ -253,7 +254,7 @@ def test_reader_killed_at_the_wall_deadline_is_restarted(tmp_path):
     # A reader that has not finished by the wall deadline yields no evidence of
     # its own; like main's `curl --max-time`, an incomplete read is restart
     # evidence for that target, confirmed like any silent read.
-    with _silent_server() as silent, _answering_server("ok") as fleet_ok:
+    with _silent_server() as silent, _answering_server(_FLEET_BODY) as fleet_ok:
         proc, calls, log, _ = _run(tmp_path, silent, fleet_ok, timeouts=(4, 1))
     assert proc.returncode == 0, (proc.stderr, log)
     assert _kickstarts(calls, _BOT_LABEL) == 1
@@ -281,9 +282,9 @@ def test_fleet_reader_killed_at_the_wall_deadline_is_restarted(tmp_path):
 def test_target_answering_within_the_confirm_window_is_not_restarted(tmp_path, target):
     # Red on base: base restarts on the first silent read. Real sockets: the
     # first connection is held silent, the next one answers.
-    body = _OK_BODY if target == "bot" else "ok"
+    body = _OK_BODY if target == "bot" else _FLEET_BODY
     with _silent_then_answering_server(body, silent_connections=1) as flaky, \
-            _answering_server(_OK_BODY) as bot_ok, _answering_server("ok") as fleet_ok:
+            _answering_server(_OK_BODY) as bot_ok, _answering_server(_FLEET_BODY) as fleet_ok:
         proc, calls, log, _ = _run(tmp_path, flaky if target == "bot" else bot_ok,
                                    flaky if target == "fleet" else fleet_ok, timeouts=(1, 3))
     label = _BOT_LABEL if target == "bot" else _FLEET_LABEL
@@ -299,7 +300,7 @@ def test_shipped_reader_timeout_is_strictly_below_the_wall_deadline():
     deadline = int(re.search(r"(?m)^HEALTH_READ_DEADLINE_SECONDS=(\d+)$", text).group(1))
     assert read_timeout + 2 <= deadline
     assert 'run_with_timeout "$HEALTH_READ_DEADLINE_SECONDS" python3' in text
-    assert '"$HEALTH_READ_TIMEOUT_SECONDS" 3<&0' in text
+    assert '"$HEALTH_READ_TIMEOUT_SECONDS" "${3:-}" 3<&0' in text
 
 
 def test_reader_raises_transport_error_for_a_silent_server_within_its_timeout():

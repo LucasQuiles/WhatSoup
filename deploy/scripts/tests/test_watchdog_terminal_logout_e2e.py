@@ -97,7 +97,7 @@ _REPO_EMITTER = Path(__file__).resolve().parents[1] / "bot-errors-emit.py"
 # bytes never change, so one render serves every cycle; each cycle's response
 # comes from the sidecar files _make_stubs writes beside the launchctl stub.
 # Every request is recorded so a test can prove the health read happened.
-_STUB_READER = '''import errno
+_STUB_READER = '''import errno, json
 from pathlib import Path
 class HealthTransportError(Exception):
     def __init__(self, stage, number): self.stage = stage; self.errno = number
@@ -113,10 +113,20 @@ def fetch_loopback_health(port, path, headers, **kwargs):
     # A release without built console assets: the root 404s while the
     # asset-independent liveness route answers.
     if port == 9998 and path == "/livez":
-        return 200, "ok"
+        return 200, '{"alive":true,"pid":4242}'
     if port == 9998 and path == "/":
         return 404, "not found"
     raise HealthTransportError("connect", errno.ECONNREFUSED)
+def verify_fleet_liveness(status, body, expected_pid):
+    if status != 200: return False, "http_status"
+    try: payload=json.loads(body)
+    except Exception: return False, "invalid_json"
+    if not isinstance(payload, dict): return False, "body_not_object"
+    if payload.get("alive") is not True: return False, "alive_not_true"
+    pid=payload.get("pid")
+    if type(pid) is not int or pid <= 0: return False, "pid_invalid"
+    if pid != expected_pid: return False, "pid_mismatch"
+    return True, "verified"
 '''
 
 
@@ -169,7 +179,7 @@ def _make_stubs(home: Path, bot_body: str, bot_http: str = "503") -> Path:
     lc.write_text(
         "#!/bin/sh\n"
         f"echo \"$@\" >> '{calls}'\n"
-        "case \"$1\" in print) exit 0;; *) exit 0;; esac\n",
+        "case \"$1\" in print) printf '  pid = 4242\\n'; exit 0;; *) exit 0;; esac\n",
         encoding="utf-8",
     )
     lc.chmod(0o755)
@@ -240,7 +250,7 @@ def test_fleet_without_console_assets_is_not_restarted(tmp_path):
     calls = _run(tmp_path, _LOGGED_OUT_BODY, "fleet-livez-bot")
     probes = (tmp_path / "home/.local/bin/probe.argv").read_text().splitlines()
     assert "9998/livez" in probes and "9998/" not in probes, probes
-    assert "com.whatsoup.whatsoup-fleet" not in calls, (
+    assert "kickstart" not in calls and "bootstrap" not in calls, (
         f"a serving fleet must not be restarted for a missing console; calls:\n{calls}"
     )
 
