@@ -32,7 +32,7 @@ the index host and verifies it ends with the configured suffix.
 ```json
 "memory": {
   "pinecone": {
-    "expectedHostSuffix": "-qkdgrnz.svc.aped-4627-b74a.pinecone.io"
+    "expectedHostSuffix": "-example-project.svc.example-region.pinecone.io"
   }
 }
 ```
@@ -42,18 +42,34 @@ guard matches it as a host segment (`host.includes("-<projectId>.")`,
 `matchesPineconeProjectGuard` in `src/lib/pinecone-project-guard.ts`), and
 the host URL embeds the short slug, so a UUID never matches. When both
 fields are set, both must match, and a matching `projectId` alone also
-satisfies the runtime guard. The suffix above, copied from the Pinecone
-console's index host field, is the simplest guard. Keep its leading `-`:
+satisfies the runtime guard. The suffix above is a placeholder: take your
+own from the host of any index in the project (the Pinecone console shows
+it), starting at the hyphen before the short slug. A suffix is the simplest
+guard. Keep its leading `-`:
 for agent and chat instances, the instance-config checker
 (`scripts/check-instance-config.ts`) expects the
 `-<slug>.svc.<env>.pinecone.io` shape and reports a `memory.pinecone` block
 without `expectedHostSuffix`, even when `projectId` is set.
 
-A suffix that the index host does not end with, a `projectId` that the
-host does not contain as that segment, or, on every named instance except
-the operator instance, neither field set causes `pineconeReadiness` to
-report `project_mismatch`, and the memory layer is disabled for that
-instance. This
+`pineconeReadiness` checks the resolved guard. Each field comes from
+`memory.pinecone`, else from `PINECONE_PROJECT_ID` or
+`PINECONE_EXPECTED_HOST_SUFFIX`; when neither field resolves, the operator
+instance is held to its built-in default project and an unnamed instance
+to no guard. Readiness reports `disabled` first when the index name is
+empty or the API key is missing. Otherwise it reports `project_mismatch`
+when a named instance other than the operator instance has no resolved
+guard, when the index host does not end with the suffix, or when the host
+does not contain the `projectId` as that segment. In each of these
+`project_mismatch` cases the memory provider refuses its guarded Pinecone
+calls (they report `project_guard_failed` or throw `PINECONE_UNAVAILABLE`).
+The chat runtime and the `memory_write` tool make those calls. Two other
+searches resolve the same guard but do not refuse a missing one: when the
+index host does not match, `knowledge_search` returns a tool error and the
+Pinecone watch search (`createPineconeWatchSearch`) throws, and when no
+guard resolves, both search unchecked. Readiness alone therefore does not
+show that these searches were refused. On a chat instance, memory
+consolidation does not start unless readiness is `ready`, while
+enrichment, which needs only an index name, is still enabled. This
 is the correct fail-safe: a wrong-project query returns unrelated data, which
 is worse than no data.
 
@@ -62,7 +78,7 @@ is worse than no data.
 ## Worked example: rb-bot (RBLab project)
 
 **Pinecone project:** RBLab (project id 921d6052, internal reference only)  
-**Index host suffix:** `qkdgrnz.svc.aped-4627-b74a.pinecone.io`  
+**Index host suffix:** `-example-project.svc.example-region.pinecone.io`\
 **Indexes created:** `claude`, `codex`, `whatsapp-bot`, `rb-mind`
 
 `~/.config/whatsoup/instances/rb-bot/config.json` (memory.pinecone block):
@@ -71,7 +87,7 @@ is worse than no data.
 "memory": {
   "pinecone": {
     "apiKeyEnv": "PINECONE_API_KEY",
-    "expectedHostSuffix": "-qkdgrnz.svc.aped-4627-b74a.pinecone.io",
+    "expectedHostSuffix": "-example-project.svc.example-region.pinecone.io",
     "index": "whatsapp-bot",
     "allowedIndexes": ["whatsapp-bot", "claude", "codex", "rb-mind"],
     "knowledgeSearch": {
@@ -155,7 +171,7 @@ project. Project routing guards still apply independently.
 ## Provisioning a new bot memory layer
 
 1. Create a Pinecone project in the console for the bot's principal (e.g., MLLab, EWLab).
-2. Note the index host suffix from any index's host URL (everything from the short slug onward).
+2. Note the index host suffix from any index's host URL: everything from the hyphen before the short slug onward, for example `-example-project.svc.example-region.pinecone.io`.
 3. Create required indexes (`whatsapp-bot` minimum; add `claude`/`codex`/`<name>-mind` as needed).
 4. Install the API key:
    - Preferred: `security add-generic-password -s pinecone -a <username> -w <key>` at a GUI session.
