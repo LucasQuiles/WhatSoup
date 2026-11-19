@@ -2,7 +2,9 @@
 #
 # Triggered on any v* tag push. Runs the guard-only subset of verify:release
 # that is meaningful at release time and does not require deploy-key secrets
-# (test-integrity is gated separately in quality.yml on PRs).
+# (test-integrity is not run here: after the tag's Quality run completes,
+# private-test-integrity.yml scans the tag and uploads a receipt; this
+# workflow neither waits for nor reads that result).
 #
 # This complements the pre-push hook (scripts/pre-push-guard.ts) which runs
 # verify:release locally — but cannot be relied upon for pushes from the
