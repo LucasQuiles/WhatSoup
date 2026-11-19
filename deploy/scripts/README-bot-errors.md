@@ -2073,7 +2073,7 @@ only bounds which bytes this preview may read; it never conveys caller identity
 or authority, so the invoking wrapper must source the root from trusted config.
 
 On success the preview prints the rendered report on stdout and exits 0. A
-request it cannot qualify or render prints one JSON line,
+refusal that carries a qualification code prints one JSON line,
 `{"outcome": "inconclusive", "reason": "<code>"}`, on stderr and exits 3; the
 reason is a stable code such as `missing_approved_evidence_root` or
 `evidence_hash_mismatch`.
@@ -2092,7 +2092,7 @@ owner-decision facts. Its permitted lifecycle states are `accepted`,
 `waiting_approval`, `paused`, and `recovery_unverified`. It also carries the
 required `workStarted` flag: `accepted` requires it false and `investigating`
 requires it true. `closed` requires `administrativeClosure: true`, and no other
-state may carry it. `accepted` and `investigating` each require an ownership
+state may set it true. `accepted` and `investigating` each require an ownership
 record with `facts.acceptance: "accepted"` and a nonblank
 `facts.ownerIdentity`; that is a consistency check over retained local bytes,
 not authenticated permission or caller identity. `open` owner decisions require
