@@ -52,12 +52,6 @@ from lib.bot_errors_redaction import (
     redact_bot_errors_text,
     redact_json_value as redact_shared_json_value,
 )
-from lib.bot_errors_reporting import (
-    ReportLimits,
-    ReportQualificationError,
-    qualify_report_file,
-    render_human_report,
-)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -11922,6 +11916,16 @@ def main() -> int:
         parser.error("--human-report-approved-root and the --human-report-max-* limits need --format-human-report")
 
     if preview.format_human_report is not None:
+        # Imported here, not at module scope: a normal cycle must start even where
+        # this optional module is absent, as on a host between the deployer's
+        # copies or one deployed with a manifest that lacks the entry.
+        from lib.bot_errors_reporting import (
+            ReportLimits,
+            ReportQualificationError,
+            qualify_report_file,
+            render_human_report,
+        )
+
         try:
             report = qualify_report_file(
                 Path(preview.format_human_report),
