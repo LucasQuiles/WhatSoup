@@ -108,7 +108,9 @@ enabling succeeded). It takes the health profile from
 else the host's profile in the new release; the label and the state folder come
 from the environment only (`BOT_ERRORS_HEALTH_LABEL`, `BOT_ERRORS_STATE_DIR`) or
 their defaults; and it writes the settings it reads into the job at install
-time. A wrapper job that is not re-pinned is read as
+time. Activation recognizes the reinstalled job only with the default label and
+state folder, so keep both at their defaults for a job that must pass
+activation. A wrapper job that is not re-pinned is read as
 before: activation accepts it when the release it runs from meets the
 requirement.
 

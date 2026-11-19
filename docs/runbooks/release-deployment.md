@@ -1112,9 +1112,10 @@ bash deploy/scripts/render-release-drift-launchd.sh \
 ```
 
 Exit codes: `target-differs` is advisory and exits 0; the `release-currency`
-finding is still emitted and printed. Real integrity drift exits 1 and an
-`inconclusive` observation exits 2, so a host that only differs from the target
-does not read as a failed job.
+finding is still emitted and printed. Real integrity drift exits 1 when its
+alert is published; an `inconclusive` observation, or an alert that could not
+be published, exits 2. A host that only differs from the target therefore does
+not read as a failed job.
 
 The same schedule emits integrity findings under `release-drift` and currency
 findings under `release-currency`. `--clear-on-ok` clears each source only from
