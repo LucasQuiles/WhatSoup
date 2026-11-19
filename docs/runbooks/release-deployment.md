@@ -1545,7 +1545,7 @@ default: the same URL as the macOS renderer's default, with
 `refs/heads/main`. `WHATSOUP_RELEASE_TARGET_URL` and
 `WHATSOUP_RELEASE_TARGET_REF` in the unit's environment replace them. An SSH
 URL works only with a key the unit can use without an agent, because a systemd
-user unit has no SSH agent socket; otherwise every currency check is
+user unit has no SSH agent socket by default; otherwise every currency check is
 inconclusive and the unit exits 2.
 
 ## Pinned npm toolchain in `verify:release`

@@ -294,8 +294,8 @@ describe('whatsoup-release-drift systemd unit', () => {
   });
 
   it('defaults the currency target to the HTTPS URL the macOS renderer uses, and passes a set one through', () => {
-    // A systemd user unit has no SSH agent socket, so an SSH default is
-    // inconclusive on every host without a usable key.
+    // A systemd user unit has no SSH agent socket by default, so an SSH default
+    // is inconclusive on a host without a key the unit can use.
     const rendererDefault = /^target_url="\$\{WHATSOUP_RELEASE_TARGET_URL:-([^}]+)\}"$/m
       .exec(readFileSync(rendererPath, 'utf8'))?.[1];
     expect(rendererDefault).toMatch(/^https:\/\//);
