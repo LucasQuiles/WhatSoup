@@ -11859,41 +11859,69 @@ def run_daemon(interval: int, max_events: int) -> None:
         time.sleep(interval)
 
 
-def _human_report_preview_parser() -> argparse.ArgumentParser:
+class _SingleValue(argparse.Action):
+    """One non-empty value. "Last wins" would silently drop a different second
+    value, and an empty value names nothing, so both are usage errors."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values == "":
+            parser.error(f"{option_string} needs a non-empty value")
+        current = getattr(namespace, self.dest, None)
+        if current is not None and current != values:
+            parser.error(f"{option_string} was given twice with different values")
+        setattr(namespace, self.dest, values)
+
+
+class _RepeatableValue(argparse.Action):
+    """Each non-empty value of a repeatable option; an empty value is a usage error."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values == "":
+            parser.error(f"{option_string} needs a non-empty value")
+        setattr(namespace, self.dest, [*(getattr(namespace, self.dest, None) or []), values])
+
+
+class _HumanReportPreviewParser(argparse.ArgumentParser):
     """Options of the non-emitting human-report preview, accepted by full name only.
 
     They stay off the dispatcher's own parser: registered there, they would make
     abbreviations that parser has always resolved ambiguous (``--format`` for
-    ``--format-event``, ``--h`` for ``--help``).
+    ``--format-event``, ``--h`` for ``--help``). This parser reads only the
+    tokens the dispatcher's parser did not know, and reports every error
+    through that parser, so a misused preview option prints its usage, exit 2.
     """
-    preview = argparse.ArgumentParser(
-        description="human-report preview options (full option names only):",
-        usage=argparse.SUPPRESS,
-        add_help=False,
-        allow_abbrev=False,
-    )
-    preview.add_argument(
-        "--format-human-report",
-        help="qualify and render one retained-evidence human report JSON file without sending",
-    )
-    preview.add_argument(
-        "--human-report-approved-root",
-        action="append",
-        default=[],
-        metavar="DIR",
-        help="trusted configuration root allowed to contain human-report evidence (repeatable)",
-    )
-    preview.add_argument("--human-report-max-characters", type=int)
-    preview.add_argument("--human-report-max-utf8-bytes", type=int)
-    return preview
+
+    def __init__(self, dispatcher: argparse.ArgumentParser) -> None:
+        super().__init__(
+            prog=dispatcher.prog,
+            description="human-report preview options (full option names only):",
+            usage=argparse.SUPPRESS,
+            add_help=False,
+            allow_abbrev=False,
+        )
+        self._dispatcher = dispatcher
+        self.add_argument(
+            "--format-human-report",
+            action=_SingleValue,
+            help="qualify and render one retained-evidence human report JSON file without sending",
+        )
+        self.add_argument(
+            "--human-report-approved-root",
+            action=_RepeatableValue,
+            default=[],
+            metavar="DIR",
+            help="trusted configuration root allowed to contain human-report evidence (repeatable)",
+        )
+        self.add_argument("--human-report-max-characters", type=int, action=_SingleValue)
+        self.add_argument("--human-report-max-utf8-bytes", type=int, action=_SingleValue)
+
+    def error(self, message):
+        self._dispatcher.error(message)
 
 
 def main() -> int:
-    preview_parser = _human_report_preview_parser()
-    preview, remaining = preview_parser.parse_known_args()
     parser = argparse.ArgumentParser(
         description="Drain local BOT ERRORS outbox",
-        epilog=preview_parser.format_help(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--once", action="store_true", help="process ready events once and exit")
@@ -11901,13 +11929,19 @@ def main() -> int:
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--max-events", type=int, default=25)
     parser.add_argument("--format-event", help="format one event JSON file without sending")
-    args = parser.parse_args(remaining)
+    preview_parser = _HumanReportPreviewParser(parser)
+    parser.epilog = preview_parser.format_help()
+    # The dispatcher's parser reads the whole command line first, as the only
+    # parser did before the preview options: a help option keeps its meaning
+    # and wins over any preview option, and a dispatcher option never takes a
+    # value from across a preview option. The tokens it does not know go to the
+    # preview parser, which refuses all but its own ("unrecognized arguments").
+    args, unknown = parser.parse_known_args()
+    preview = preview_parser.parse_args(unknown)
 
-    # Without these refusals an empty report name, or a preview option given
-    # without a report file, would fall through to a live dispatch cycle. They
-    # exit before any lock, state or outbox is touched.
-    if preview.format_human_report == "":
-        parser.error("--format-human-report needs a file name")
+    # Without this refusal a preview option given without a report file would
+    # fall through to a live dispatch cycle. It exits before any lock, state or
+    # outbox is touched.
     if preview.format_human_report is None and (
         preview.human_report_approved_root
         or preview.human_report_max_characters is not None
