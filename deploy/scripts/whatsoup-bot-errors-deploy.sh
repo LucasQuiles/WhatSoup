@@ -79,6 +79,9 @@ FILES=(
   # crash on load while do_verify still prints VERIFY_OK. Kept managed by
   # tests/scripts/deployer-import-closure.test.ts, which derives the required
   # set from the parsed import graph -- never from this array.
+  # bot_errors_reporting.py: bot-errors-dispatcher.py imports it at module scope
+  # for the non-emitting --format-human-report preview.
+  "deploy/scripts/lib/bot_errors_reporting.py"
   # classify_health.py: bot-errors-health-check.py and
   # bot-errors-heartbeat-watchdog.py import recovery_debt_issue from it at
   # module scope to validate the /health recovery_debt contract (#3224).

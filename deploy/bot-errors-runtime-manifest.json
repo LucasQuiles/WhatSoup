@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b81b5fc962b249573e87bbc7ecf59b8b302f8685359103bc6ff7ac7a9eb8e2f0",
+      "sha256": "31132e1799e5d143e1a49d397f92e71a3b9f98b550bfb98b7a056ac52ae4f1e9",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -143,7 +143,11 @@
         "orphanPagedAtEpoch",
         "observe_credential_members(paths)",
         "send_credential_pages(paths)",
-        "def send_meta_alert("
+        "def send_meta_alert(",
+        "--format-human-report",
+        "--human-report-approved-root",
+        "qualify_report_file(",
+        "render_human_report("
       ]
     },
     {

@@ -52,6 +52,12 @@ from lib.bot_errors_redaction import (
     redact_bot_errors_text,
     redact_json_value as redact_shared_json_value,
 )
+from lib.bot_errors_reporting import (
+    ReportLimits,
+    ReportQualificationError,
+    qualify_report_file,
+    render_human_report,
+)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -11866,7 +11872,38 @@ def main() -> int:
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--max-events", type=int, default=25)
     parser.add_argument("--format-event", help="format one event JSON file without sending")
+    parser.add_argument(
+        "--format-human-report",
+        help="qualify and render one retained-evidence human report JSON file without sending",
+    )
+    parser.add_argument(
+        "--human-report-approved-root",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="trusted configuration root allowed to contain human-report evidence (repeatable)",
+    )
+    parser.add_argument("--human-report-max-characters", type=int)
+    parser.add_argument("--human-report-max-utf8-bytes", type=int)
     args = parser.parse_args()
+
+    if args.format_human_report:
+        try:
+            report = qualify_report_file(
+                Path(args.format_human_report),
+                approved_roots=tuple(Path(root) for root in args.human_report_approved_root),
+            )
+            print(render_human_report(
+                report,
+                limits=ReportLimits(
+                    max_characters=args.human_report_max_characters,
+                    max_utf8_bytes=args.human_report_max_utf8_bytes,
+                ),
+            ))
+        except ReportQualificationError as exc:
+            print(json.dumps({"outcome": "inconclusive", "reason": exc.code}, sort_keys=True), file=sys.stderr)
+            return 3
+        return 0
 
     if args.format_event:
         print(format_event(read_json(Path(args.format_event))))
@@ -11889,7 +11926,7 @@ def main() -> int:
         }))
         return INCIDENT_CYCLE_REQUIRED_EXIT
     except ControllerStateRequired as exc:
-        import sys, traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        import traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         project_dispatcher_state_mode(exc.diagnostic)
         emit_state_recovery_fallback(exc.diagnostic)
         print(json.dumps({
