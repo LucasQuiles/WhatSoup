@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import shutil
@@ -384,10 +385,10 @@ def test_rejects_injected_unicode_limits_and_cli_requires_approved_root(tmp_path
 
     request = tmp_path / "request.json"
     request.write_text(json.dumps(_document(tmp_path / "cli")), encoding="utf-8")
-    command = [sys.executable, "-B", str(_SCRIPTS / "bot-errors-dispatcher.py"), "--format-human-report", str(request)]
-    refused = subprocess.run(command, text=True, capture_output=True, timeout=10, check=False)
+    preview = ("--format-human-report", str(request))
+    refused = _dispatcher_cli(tmp_path, *preview)
     assert refused.returncode == 3 and "missing_approved_evidence_root" in refused.stderr and "Traceback" not in refused.stderr
-    accepted = subprocess.run([*command, "--human-report-approved-root", str(tmp_path / "cli")], text=True, capture_output=True, timeout=10, check=False)
+    accepted = _dispatcher_cli(tmp_path, *preview, "--human-report-approved-root", str(tmp_path / "cli"))
     assert accepted.returncode == 0, accepted.stderr
 
 
@@ -455,17 +456,35 @@ def test_ordinary_unicode_text_still_renders(tmp_path: Path) -> None:
     assert f"*Queue delivery delayed — {target}*" in rendered
 
 
-# The command-line cases below start the dispatcher in a child interpreter
-# through a probe that replaces send_whatsapp, so a command line that wrongly
-# falls through to a dispatch cycle can never deliver anything, and every state
-# file stays under the test's own directory.
+# Every case below that starts the dispatcher does so in a child interpreter
+# running _DISPATCHER_PROBE, in the environment that _dispatcher_env builds.
+# What is isolated, exactly:
+# - The environment: every inherited BOT_ERRORS_* variable and
+#   WHATSOUP_ALERT_SINK are removed (so the runner's socket, owner route, group
+#   and expected ids, outbox and write-failure folder never reach the child);
+#   PYTHONDONTWRITEBYTECODE is set; HOME, TMPDIR and the
+#   write-failure folder are new empty folders under the test's directory; the
+#   roster and machine name are fixtures; the e-mail fallback names a path
+#   where no file exists; the state and outbox are the test's own.
+# - Delivery: the probe replaces send_whatsapp, json_rpc_call and
+#   email_fallback with stubs that record each attempt in the send capture
+#   under the test's directory and then refuse it.
+# - Cycles: unless a case passes cycle=True, the child stops at once if it
+#   enters run_once or run_daemon.
+# Not isolated: the child reads the repository's tracked files and the host
+# name, and inherits the runner's other variables.
 _DISPATCHER_PROBE = r'''
 import importlib.util
+import json
+import os
 import sys
 from pathlib import Path
 
 scripts = Path(sys.argv[1])
-if sys.argv[2] == "block-reporting":
+flags = set(sys.argv[2].split(","))
+# quiet: only the dispatcher's own output and exit status, as from the script.
+quiet = "quiet" in flags
+if "block-reporting" in flags:
     # Importing the module then raises ModuleNotFoundError, exactly as in a
     # tree that lacks the file.
     sys.modules["lib.bot_errors_reporting"] = None
@@ -474,20 +493,52 @@ spec = importlib.util.spec_from_file_location("probe_dispatcher", scripts / "bot
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
-print("PROBE_IMPORTED=1")
+if not quiet:
+    print("PROBE_IMPORTED=1")
+capture = Path(os.environ["BOT_ERRORS_DRY_SEND_CAPTURE"])
 
 
-def refuse_send(*args, **kwargs):
-    raise AssertionError("a probe run must not send")
+def record_attempt(channel):
+    # Written before refusing: the dispatcher catches a failed group send and
+    # tries its next channel, so a raised error alone can go unseen.
+    with capture.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"probeRefusedSend": channel}) + "\n")
 
 
-module.send_whatsapp = refuse_send
+def refuse(channel):
+    def refused(*args, **kwargs):
+        record_attempt(channel)
+        raise AssertionError("a probe run must not send: " + channel)
+    return refused
+
+
+def no_email(*args, **kwargs):
+    record_attempt("email")
+    return False
+
+
+module.send_whatsapp = refuse("group")
+module.json_rpc_call = refuse("json-rpc")
+module.email_fallback = no_email
+if "cycle" not in flags:
+    def stop_at(name):
+        def stop(*args, **kwargs):
+            sys.stderr.write("PROBE_ENTERED=" + name + ": a parser-only case reached a dispatch cycle\n")
+            sys.stderr.flush()
+            os._exit(97)
+        return stop
+
+    module.run_once = stop_at("run_once")
+    module.run_daemon = stop_at("run_daemon")
 if len(sys.argv) > 3:
     sys.argv = ["bot-errors-dispatcher.py", *sys.argv[3:]]
     try:
         code = module.main()
     except SystemExit as exc:
         code = exc.code
+    if quiet:
+        sys.stdout.flush()
+        sys.exit(code)
     print("PROBE_EXIT=" + str(code))
 print("PROBE_REPORTING_LOADED=" + str(sys.modules.get("lib.bot_errors_reporting") is not None))
 '''
@@ -505,26 +556,70 @@ _FIXTURE_ROSTER = {
 }
 
 
-def _probe_dispatcher(scripts: Path, state: Path, mode: str, *argv: str) -> subprocess.CompletedProcess[str]:
-    env = dict(
-        os.environ,
+_DISPATCHER_RUNS = itertools.count()
+
+
+def _dispatcher_env(base: Path, state: Path) -> dict[str, str]:
+    """A cleaned copy of this process's environment for one dispatcher child.
+
+    HOME, TMPDIR and the write-failure folder are new empty folders for each
+    start, so every default the dispatcher derives from them (the private
+    roster and env file, the e-mail script, two write-failure folders) names
+    nothing real. Nothing is created under ``state``: a refused command line
+    must leave it absent. The socket, owner-route and expected-id variables
+    stay absent.
+    """
+    run = base / f"dispatcher-run-{next(_DISPATCHER_RUNS)}"
+    home, tmp, writefail = run / "home", run / "tmp", run / "writefail"
+    for folder in (home, tmp, writefail):
+        folder.mkdir(parents=True)
+    roster = run / "expected-fleet.json"
+    roster.write_text(json.dumps(_FIXTURE_ROSTER), encoding="utf-8")
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("BOT_ERRORS_") and key != "WHATSOUP_ALERT_SINK"
+    }
+    env.update(
+        HOME=str(home),
+        TMPDIR=str(tmp),
+        PYTHONDONTWRITEBYTECODE="1",
         BOT_ERRORS_STATE_DIR=str(state),
         BOT_ERRORS_OUTBOX_DIR=str(state / "outbox"),
-        BOT_ERRORS_JID="12345@g.us",
+        BOT_ERRORS_WRITEFAIL_DIR=str(writefail),
+        BOT_ERRORS_FLEET_SENTINEL_HOSTS=str(roster),
+        BOT_ERRORS_MACHINE="host-a",
+        BOT_ERRORS_EMAIL_FALLBACK=str(run / "no-email-fallback"),
+        BOT_ERRORS_DRY_SEND_CAPTURE=str(base / _SEND_CAPTURE),
+        BOT_ERRORS_ENV_FILE=str(run / "bot-errors.env"),
     )
+    return env
+
+
+def _probe_dispatcher(
+    base: Path,
+    *argv: str,
+    state: Path | None = None,
+    scripts: Path = _SCRIPTS,
+    block_reporting: bool = False,
+    cycle: bool = False,
+    quiet: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Start the dispatcher through the probe; without ``cycle`` the case is parser-only."""
+    flags = [name for name, on in (("block-reporting", block_reporting), ("cycle", cycle), ("quiet", quiet)) if on]
     return subprocess.run(
-        [sys.executable, "-I", "-B", "-c", _DISPATCHER_PROBE, str(scripts), mode, *argv],
+        [sys.executable, "-I", "-B", "-c", _DISPATCHER_PROBE, str(scripts), ",".join(flags) or "plain", *argv],
         text=True,
         capture_output=True,
         timeout=60,
         check=False,
-        env=env,
+        env=_dispatcher_env(base, base / "state" if state is None else state),
     )
 
 
-def _dispatcher_cli(*argv: str) -> subprocess.CompletedProcess[str]:
-    command = [sys.executable, "-B", str(_SCRIPTS / "bot-errors-dispatcher.py"), *argv]
-    return subprocess.run(command, text=True, capture_output=True, timeout=30, check=False)
+def _dispatcher_cli(base: Path, *argv: str) -> subprocess.CompletedProcess[str]:
+    """The command line as a user runs it: the dispatcher's own output and exit status."""
+    return _probe_dispatcher(base, *argv, quiet=True)
 
 
 @pytest.mark.parametrize(
@@ -540,7 +635,7 @@ def test_preview_options_without_a_report_file_refuse_before_any_state(tmp_path:
     root = tmp_path / "approved"
     root.mkdir()
     state = tmp_path / "state"
-    result = _probe_dispatcher(_SCRIPTS, state, "keep", *(value.format(root=root) for value in argv))
+    result = _probe_dispatcher(tmp_path, *(value.format(root=root) for value in argv), state=state)
 
     assert "PROBE_EXIT=2" in result.stdout.splitlines(), result.stdout + result.stderr
     assert "usage:" in result.stderr
@@ -570,19 +665,19 @@ def test_event_preview_keeps_every_spelling_main_accepted(tmp_path: Path, spelli
     # Each spelling is an abbreviation of --format-event that the parser has
     # always resolved; the preview options must not make it ambiguous.
     event = _event_file(tmp_path)
-    expected = _dispatcher_cli("--format-event", str(event))
+    expected = _dispatcher_cli(tmp_path, "--format-event", str(event))
     assert expected.returncode == 0, expected.stderr
     assert "Queue delivery delayed" in expected.stdout
 
     argv = (f"{spelling}{event}",) if spelling.endswith("=") else (spelling, str(event))
-    observed = _dispatcher_cli(*argv)
+    observed = _dispatcher_cli(tmp_path, *argv)
     assert observed.returncode == 0, observed.stderr
     assert observed.stdout.splitlines()[0] == expected.stdout.splitlines()[0]
     assert "Queue delivery delayed" in observed.stdout
 
 
-def test_help_abbreviation_keeps_its_meaning_and_lists_the_preview_options() -> None:
-    result = _dispatcher_cli("--h")
+def test_help_abbreviation_keeps_its_meaning_and_lists_the_preview_options(tmp_path: Path) -> None:
+    result = _dispatcher_cli(tmp_path, "--h")
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("usage:")
     assert "--format-human-report" in result.stdout
@@ -609,7 +704,7 @@ def test_dispatcher_imports_from_a_tree_without_the_preview_module(tmp_path: Pat
     # A host between the deployer's copies, or deployed with a manifest that
     # lacks the entry, holds the dispatcher without the preview module.
     scripts = _manifest_tree_without_the_preview_module(tmp_path)
-    result = _probe_dispatcher(scripts, tmp_path / "state", "keep")
+    result = _probe_dispatcher(tmp_path, scripts=scripts)
     lines = result.stdout.splitlines()
     assert "PROBE_IMPORTED=1" in lines, result.stderr
     assert "PROBE_REPORTING_LOADED=False" in lines
@@ -617,7 +712,7 @@ def test_dispatcher_imports_from_a_tree_without_the_preview_module(tmp_path: Pat
 
 def test_once_cycle_runs_without_the_preview_module(tmp_path: Path) -> None:
     state = tmp_path / "state"
-    cycle = _probe_dispatcher(_SCRIPTS, state, "block-reporting", "--once")
+    cycle = _probe_dispatcher(tmp_path, "--once", state=state, block_reporting=True, cycle=True)
     lines = cycle.stdout.splitlines()
     assert "PROBE_EXIT=0" in lines, cycle.stdout + cycle.stderr
     assert "PROBE_REPORTING_LOADED=False" in lines
@@ -629,13 +724,13 @@ def test_once_cycle_runs_without_the_preview_module(tmp_path: Path) -> None:
     request.write_text(json.dumps(_document(evidence)), encoding="utf-8")
     preview_state = tmp_path / "preview-state"
     preview = _probe_dispatcher(
-        _SCRIPTS,
-        preview_state,
-        "block-reporting",
+        tmp_path,
         "--format-human-report",
         str(request),
         "--human-report-approved-root",
         str(evidence),
+        state=preview_state,
+        block_reporting=True,
     )
     assert preview.returncode != 0 and "PROBE_EXIT=" not in preview.stdout
     assert "ModuleNotFoundError" in preview.stderr
@@ -674,9 +769,9 @@ def test_a_probe_cycle_leaves_write_failure_records_outside_its_environment_alon
         monkeypatch.setenv(variable, str(value))
 
     state = tmp_path / "state"
-    cycle = _probe_dispatcher(_SCRIPTS, state, "keep", "--once")
+    cycle = _probe_dispatcher(tmp_path, "--once", state=state, cycle=True)
 
-    moved = [str(path.relative_to(outside)) for path in breadcrumbs if not path.is_file()]
+    moved =[str(path.relative_to(outside)) for path in breadcrumbs if not path.is_file()]
     assert moved == [], cycle.stdout + cycle.stderr
     assert "PROBE_EXIT=0" in cycle.stdout.splitlines(), cycle.stdout + cycle.stderr
     assert (state / "locks" / "dispatcher.lock").is_file(), "the cycle must really have run"
