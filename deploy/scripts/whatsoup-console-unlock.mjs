@@ -2,8 +2,9 @@
 // "already-valid" or "unlocked" — every other outcome exits 1 (review finding #1).
 // The root token is read here from the private fleet-token file and crosses
 // CDP only as a Runtime.callFunctionOn structured argument, never in argv, the
-// environment or evaluatable JS source (finding #2). Only fleet-origin tabs
-// are ever touched (finding #3). All CDP calls carry timeouts (finding #4).
+// environment or evaluatable JS source (finding #2). Only tabs on the exact
+// loopback fleet origin are ever touched, checked again right before each
+// credential-bearing step (finding #3). All CDP calls carry timeouts (finding #4).
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,6 +12,45 @@ import { dirname, join } from "node:path";
 const PORT  = process.env.CDP_PORT || "9333";
 const FLEET = process.env.FLEET || "http://localhost:9227";
 const fail = (msg) => { console.log(msg); process.exit(1); };
+
+function parseCdpPort(value) {
+  if (!/^[0-9]{1,5}$/.test(value)) return null;
+  const port = Number(value);
+  return port > 0 && port <= 65535 ? port : null;
+}
+
+// FLEET must be a plain loopback http URL. Its exact origin, and its path when
+// it has one, is the only place the token may go: a text prefix test would also
+// accept http://localhost:9227@example.invalid/ or a sibling path.
+function parseLoopbackFleetUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.protocol !== "http:" || !loopback || url.username || url.password || url.search || url.hash) return null;
+  const pathname = url.pathname.replace(/\/+$/, "") || "/";
+  return { origin: url.origin, pathname, targetUrl: `${url.origin}${pathname}` };
+}
+
+function matchesFleetTarget(value, fleet) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.origin !== fleet.origin) return false;
+  return fleet.pathname === "/" || url.pathname === fleet.pathname || url.pathname.startsWith(`${fleet.pathname}/`);
+}
+
+const cdpPort = parseCdpPort(PORT);
+if (cdpPort === null) fail("invalid-cdp-port");
+const fleet = parseLoopbackFleetUrl(FLEET);
+if (fleet === null) fail("invalid-fleet-url");
+const CDP = `http://localhost:${cdpPort}`;
 
 const FLEET_TOKEN_RE = /^[0-9a-f]{64}$/;
 const MAX_FLEET_TOKEN_FILE_BYTES = 4096;
@@ -86,13 +126,13 @@ const watchdog = setTimeout(() => fail("timeout"), 45000);
 let ws;
 try {
   const j = async (u, o) => (await fetch(u, o)).json();
-  // Target selection: ONLY page tabs already on the fleet origin — never
+  // Target selection: ONLY page tabs already on the fleet target — never
   // repurpose an unrelated tab. If none, open a dedicated fleet tab.
-  const targets = await j(`http://localhost:${PORT}/json`);
+  const targets = await j(`${CDP}/json`);
   // Skip fleet tabs already attached by another CDP client (no wsUrl) — fall back to a new tab.
-  let page = targets.find(t => t.type === "page" && (t.url || "").startsWith(FLEET) && t.webSocketDebuggerUrl);
+  let page = targets.find(t => t.type === "page" && matchesFleetTarget(t.url, fleet) && t.webSocketDebuggerUrl);
   if (!page) {
-    const mk = `http://localhost:${PORT}/json/new?${encodeURIComponent(FLEET + "/")}`;
+    const mk = `${CDP}/json/new?${encodeURIComponent(fleet.targetUrl)}`;
     page = await j(mk, { method: "PUT" }).catch(() => null) || await j(mk).catch(() => null);
   }
   if (!page || !page.webSocketDebuggerUrl) fail("no-fleet-target");
@@ -113,23 +153,35 @@ try {
     return { val: r?.result?.value };
   };
   await send("Page.enable"); await send("Runtime.enable");
-  // Navigate only if the tab isn't already on the fleet origin (preserves SPA state).
-  if (!(page.url || "").startsWith(FLEET)) await send("Page.navigate", { url: FLEET + "/" });
+  // Navigate only if the tab isn't already on the fleet target (preserves SPA state).
+  // A tab opened above may not report the fleet URL yet; the checks below gate the token.
+  if (!matchesFleetTarget(page.url, fleet)) await send("Page.navigate", { url: fleet.targetUrl });
   // Wait until the LIVE document is on the fleet origin AND complete — target.url can
   // report the requested URL before the navigation commits (about:blank race).
   let ready = false;
   for (let i = 0; i < 60; i++) {
-    const rs = await ev(`location.href.startsWith(${JSON.stringify(FLEET)}) && document.readyState === "complete"`);
+    const rs = await ev(`location.origin === ${JSON.stringify(fleet.origin)} && document.readyState === "complete"`);
     if (rs.val === true) { ready = true; break; }
     await new Promise(r => setTimeout(r, 250));
   }
   if (!ready) fail("page-not-ready");
+
+  // Right before each credential-bearing step, read CDP's current URL for this
+  // tab and the live document's origin again: either may have moved since.
+  const atExpectedFleetTarget = async () => {
+    const current = (await j(`${CDP}/json`)).find(t => t.id === page.id);
+    if (!current || !matchesFleetTarget(current.url, fleet)) return false;
+    const live = await ev(`location.origin === ${JSON.stringify(fleet.origin)}`);
+    return live.val === true;
+  };
+  if (!(await atExpectedFleetTarget())) fail("origin-mismatch");
 
   // 1. already valid? (no secret involved)
   const chk = await ev('fetch("/api/auth-ticket",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",body:JSON.stringify({audience:"api"})}).then(function(r){return r.ok?"valid":"locked"}).catch(function(){return "neterr"})', true);
   let outcome;
   if (chk.val === "valid") outcome = "already-valid";
   else {
+    if (!(await atExpectedFleetTarget())) fail("origin-mismatch");
     // 2. unlock — token passed as a structured argument, not as source text.
     const win = (await send("Runtime.evaluate", { expression: "window" }))?.result?.result;
     if (!win?.objectId) throw new Error("no-window-object");
