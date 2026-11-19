@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # Console auto-unlock wrapper: waits for the console browser's CDP endpoint,
-# then runs the CDP helper. The helper reads the root token itself from the
-# private fleet-token file (WHATSOUP_FLEET_TOKEN_FILE, default
-# ~/.config/whatsoup/fleet-tokens.json), so the token never passes through
-# argv, a shell variable, the environment, a URL or the clipboard.
+# then runs the CDP helper. Token source, keychain first as before: the login
+# keychain item whatsoup-console-token, handed to the helper in
+# WHATSOUP_CONSOLE_TOKEN (never argv, a URL or the clipboard); otherwise the
+# helper reads the private fleet-token file itself (WHATSOUP_FLEET_TOKEN_FILE,
+# default ~/.config/whatsoup/fleet-tokens.json), so that token passes through
+# no shell variable and no environment.
+# Token file preconditions: a regular file, not a symlink, owned by this user,
+# with no group or other permission bits (0600 or 0400), at most 64 KiB, JSON
+# with a 64-hex "active" token. The fleet server writes it that way.
+# Deploy order: install whatsoup-console-unlock.mjs first, then this wrapper.
+# An older helper reads only WHATSOUP_CONSOLE_TOKEN: with it, a host without a
+# keychain token gets "helper-outdated". An older wrapper works with the newer
+# helper unchanged.
 # Exit: 0 only when the helper reports already-valid/unlocked; 1 otherwise.
 set -uo pipefail
 CDP_PORT="${CDP_PORT:-9333}"; FLEET="${FLEET:-http://localhost:9227}"
+HELPER="$HOME/.local/bin/whatsoup-console-unlock.mjs"
+# A token exported by the caller is never a source.
+unset WHATSOUP_CONSOLE_TOKEN
 # Resolve node: PATH first, newest fnm install as fallback (no pinned version/user).
 NODE="$(command -v node || true)"
 if [ -z "$NODE" ]; then
@@ -15,4 +27,10 @@ fi
 [ -n "$NODE" ] && [ -x "$NODE" ] || { echo "no-node"; exit 1; }
 for i in $(seq 1 24); do curl -s --fail "http://localhost:$CDP_PORT/json/version" >/dev/null 2>&1 && break; sleep 0.5; done
 curl -s --fail "http://localhost:$CDP_PORT/json/version" >/dev/null 2>&1 || { echo "cdp-unreachable"; exit 1; }
-CDP_PORT="$CDP_PORT" FLEET="$FLEET" exec "$NODE" "$HOME/.local/bin/whatsoup-console-unlock.mjs"
+TOKEN=$(security find-generic-password -s whatsoup-console-token -w 2>/dev/null) || TOKEN=""
+if [ -n "$TOKEN" ]; then
+  CDP_PORT="$CDP_PORT" FLEET="$FLEET" WHATSOUP_CONSOLE_TOKEN="$TOKEN" exec "$NODE" "$HELPER"
+fi
+[ -f "$HELPER" ] || { echo "no-helper"; exit 1; }
+grep -q 'reads-fleet-token-file' "$HELPER" || { echo "helper-outdated"; exit 1; }
+CDP_PORT="$CDP_PORT" FLEET="$FLEET" exec "$NODE" "$HELPER"

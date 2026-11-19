@@ -1,13 +1,17 @@
 // Console auto-unlock via CDP. Prints ONE status line; exits 0 ONLY on
 // "already-valid" or "unlocked" — every other outcome exits 1 (review finding #1).
-// The root token is read here from the private fleet-token file and crosses
-// CDP only as a Runtime.callFunctionOn structured argument, never in argv, the
-// environment or evaluatable JS source (finding #2). Only tabs on the exact
+// Token source, keychain first as before: a token the wrapper handed over in
+// WHATSOUP_CONSOLE_TOKEN (its login keychain read); otherwise the private
+// fleet-token file, read here by descriptor (WHATSOUP_FLEET_TOKEN_FILE, default
+// ~/.config/whatsoup/fleet-tokens.json), so that token passes through no
+// environment. Marker read by the wrapper: reads-fleet-token-file
+// The token crosses CDP only as a Runtime.callFunctionOn structured argument,
+// never in argv or evaluatable JS source (finding #2). Only tabs on the exact
 // loopback fleet origin are ever touched, checked again right before each
 // credential-bearing step (finding #3). All CDP calls carry timeouts (finding #4).
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 const PORT  = process.env.CDP_PORT || "9333";
 const FLEET = process.env.FLEET || "http://localhost:9227";
@@ -53,24 +57,24 @@ if (fleet === null) fail("invalid-fleet-url");
 const CDP = `http://localhost:${cdpPort}`;
 
 const FLEET_TOKEN_RE = /^[0-9a-f]{64}$/;
-const MAX_FLEET_TOKEN_FILE_BYTES = 4096;
+// The server writes an active token, at most 4 accepted tokens and a timestamp
+// (src/fleet/token-storage.ts), under 1 KiB; 64 KiB leaves room for hand-edited
+// extra keys and still bounds the read.
+const MAX_FLEET_TOKEN_FILE_BYTES = 64 * 1024;
 
-function rejectFleetToken() {
-  throw new Error("fleet-token-invalid");
-}
+// A refusal carries one fixed reason; it never names the path or the content.
+class FleetTokenRefusal extends Error {}
+const refuseFleetToken = (reason) => { throw new FleetTokenRefusal(reason); };
 
-// Folder and file must belong to this uid and neither may be a symlink. The
-// folder may not be open to group or others; the file must be exactly 0600.
-function assertPrivateTokenDirectory(stat, uid) {
-  if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o077) !== 0) rejectFleetToken();
-}
-
-function assertPrivateTokenFile(stat, uid) {
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.uid !== uid || (stat.mode & 0o7777) !== 0o600) rejectFleetToken();
-}
-
-function assertSameIdentity(before, after) {
-  if (before.dev !== after.dev || before.ino !== after.ino) rejectFleetToken();
+// The earlier wrapper refused group or other permission bits, so 0600 and 0400
+// both pass. Each added rule blocks an exposure or a hang: a symlink at the
+// leaf, a FIFO or folder in place of the file, another owner. The folder is not
+// checked: the descriptor checks below bind the read to the file itself.
+function assertUsableTokenFile(stat, uid) {
+  if (stat.isSymbolicLink()) refuseFleetToken("symlink");
+  if (!stat.isFile()) refuseFleetToken("not-a-file");
+  if (stat.uid !== uid) refuseFleetToken("owner");
+  if ((stat.mode & 0o077) !== 0) refuseFleetToken("mode");
 }
 
 function readBoundedUtf8(fd) {
@@ -81,45 +85,58 @@ function readBoundedUtf8(fd) {
     if (count === 0) break;
     offset += count;
   }
-  if (offset > MAX_FLEET_TOKEN_FILE_BYTES) rejectFleetToken();
+  if (offset > MAX_FLEET_TOKEN_FILE_BYTES) refuseFleetToken("too-large");
   return buffer.subarray(0, offset).toString("utf8");
 }
 
 // This helper is installed on its own in ~/.local/bin, so it cannot import
-// src/fleet/token-storage.ts from a release checkout. It keeps that module's
-// no-symlink rule, adds owner-only checks on the folder and the file, checks
-// both again after opening the file without following links, and never
-// creates, migrates or writes a token.
+// src/fleet/token-storage.ts from a release checkout. It opens the file once
+// without following a leaf symlink, checks the opened descriptor against the
+// checked path by device and inode, and never creates, migrates or writes a
+// token.
 function readFleetConsoleToken() {
   const uid = process.getuid?.();
-  if (uid === undefined || typeof constants.O_NOFOLLOW !== "number") rejectFleetToken();
+  if (uid === undefined || typeof constants.O_NOFOLLOW !== "number") refuseFleetToken("unsupported");
   const filePath = process.env.WHATSOUP_FLEET_TOKEN_FILE || join(homedir(), ".config", "whatsoup", "fleet-tokens.json");
-  const directory = dirname(filePath);
-  const directoryBefore = lstatSync(directory);
-  assertPrivateTokenDirectory(directoryBefore, uid);
-  const fileBefore = lstatSync(filePath);
-  assertPrivateTokenFile(fileBefore, uid);
+  const before = lstatSync(filePath);
+  assertUsableTokenFile(before, uid);
+  // O_NONBLOCK: a FIFO swapped in after the lstat cannot block the open.
   const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = fstatSync(fd);
-    assertPrivateTokenFile(opened, uid);
-    assertSameIdentity(fileBefore, opened);
-    const directoryAfter = lstatSync(directory);
-    assertPrivateTokenDirectory(directoryAfter, uid);
-    assertSameIdentity(directoryBefore, directoryAfter);
-    const parsed = JSON.parse(readBoundedUtf8(fd));
-    if (typeof parsed?.active !== "string" || !FLEET_TOKEN_RE.test(parsed.active)) rejectFleetToken();
+    assertUsableTokenFile(opened, uid);
+    if (opened.dev !== before.dev || opened.ino !== before.ino) refuseFleetToken("changed");
+    const text = readBoundedUtf8(fd);
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      refuseFleetToken("shape");
+    }
+    if (typeof parsed?.active !== "string" || !FLEET_TOKEN_RE.test(parsed.active)) refuseFleetToken("shape");
     return parsed.active;
   } finally {
     closeSync(fd);
   }
 }
 
-let TOKEN = "";
-try {
-  TOKEN = readFleetConsoleToken();
-} catch {
-  fail("no-fleet-token");
+// fs error messages carry the path, so only fixed reasons are printed.
+function fleetTokenRefusalReason(error) {
+  if (error instanceof FleetTokenRefusal) return error.message;
+  if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return "missing";
+  if (error?.code === "ELOOP") return "symlink";
+  return "unreadable";
+}
+
+// A handed-over token is used as is, as before: the server compares tokens
+// without a shape rule. The file is read only when none was handed over.
+let TOKEN = process.env.WHATSOUP_CONSOLE_TOKEN || "";
+if (!TOKEN) {
+  try {
+    TOKEN = readFleetConsoleToken();
+  } catch (error) {
+    fail("no-fleet-token:" + fleetTokenRefusalReason(error));
+  }
 }
 const watchdog = setTimeout(() => fail("timeout"), 45000);
 
