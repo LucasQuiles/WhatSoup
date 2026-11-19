@@ -420,6 +420,60 @@ describe('whatsoup-release-drift systemd unit', () => {
     expect(existsSync(release.argsFile)).toBe(false);
   });
 
+  // systemd expands wildcards in an EnvironmentFile path and passes the ExecStart
+  // word as written, so a home folder name outside A-Z a-z 0-9 / . _ - could make
+  // the unit's two lines name two files.
+  it.each([
+    ['"[1]"', 'agent[1]'],
+    ['"*"', 'agent*'],
+    ['"?"', 'agent?'],
+    ['"$"', 'agent$'],
+    ['a space', 'agent home'],
+    ['"%"', 'agent%h'],
+    ['a backslash', 'agent\\1'],
+    ['a non-ASCII letter', 'agenté'],
+  ])('refuses a label file under a home folder name with %s, before observing', (_name, folder) => {
+    const release = fakeRelease(0);
+    const labelHome = path.join(tmp.make('homes'), folder);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelHome });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('must use only');
+    expect(result.stderr).toContain(labelFilePath(labelHome));
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('refuses a label file path with a ".." component, before observing', () => {
+    const release = fakeRelease(0);
+    const home = tmp.make('home');
+    const result = runWrapper({
+      HOME: home,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { args: ['--label-file', `${home}/../${path.basename(home)}/.config/whatsoup/release-drift.env`] });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('must use only');
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('observes with a label file under an ordinary home folder name', () => {
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelHome: path.join(tmp.make('homes'), 'agent-1.b_c') });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(observedInstance(release.argsFile)).toBe('bot-a');
+  });
+
   it('fails closed with exit 2, not a shell abort, when HOME is unset', () => {
     // The launcher and log folder are set, so no default needs HOME.
     const release = fakeRelease(0);

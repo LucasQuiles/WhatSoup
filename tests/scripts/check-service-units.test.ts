@@ -292,6 +292,25 @@ ExecStart=:relative/bin/whatsoup-release-drift-linux.sh
     expect(codes(dir)).toContain('non-absolute-path');
   });
 
+  it('fails an exec line that holds only prefixes and no executable, such as ExecStart=:', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+ExecStart=:
+`,
+    });
+    expect(codes(dir)).toContain('non-absolute-path');
+  });
+
+  it('accepts an empty ExecStart=, which resets the command list', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+ExecStart=
+ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
+`,
+    });
+    expect(codes(dir)).toEqual([]);
+  });
+
   it('fails a systemd unit that execs bare homebrew node', () => {
     const dir = makeRepo({
       'whatsoup-fleet.service': `[Unit]

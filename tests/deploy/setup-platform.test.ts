@@ -181,7 +181,7 @@ function fakeObservedRelease(): { launcher: string; argsFile: string } {
 }
 
 /**
- * Run the installed release-drift unit as systemd would: the user manager's
+ * Run the installed release-drift unit in a simplified form: the user manager's
  * environment first, then each EnvironmentFile in order (%h is HOME, a later file
  * overrides an earlier one, and a "-" prefix makes a missing file optional), then
  * ExecStart. The launcher points at a fake release, so nothing is observed or
@@ -716,11 +716,13 @@ describe('deploy/setup.sh platform portability', () => {
   });
 
   it.each([
-    ['"$$" in its name', 'agent$$'],
-    ['a space in its name', 'agent home'],
-  ])('the installed release-drift unit hands the wrapper the label file its EnvironmentFile line loads, for a home with %s', (_name, folder) => {
-    // systemd substitutes "$$" to "$" in ExecStart arguments, not in an
-    // EnvironmentFile path, unless the executable carries the ":" prefix.
+    ['an ordinary name, which the wrapper accepts', 'agent-1.b_c', 'bot-a'],
+    ['"$$" in its name, which the wrapper refuses', 'agent$$', null],
+    ['a space in its name, which the wrapper refuses', 'agent home', null],
+  ])('the installed release-drift unit reads the label file its EnvironmentFile line loads, or refuses the home folder name, for a home with %s', (_name, folder, expected) => {
+    // systemd handles an unusual home folder name differently in an
+    // EnvironmentFile path and in an ExecStart word, so the wrapper refuses any
+    // name outside A-Z a-z 0-9 / . _ -.
     const home = path.join(makeTempRoot('whatsoup-unit-home-'), folder);
     const unitDir = path.join(home, '.config', 'systemd', 'user');
     const configDir = path.join(home, '.config', 'whatsoup');
@@ -733,9 +735,32 @@ describe('deploy/setup.sh platform portability', () => {
 
     const release = fakeObservedRelease();
     const observed = runInstalledReleaseDriftUnit(home, release.launcher);
-    expect(observed.status, observed.stderr).toBe(0);
-    const args = fs.readFileSync(release.argsFile, 'utf8').trim().split('\n');
-    expect(args[args.indexOf('--instance') + 1]).toBe('bot-a');
+    if (expected === null) {
+      expect(observed.status).toBe(2);
+      expect(observed.stderr).toContain('must use only');
+      expect(fs.existsSync(release.argsFile)).toBe(false);
+    } else {
+      expect(observed.status, observed.stderr).toBe(0);
+      const args = fs.readFileSync(release.argsFile, 'utf8').trim().split('\n');
+      expect(args[args.indexOf('--instance') + 1]).toBe(expected);
+    }
+  });
+
+  it('Linux setup replay warns that the release-drift unit refuses a home folder path outside its character set, and completes', () => {
+    const home = path.join(makeTempRoot('whatsoup-setup-home-'), 'agent+1');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-a',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('refuses this home folder path');
+    expect(result.stdout).toContain('[7/7] Checking API keys');
   });
 
   it('Linux setup replay without the dedicated label file leaves the release-drift unit failing closed, whatever WHATSOUP_INSTANCE holds', () => {
