@@ -52,11 +52,33 @@ function fakeRelease(scheduleExit: number): { launcher: string; argsFile: string
   return { launcher, argsFile, logDir: path.join(root, 'logs') };
 }
 
-function runWrapper(env: Record<string, string>) {
+const LABEL_KEY = 'WHATSOUP_RELEASE_DRIFT_INSTANCE';
+
+/**
+ * Run the wrapper with HOME set to `env.HOME` or a fresh folder. A label in `env`
+ * is also written to the dedicated label file in that HOME, as setup writes it,
+ * unless `labelFile` says otherwise: null writes no file, a string is the file's
+ * whole content.
+ */
+function runWrapper(env: Record<string, string>, options: { labelFile?: string | null } = {}) {
+  const home = env.HOME ?? tmp.make('home');
+  const label = env[LABEL_KEY];
+  const content = options.labelFile !== undefined
+    ? options.labelFile
+    : label === undefined ? null : `${LABEL_KEY}=${label}\n`;
+  if (content !== null) {
+    mkdirSync(path.join(home, '.config/whatsoup'), { recursive: true });
+    writeFileSync(path.join(home, '.config/whatsoup/release-drift.env'), content);
+  }
   return spawnSync('bash', [wrapperPath], {
     encoding: 'utf8',
-    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: tmp.make('home'), ...env },
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, ...env },
   });
+}
+
+function observedInstance(argsFile: string): string | undefined {
+  const args = readFileSync(argsFile, 'utf8').trim().split('\n');
+  return args[args.indexOf('--instance') + 1];
 }
 
 function actualRelease(observerSource?: string, options: { olderScheduler?: boolean } = {}): {
@@ -159,6 +181,83 @@ describe('whatsoup-release-drift systemd unit', () => {
 
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('WHATSOUP_RELEASE_DRIFT_INSTANCE is not set');
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('takes no label from its environment: a label set only there, as bot-errors.env sets it, fails the unit before observing', () => {
+    // The unit loads bot-errors.env, which every BOT ERRORS unit loads, before the
+    // optional label file, so a line there reaches this environment when the file
+    // is absent. It must not label this host's release alerts and clears.
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-b',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile: null });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('WHATSOUP_RELEASE_DRIFT_INSTANCE is not set');
+    expect(result.stderr).toContain('release-drift.env');
+    expect(result.stderr).toContain('environment is ignored');
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
+  it('takes the label from the dedicated file when its environment holds another one', () => {
+    // Under systemd the label file is loaded last, so its value is also the one in
+    // the environment; a mismatch can only come from a direct run.
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-b',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile: 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n' });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(observedInstance(release.argsFile)).toBe('bot-a');
+  });
+
+  it('reads the label from the dedicated file alone', () => {
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile: 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a\n' });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(observedInstance(release.argsFile)).toBe('bot-a');
+  });
+
+  it('reads the last label assignment in the file and skips comment lines, as systemd does', () => {
+    const release = fakeRelease(0);
+    const result = runWrapper({
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, {
+      labelFile: [
+        'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-x',
+        'OTHER_KEY=1',
+        '# WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-y',
+        'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-a',
+      ].join('\n'),
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(observedInstance(release.argsFile)).toBe('bot-a');
+  });
+
+  it('fails closed before observing when the label path is not a readable file', () => {
+    const release = fakeRelease(0);
+    const home = tmp.make('home');
+    mkdirSync(path.join(home, '.config/whatsoup/release-drift.env'), { recursive: true });
+    const result = runWrapper({
+      HOME: home,
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('cannot read');
+    expect(result.stderr).toContain('release-drift.env');
     expect(existsSync(release.argsFile)).toBe(false);
   });
 
