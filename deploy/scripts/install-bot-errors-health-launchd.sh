@@ -2,6 +2,14 @@
 # Install only the BOT ERRORS daily health launchd agent on macOS relay/bot hosts.
 set -euo pipefail
 
+if [[ "${1:-}" == "--repin-existing" ]]; then
+  shift
+  exec "${BOT_ERRORS_PYTHON:-/usr/bin/python3}" -B "$(dirname "${BASH_SOURCE[0]}")/lib/health_launchd_install.py" "$@"
+elif [[ "$#" -ne 0 ]]; then
+  echo "usage: install-bot-errors-health-launchd.sh [--repin-existing --help]" >&2
+  exit 2
+fi
+
 LABEL=${BOT_ERRORS_HEALTH_LABEL:-com.bot-errors.health}
 REPO_ROOT=${BOT_ERRORS_REPO_ROOT:-$HOME/LAB/WhatSoup}
 PYTHON=${BOT_ERRORS_PYTHON:-/usr/bin/python3}

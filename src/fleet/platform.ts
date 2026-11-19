@@ -8,7 +8,7 @@
  *  - Linux without systemd (WSL1): throws descriptive errors
  */
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,9 +20,10 @@ import {
   LaunchdRenderConfigError,
   type LaunchdPlistRenderOptions,
 } from '../lib/launchd-service-config.ts';
-import { admitHomeConfinedPath, isCanonicalAbsolutePath } from '../lib/home-confinement.ts';
+import { admitHomeConfinedPath, isCanonicalAbsolutePath, isPhysicallyInsideHome } from '../lib/home-confinement.ts';
 import { resolveLaunchdPlistRenderOptions } from './launchd-render-options.ts';
 import { compareGovernedLaunchdEnv, type GovernedEnvComparison } from './launchd-env-drift.ts';
+import { canWriteFolder, readFileFlags } from './launchd-plist-flags.ts';
 import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
@@ -124,23 +125,142 @@ function assertValidLaunchdInstanceName(name: string): void {
   if (!isValidInstanceName(name)) throw new Error('invalid instance name');
 }
 
-/** Recognize the stable structural fields emitted by WhatSoup's plist generator. */
-function isExpectedGeneratedLaunchdPlist(name: string, contents: string): boolean {
+/**
+ * The program (still XML-escaped) that an instance plist runs as
+ * `ProgramArguments[0]`, or null when the Label and instance argument do not
+ * match this instance. `exactArguments` also requires the array to end right
+ * after the instance argument.
+ */
+function launchdPlistProgram(name: string, contents: string, exactArguments = false): string | null {
   const label = escapeRegExp(escapeXml(launchdLabel(name)));
-  const wrapper = escapeRegExp(escapeXml(path.join(os.homedir(), '.local', 'bin', 'whatsoup')));
   const instance = escapeRegExp(escapeXml(name));
   const identity = new RegExp(
     `<key>Label</key>\\s*<string>${label}</string>\\s*` +
     `<key>ProgramArguments</key>\\s*<array>\\s*` +
-    `<string>${wrapper}</string>\\s*<string>${instance}</string>`,
+    `<string>([^<]*)</string>\\s*<string>${instance}</string>` +
+    (exactArguments ? '\\s*</array>' : ''),
     'u',
   );
-  return identity.test(contents);
+  return identity.exec(contents)?.[1] ?? null;
 }
 
+/** Recognize the stable structural fields emitted by WhatSoup's plist generator. */
+function isExpectedGeneratedLaunchdPlist(name: string, contents: string): boolean {
+  return launchdPlistProgram(name, contents) === escapeXml(path.join(os.homedir(), '.local', 'bin', 'whatsoup'));
+}
+
+/** Release directory name written by the release exporter; see resolveReleaseIdentity. */
+const RELEASE_DIRECTORY_NAME = /^WhatSoup-release-[0-9a-f]{7,40}$/u;
+/** Same value as RELEASE_MANIFEST_FILE in scripts/release-snapshot-plan.ts, which src does not import. */
+const RELEASE_MANIFEST_FILE = '.whatsoup-release-manifest.json';
+/** Upper bound for the launcher and manifest reads; a release manifest is far smaller. */
+const RELEASE_FILE_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * #3829: a release-pinned plist runs `<release>/deploy/whatsoup <instance>`
+ * instead of the `~/.local/bin/whatsoup` symlink to that same file. The
+ * macOS launchd runbook documents this form and hosts run it, so lifecycle
+ * commands must accept it. They accept it only when the program is exactly
+ * `deploy/whatsoup <instance>` with no further argument, in a
+ * `WhatSoup-release-<sha>` directory that is physically inside home, and the
+ * launcher and the release manifest are both regular files. Any other program
+ * is still a job this manager does not own.
+ */
+function isReleasePinnedLaunchdPlist(name: string, contents: string): boolean {
+  const program = launchdPlistProgram(name, contents, true);
+  // An XML entity means the path has a character no release path contains.
+  if (program === null || program.includes('&') || !isCanonicalAbsolutePath(program)) return false;
+  const deployDirectory = path.dirname(program);
+  const release = path.dirname(deployDirectory);
+  if (path.basename(program) !== 'whatsoup' || path.basename(deployDirectory) !== 'deploy') return false;
+  if (!RELEASE_DIRECTORY_NAME.test(path.basename(release))) return false;
+  try {
+    if (!isPhysicallyInsideHome(program, os.homedir())) return false;
+  } catch {
+    // intentional: a release path that does not resolve is not a release we can confirm.
+    return false;
+  }
+  return isLauncherBoundToReleaseManifest(release, program);
+}
+
+/**
+ * The release and deploy directories, the launcher and the manifest must not be
+ * symlinks; the manifest's source commit must start with the directory's sha;
+ * and its single `deploy/whatsoup` row must carry the launcher's sha256.
+ * Otherwise an in-home directory with a matching name could pair any launcher
+ * with a stand-in manifest and still be treated as a job this manager owns.
+ */
+function isLauncherBoundToReleaseManifest(release: string, program: string): boolean {
+  try {
+    if (!fs.lstatSync(release).isDirectory() || !fs.lstatSync(path.dirname(program)).isDirectory()) return false;
+  } catch {
+    // intentional: an absent directory means the release cannot be confirmed.
+    return false;
+  }
+  const launcher = readRegularFileNoFollow(program);
+  const manifestBytes = readRegularFileNoFollow(path.join(release, RELEASE_MANIFEST_FILE));
+  if (launcher === null || manifestBytes === null) return false;
+  let manifest: { source?: { commit?: unknown }; files?: unknown } | null;
+  try {
+    manifest = JSON.parse(manifestBytes.toString('utf8')) as typeof manifest;
+  } catch {
+    // intentional: a manifest that is not JSON is not this release's manifest.
+    return false;
+  }
+  const commit = manifest?.source?.commit;
+  const directorySha = path.basename(release).slice('WhatSoup-release-'.length);
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/u.test(commit) || !commit.startsWith(directorySha)) return false;
+  const files = manifest?.files;
+  const rows = Array.isArray(files) ? (files as Array<{ path?: unknown; sha256?: unknown } | null>) : [];
+  const launcherRows = rows.filter((row) => row?.path === 'deploy/whatsoup');
+  return launcherRows.length === 1 && launcherRows[0]?.sha256 === createHash('sha256').update(launcher).digest('hex');
+}
+
+/** Bytes of a regular file opened without following a final symlink; null otherwise. */
+function readRegularFileNoFollow(filePath: string): Buffer | null {
+  let fd: number | undefined;
+  try {
+    // O_NONBLOCK keeps a substituted FIFO from blocking before fstat rejects it.
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const info = fs.fstatSync(fd);
+    if (!info.isFile() || info.size > RELEASE_FILE_MAX_BYTES) return null;
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (read === 0) return null;
+      offset += read;
+    }
+    return bytes;
+  } catch {
+    // intentional: absent, symlinked or unreadable means the release cannot be confirmed.
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * Writers (reconcile, first install) re-render the generated form. Applied to
+ * a release-pinned plist that would repoint the job to whatever release the
+ * wrapper symlink names, so they refuse it; release:activate switches releases.
+ */
 function assertExpectedGeneratedLaunchdPlist(name: string, contents: string): void {
-  if (!isExpectedGeneratedLaunchdPlist(name, contents)) {
-    throw new Error(`launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity`);
+  if (isExpectedGeneratedLaunchdPlist(name, contents)) return;
+  if (isReleasePinnedLaunchdPlist(name, contents)) {
+    throw new Error(
+      `launchd plist for ${launchdLabel(name)} is release-pinned; re-rendering it would repoint the job, so switch releases with release:activate`,
+    );
+  }
+  throw new Error(`launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity`);
+}
+
+/** Lifecycle commands (start, stop, restart, restartSelf, disable) accept either owned form. */
+function assertOwnedLaunchdPlist(name: string, contents: string): void {
+  if (!isExpectedGeneratedLaunchdPlist(name, contents) && !isReleasePinnedLaunchdPlist(name, contents)) {
+    throw new Error(
+      `launchd plist for ${launchdLabel(name)} does not match the generated WhatSoup instance identity or a release-pinned one`,
+    );
   }
 }
 
@@ -317,6 +437,56 @@ function readExpectedGeneratedLaunchdPlist(name: string, filePath: string): stri
   const contents = readExistingLaunchdPlist(filePath);
   if (contents !== null) assertExpectedGeneratedLaunchdPlist(name, contents);
   return contents;
+}
+
+/** Read an existing plist only when it bears the generated or a release-pinned identity. */
+function readOwnedLaunchdPlist(name: string, filePath: string): string | null {
+  const contents = readExistingLaunchdPlist(filePath);
+  if (contents !== null) assertOwnedLaunchdPlist(name, contents);
+  return contents;
+}
+
+/** sys/stat.h UF_IMMUTABLE, UF_APPEND, SF_IMMUTABLE, SF_APPEND and SF_NOUNLINK: unlink(2) fails while one is set. */
+const UNLINK_BLOCKING_FILE_FLAGS = 0x2 | 0x4 | 0x20000 | 0x40000 | 0x100000;
+/** UF_IMMUTABLE, UF_APPEND, SF_IMMUTABLE and SF_APPEND on a folder: unlink(2) of an entry in it fails while one is set. */
+const UNLINK_BLOCKING_FOLDER_FLAGS = 0x2 | 0x4 | 0x20000 | 0x40000;
+
+/**
+ * #3829: disable() boots the job out and then unlinks its plist. A protected
+ * plist (a root-owned `uchg` plist is a documented configuration, see
+ * docs/runbooks/release-deployment.md) cannot be unlinked, and neither can a
+ * plist whose LaunchAgents folder is immutable, append-only or not writable, so
+ * the bootout would leave the job stopped with its plist kept. Refuse first,
+ * leaving the job loaded; flags that cannot be read refuse too.
+ */
+function assertLaunchdPlistRemovable(name: string, filePath: string): void {
+  let flags: number;
+  try {
+    flags = readFileFlags(filePath);
+  } catch (error) {
+    throw new Error(
+      `cannot read the file flags of the launchd plist for ${launchdLabel(name)}; the job was left loaded and the plist kept: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if ((flags & UNLINK_BLOCKING_FILE_FLAGS) !== 0) {
+    throw new Error(
+      `launchd plist for ${launchdLabel(name)} carries an immutable, append-only or no-unlink file flag and cannot be removed; the job was left loaded`,
+    );
+  }
+  const folder = path.dirname(filePath);
+  let folderFlags: number;
+  try {
+    folderFlags = readFileFlags(folder);
+  } catch (error) {
+    throw new Error(
+      `cannot read the file flags of the folder that holds the launchd plist for ${launchdLabel(name)}; the job was left loaded and the plist kept: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if ((folderFlags & UNLINK_BLOCKING_FOLDER_FLAGS) !== 0 || !canWriteFolder(folder)) {
+    throw new Error(
+      `the folder that holds the launchd plist for ${launchdLabel(name)} is immutable, append-only or not writable, so the plist cannot be removed; the job was left loaded`,
+    );
+  }
 }
 
 /**
@@ -708,12 +878,24 @@ export interface ServiceManager {
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
+  /**
+   * #3829: restart the job of the process that makes this call. The service
+   * manager must own both the stop and the start, because stopping the job
+   * terminates the caller: after the one command is issued nothing may need to
+   * run in the caller. Restarts issued from another process use restart().
+   */
+  restartSelf(name: string): Promise<void>;
   /** Fire-and-forget start with optional error callback (used in auth flow). */
   startFire(name: string, onError?: (err: Error | null) => void): void;
   /** Optional auth teardown hook; false means there was no job to restore after a failed pairing. */
   stopForAuth?(name: string): Promise<boolean | void>;
   /** Optional authenticated-only activation hook for platforms that defer installation until pairing succeeds. */
   startAfterAuthFire?(name: string, onError?: (err: Error | null) => void): void;
+  /**
+   * #3829: throw when disable() could not remove the service definition, so a
+   * caller can refuse before it stops anything. The delete route calls it first.
+   */
+  assertCanDisable?(name: string): void;
 }
 
 export function systemdUnitName(name: string): string {
@@ -731,6 +913,7 @@ abstract class BaseServiceManager implements ServiceManager {
   abstract start(name: string): Promise<void>;
   abstract stop(name: string): Promise<void>;
   abstract restart(name: string): Promise<void>;
+  abstract restartSelf(name: string): Promise<void>;
 
   startFire(name: string, onError?: (err: Error | null) => void): void {
     this.start(name).then(
@@ -772,6 +955,11 @@ class SystemdServiceManager extends BaseServiceManager {
   }
 
   async restart(name: string): Promise<void> {
+    await execFileAsync('systemctl', ['--user', 'restart', this.unit(name)]);
+  }
+
+  /** systemd performs the whole restart, so one command serves an in-unit caller too. */
+  async restartSelf(name: string): Promise<void> {
     await execFileAsync('systemctl', ['--user', 'restart', this.unit(name)]);
   }
 }
@@ -828,7 +1016,8 @@ class LaunchdServiceManager extends BaseServiceManager {
   async disable(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
     const dest = plistPath(name);
-    if (readExpectedGeneratedLaunchdPlist(name, dest) === null) return;
+    if (readOwnedLaunchdPlist(name, dest) === null) return;
+    assertLaunchdPlistRemovable(name, dest);
     await this.bootout(name);
     try {
       fs.unlinkSync(dest);
@@ -838,10 +1027,18 @@ class LaunchdServiceManager extends BaseServiceManager {
     this.bootedOutServices.delete(name);
   }
 
+  /** Only the removal checks of the plist and its folder run here; stop() and disable() still check the identity. */
+  assertCanDisable(name: string): void {
+    assertValidLaunchdInstanceName(name);
+    const dest = plistPath(name);
+    if (readExistingLaunchdPlist(dest) === null) return;
+    assertLaunchdPlistRemovable(name, dest);
+  }
+
   async start(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
     const dest = plistPath(name);
-    if (readExpectedGeneratedLaunchdPlist(name, dest) === null) {
+    if (readOwnedLaunchdPlist(name, dest) === null) {
       throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
     }
     if (this.bootedOutServices.has(name)) {
@@ -861,7 +1058,7 @@ class LaunchdServiceManager extends BaseServiceManager {
     let start: Promise<void>;
     try {
       const dest = plistPath(name);
-      const existing = readExpectedGeneratedLaunchdPlist(name, dest);
+      const existing = readOwnedLaunchdPlist(name, dest);
       start = existing === null
         ? installLaunchdPlist(name)
         : this.bootedOutServices.has(name)
@@ -882,14 +1079,14 @@ class LaunchdServiceManager extends BaseServiceManager {
 
   async stop(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
-    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) return;
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) return;
     await this.bootout(name);
     this.bootedOutServices.add(name);
   }
 
   async stopForAuth(name: string): Promise<boolean> {
     assertValidLaunchdInstanceName(name);
-    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) return false;
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) return false;
     const wasLoaded = await this.bootout(name);
     if (wasLoaded) this.bootedOutServices.add(name);
     return wasLoaded;
@@ -897,11 +1094,27 @@ class LaunchdServiceManager extends BaseServiceManager {
 
   async restart(name: string): Promise<void> {
     assertValidLaunchdInstanceName(name);
-    if (readExpectedGeneratedLaunchdPlist(name, plistPath(name)) === null) {
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) {
       throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
     }
     await this.stop(name);
     await this.start(name);
+  }
+
+  /**
+   * #3829: restart() boots out the job and then bootstraps it from the calling
+   * process. Called from inside the job, the bootout terminates the caller, so
+   * the bootstrap never runs and the job stays unloaded (KeepAlive does not
+   * apply to an unloaded job). `kickstart -k` asks launchd to kill and relaunch
+   * the loaded job itself; the caller issues nothing after it. There is no
+   * bootstrap fallback: an absent job means this process is not that job.
+   */
+  async restartSelf(name: string): Promise<void> {
+    assertValidLaunchdInstanceName(name);
+    if (readOwnedLaunchdPlist(name, plistPath(name)) === null) {
+      throw new Error('launchd plist is installed only after successful authentication; authenticate the instance before starting');
+    }
+    await execFileAsync('launchctl', ['kickstart', '-k', launchdServiceTarget(name)]);
   }
 }
 
@@ -926,6 +1139,7 @@ class NoSystemdServiceManager implements ServiceManager {
   async start(): Promise<void> { this.fail(); }
   async stop(): Promise<void> { this.fail(); }
   async restart(): Promise<void> { this.fail(); }
+  async restartSelf(): Promise<void> { this.fail(); }
   startFire(): void { this.fail(); }
 }
 
@@ -980,6 +1194,17 @@ export class DockerSupervisorServiceManager extends BaseServiceManager {
   async restart(name: string): Promise<void> {
     await this.stop(name);
     await this.start(name);
+  }
+
+  /**
+   * #3829: fails closed. The child map lives only in the process that spawned
+   * the instances, so an instance asking its own manager finds no child to
+   * stop and restart() would spawn a second copy beside the running one. The
+   * container entrypoint does not restart a child in place either
+   * (docker/entrypoint.sh), so no single command can replace this process.
+   */
+  async restartSelf(name: string): Promise<void> {
+    throw new Error(`self-restart is not supported under the docker supervisor (instance ${name}); restart the container instead`);
   }
 }
 
