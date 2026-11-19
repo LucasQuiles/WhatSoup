@@ -491,6 +491,18 @@ if len(sys.argv) > 3:
     print("PROBE_EXIT=" + str(code))
 print("PROBE_REPORTING_LOADED=" + str(sys.modules.get("lib.bot_errors_reporting") is not None))
 '''
+# Every send a dispatcher child attempts is recorded here, under the test's own
+# directory: the dispatcher's dry-run capture and the probe's refusing stubs.
+_SEND_CAPTURE = "send-capture.jsonl"
+_FIXTURE_ROSTER = {
+    "schemaVersion": 1,
+    "hosts": [{
+        "host": "host-a",
+        "role": "bot-host",
+        "collectorRemote": False,
+        "instances": [{"name": "bot-a", "service": "bot-a.service", "expected": "active"}],
+    }],
+}
 
 
 def _probe_dispatcher(scripts: Path, state: Path, mode: str, *argv: str) -> subprocess.CompletedProcess[str]:
@@ -628,6 +640,47 @@ def test_once_cycle_runs_without_the_preview_module(tmp_path: Path) -> None:
     assert preview.returncode != 0 and "PROBE_EXIT=" not in preview.stdout
     assert "ModuleNotFoundError" in preview.stderr
     assert not preview_state.exists()
+
+
+def test_a_probe_cycle_leaves_write_failure_records_outside_its_environment_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The runner's environment is made inert first: no inherited dispatcher
+    # setting survives, and the roster, machine name and e-mail fallback are
+    # test-owned. Then a breadcrumb sits in each folder that this environment
+    # names for write-failure records: the variable override, $TMPDIR and
+    # $HOME. A child started from this environment would scan those folders
+    # and move every breadcrumb into its own state.
+    for key in list(os.environ):
+        if key.startswith("BOT_ERRORS_") or key == "WHATSOUP_ALERT_SINK":
+            monkeypatch.delenv(key)
+    outside = tmp_path / "outside"
+    roster = outside / "expected-fleet.json"
+    roster.parent.mkdir(parents=True)
+    roster.write_text(json.dumps(_FIXTURE_ROSTER), encoding="utf-8")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(roster))
+    monkeypatch.setenv("BOT_ERRORS_MACHINE", "host-a")
+    monkeypatch.setenv("BOT_ERRORS_EMAIL_FALLBACK", str(outside / "no-email-fallback"))
+    breadcrumbs = []
+    for variable, value, folder in (
+        ("BOT_ERRORS_WRITEFAIL_DIR", outside / "override", outside / "override"),
+        ("TMPDIR", outside / "tmp", outside / "tmp" / "bot-errors-writefail"),
+        ("HOME", outside / "home", outside / "home" / ".bot-errors-writefail"),
+    ):
+        folder.mkdir(parents=True)
+        breadcrumb = folder / "canary.writefail"
+        breadcrumb.write_text(json.dumps({"kind": "isolation-canary"}), encoding="utf-8")
+        breadcrumbs.append(breadcrumb)
+        monkeypatch.setenv(variable, str(value))
+
+    state = tmp_path / "state"
+    cycle = _probe_dispatcher(_SCRIPTS, state, "keep", "--once")
+
+    moved = [str(path.relative_to(outside)) for path in breadcrumbs if not path.is_file()]
+    assert moved == [], cycle.stdout + cycle.stderr
+    assert "PROBE_EXIT=0" in cycle.stdout.splitlines(), cycle.stdout + cycle.stderr
+    assert (state / "locks" / "dispatcher.lock").is_file(), "the cycle must really have run"
+    assert not (tmp_path / _SEND_CAPTURE).exists(), "the probe cycle tried to send"
 
 
 # Each refusal below guards a record that is otherwise valid, so the case fails
