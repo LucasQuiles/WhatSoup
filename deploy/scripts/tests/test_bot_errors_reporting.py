@@ -628,3 +628,56 @@ def test_once_cycle_runs_without_the_preview_module(tmp_path: Path) -> None:
     assert preview.returncode != 0 and "PROBE_EXIT=" not in preview.stdout
     assert "ModuleNotFoundError" in preview.stderr
     assert not preview_state.exists()
+
+
+# Each refusal below guards a record that is otherwise valid, so the case fails
+# if its rule is removed: the record would then qualify and render.
+
+
+def test_evidence_whose_bytes_do_not_match_the_named_sha256_is_refused(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    handling = document["handlingRecord"]
+    assert isinstance(handling, dict)
+    handling["sha256"] = hashlib.sha256(b"other bytes").hexdigest()
+    with pytest.raises(reporting.ReportQualificationError, match="evidence_hash_mismatch"):
+        _qualify(document, tmp_path)
+
+
+def test_accepted_state_with_started_work_is_refused(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(state="accepted", workStarted=True))
+    with pytest.raises(reporting.ReportQualificationError, match="accepted_after_started_work"):
+        _qualify(document, tmp_path)
+
+
+def test_closed_state_without_administrative_closure_is_refused(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(state="closed", administrativeClosure=False))
+    with pytest.raises(reporting.ReportQualificationError, match="closed_without_recovery_classification"):
+        _qualify(document, tmp_path)
+
+
+def test_administrative_closure_outside_the_closed_state_is_refused(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    _replace_handling(document, tmp_path, _handling_facts(state="retained/unaccepted", administrativeClosure=True))
+    with pytest.raises(reporting.ReportQualificationError, match="administrative_closure_wrong_state"):
+        _qualify(document, tmp_path)
+
+
+def test_recovery_record_outside_the_recovered_state_is_refused(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    binding = document["binding"]
+    assert isinstance(binding, dict)
+    document["recoveryRecord"] = _record(tmp_path / "recovery.json", kind="recovery", binding=binding, facts=_recovery_facts())
+    with pytest.raises(reporting.ReportQualificationError, match="unexpected_recovery_record"):
+        _qualify(document, tmp_path)
+
+
+def test_evidence_named_on_another_host_is_refused(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    handling = document["handlingRecord"]
+    assert isinstance(handling, dict)
+    _, local_path = str(handling["locator"]).split(":", 1)
+    handling["locator"] = f"remote-host-a.example.invalid:{local_path}"
+    with pytest.raises(reporting.ReportQualificationError, match="evidence_not_local"):
+        _qualify(document, tmp_path)

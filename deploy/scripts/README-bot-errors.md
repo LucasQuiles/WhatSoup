@@ -1470,7 +1470,11 @@ The generic script deployer refuses `deploy` and `verify` for a resolved
 `WhatSoup-health-<source12>` export root, including path aliases, before copying
 files or creating a backup. It does not establish package-pin qualification.
 Use the staged package procedure below for those roots. Emergency `rollback`
-and `rollback-lkg` remain available with their existing backup checks.
+and `rollback-lkg` remain available with their existing backup checks. After an
+upgrade that adds a managed file, `rollback-lkg` refuses a last-known-good backup
+taken before that upgrade, because it checks the backup against the current
+managed-file list; restore that backup with
+`whatsoup-bot-errors-deploy.sh rollback <root> <backup-dir>`.
 
 The deploy contract is:
 
