@@ -11,20 +11,37 @@ import { accessSync, constants } from 'node:fs';
 /** stat(1) reads one inode; anything slower is treated as unreadable. */
 const STAT_TIMEOUT_MS = 5_000;
 
+/** st_flags is a 32-bit word (u_int32_t in sys/stat.h). */
+const MAX_FILE_FLAGS = 0xffff_ffff;
+
+/**
+ * Decode what `stat -f %f` printed. The tool prints the flags word in decimal,
+ * not in hex (a folder with only UF_HIDDEN, 0x8000, prints 32768), so a hex
+ * reading would turn every masked bit into another value. Returns null for
+ * anything but one decimal number in the 32-bit range, so a caller can refuse
+ * instead of guessing.
+ */
+export function parseFileFlags(output: string): number | null {
+  const text = output.trim();
+  if (!/^\d+$/u.test(text)) return null;
+  const flags = Number(text);
+  return flags <= MAX_FILE_FLAGS ? flags : null;
+}
+
 /**
  * The flags word of `filePath` itself. Without `-L`, stat(1) reports a final
  * symlink rather than its target, which is the name unlink(2) removes. Throws
- * when stat(1) fails or prints anything but a decimal number, so a caller can
- * refuse instead of guessing.
+ * when stat(1) fails or prints anything parseFileFlags refuses.
  */
 export function readFileFlags(filePath: string): number {
   const output = execFileSync('/usr/bin/stat', ['-f', '%f', filePath], {
     encoding: 'utf8',
     timeout: STAT_TIMEOUT_MS,
     stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-  if (!/^\d+$/u.test(output)) throw new Error(`stat printed no file flags for ${filePath}`);
-  return Number(output);
+  });
+  const flags = parseFileFlags(output);
+  if (flags === null) throw new Error(`stat printed no file flags for ${filePath}`);
+  return flags;
 }
 
 /**
