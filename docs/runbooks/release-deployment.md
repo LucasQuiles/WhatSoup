@@ -745,7 +745,12 @@ Any other key refuses, naming it (`environment key <key> is not admitted for
 <label>`): for example `BASH_ENV`, `SHELLOPTS`, `PS4`, `DYLD_INSERT_LIBRARIES`,
 `__PYVENV_LAUNCHER__`, `HOME`, or a key from another job's list. Reinstall the
 health job or re-render the timer in `setup-timer` mode, as for a shape
-refusal. A detail names a key only when the key matches
+refusal. A health job re-pinned with `install-bot-errors-health-launchd.sh
+--repin-existing --runtime-manifest` sets `BOT_ERRORS_RUNTIME_MANIFEST`, which
+is not in its list, so reinstall such a job before host activation. Host
+planning also refuses a re-pinned environment-file wrapper job, because re-pin
+leaves its profile default under the old release; reinstall it too. A detail
+names a key only when the key matches
 `^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`. Any other key, one that holds a path for
 example, prints as `(a name outside [A-Za-z_][A-Za-z0-9_.-]{0,63}, not shown)`,
 so key text cannot carry a host path into plan output or the receipt. The same
@@ -883,7 +888,9 @@ changes the group. Before the switch it makes the `release:activate` checks: a
 root-owned plist that it writes needs the pinned root helper installed, each
 member's candidate refresh rollback fence must be unchanged, a sealed BOT
 ERRORS health consumer must be unchanged, and the live identity must still be
-what the plan read. The identity is every shared wrapper link and the fleet
+what the plan read. Unlike `release:activate`, it does not check each member
+release's host-built required outputs again under its lock; planning refuses
+while any is missing. The identity is every shared wrapper link and the fleet
 wrapper link on its planned old release, and the digest of every plist the
 plan read: the member and host auxiliary plists it writes, and the fleet
 wrapper and watchdog plists it only reloads. The identity is checked before any
