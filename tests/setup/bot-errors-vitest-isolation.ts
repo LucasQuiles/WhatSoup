@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { REMOVE_RETRY, resolveWorkerTempRoot } from './vitest-run-root.ts';
+import { REMOVE_RETRY, resolveWorkerTempRoot, workerHomePrefix } from './vitest-run-root.ts';
 
 const LIVE_ROUTING_ENV_KEYS = [
   'BOT_ERRORS_ALLOW_LIVE_IN_TESTS',
@@ -38,9 +38,10 @@ const workerId = safeSegment(process.env['VITEST_POOL_ID'] ?? process.env['VITES
 
 // Under the run's root (vitest-run-root.ts, a globalSetup that removes it once
 // the run ends) when one is exported, else /tmp. Either way it is the
-// containment root the cleanup below checks.
+// containment root the cleanup below checks. In a run root the HOME name is
+// short, because every test socket path carries it (workerHomePrefix).
 const tempRoot = resolveWorkerTempRoot();
-const isolatedHome = mkdtempSync(join(tempRoot, 'ws-vh-'));
+const isolatedHome = mkdtempSync(workerHomePrefix(tempRoot));
 const ownershipToken = randomUUID();
 const ownershipMarker = join(isolatedHome, '.whatsoup-vitest-home');
 const isolatedTmpdir = join(isolatedHome, 'tmp');

@@ -20,14 +20,18 @@ import {
   defaultTempParent,
   resolveWorkerTempRoot,
   startRunRoot,
+  workerHomePrefix,
 } from './vitest-run-root.ts';
 
 const repoRoot = process.cwd();
 const tmp = trackTmpDirs('vitest-run-root-');
 
+// RUN_ROOT_PREFIX and the six characters mkdtempSync appends.
+const RUN_ROOT_NAME = /^w[A-Za-z0-9]{6}$/;
+
 // A worker HOME as bot-errors-vitest-isolation.ts lays it out.
 function workerHome(runRoot: string, layout: 'intact' | 'partial'): string {
-  const home = mkdtempSync(join(runRoot, 'ws-vh-'));
+  const home = mkdtempSync(workerHomePrefix(runRoot));
   mkdirSync(join(home, 'credential-bin'), { mode: 0o700 });
   writeFileSync(join(home, 'credential-bin', 'secret-tool'), '#!/bin/sh\nexit 127\n', { mode: 0o700 });
   mkdirSync(join(home, 'tmp', 'child-output', 'deeper'), { recursive: true, mode: 0o700 });
@@ -72,7 +76,7 @@ describe('Vitest run root', () => {
 
     withRunRoot(parent, (root, teardown) => {
       expect(dirname(root)).toBe(parent);
-      expect(basename(root)).toMatch(/^ws-vr-/);
+      expect(basename(root)).toMatch(RUN_ROOT_NAME);
       expect(existsSync(join(root, RUN_ROOT_MARKER))).toBe(true);
       expect(resolveWorkerTempRoot()).toBe(root);
       expect(process.listenerCount('exit')).toBe(exitListeners + 1);
@@ -257,14 +261,14 @@ describe('vitest list under the run root', () => {
       expect(child.status, output).toBe(0);
       expect(witness, `the list run did not record its run root:\n${output}`).toBeDefined();
       expect(dirname(witness!.runRoot)).toBe(defaultTempParent());
-      expect(basename(witness!.runRoot)).toMatch(/^ws-vr-/);
+      expect(basename(witness!.runRoot)).toMatch(RUN_ROOT_NAME);
       expect(dirname(witness!.home)).toBe(witness!.runRoot);
       expect(lstatSync(witness!.runRoot, { throwIfNoEntry: false }), `run root survived the list run: ${witness!.runRoot}`)
         .toBeUndefined();
     } finally {
       // A failing regression removes only the witnessed root, and only while it
       // still carries that run's token.
-      if (witness && dirname(witness.runRoot) === defaultTempParent() && basename(witness.runRoot).startsWith('ws-vr-')) {
+      if (witness && dirname(witness.runRoot) === defaultTempParent() && RUN_ROOT_NAME.test(basename(witness.runRoot))) {
         try {
           if (readFileSync(join(witness.runRoot, RUN_ROOT_MARKER), 'utf8') === witness.token) {
             rmSync(witness.runRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

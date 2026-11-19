@@ -4,7 +4,7 @@ import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSyn
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
-import { resolveWorkerTempRoot } from './vitest-run-root.ts';
+import { resolveWorkerTempRoot, workerHomePrefix } from './vitest-run-root.ts';
 
 const root = process.cwd();
 const tmp = trackTmpDirs('home-cleanup-');
@@ -40,11 +40,12 @@ describe('Vitest filesystem isolation', () => {
     const isolatedHome = process.env['WHATSOUP_VITEST_HOME']!;
 
     expect(runRoot).toBeTruthy();
-    expect(basename(runRoot!)).toMatch(/^ws-vr-/);
+    expect(basename(runRoot!)).toMatch(/^w[A-Za-z0-9]{6}$/);
     expect(existsSync(join(runRoot!, '.whatsoup-vitest-run-root'))).toBe(true);
     expect(process.env['WHATSOUP_VITEST_TEMP_ROOT']).toBe(runRoot);
     expect(dirname(isolatedHome)).toBe(runRoot);
-    expect(basename(isolatedHome)).toMatch(/^ws-vh-/);
+    // Only the six random characters: every test socket path carries this name.
+    expect(basename(isolatedHome)).toMatch(/^[A-Za-z0-9]{6}$/);
   });
 
   // The credential-isolation regression loads the setup file through its own
@@ -66,6 +67,7 @@ describe('Vitest filesystem isolation', () => {
   it('removes the exact owned HOME after the child test process exits', () => {
     const dir = tmp.make('child');
     const expectedParent = resolveWorkerTempRoot();
+    const homePrefix = workerHomePrefix(expectedParent);
     const witnessPath = join(dir, 'home-witness.json');
     const config = join(dir, 'vitest.config.mts');
     writeFileSync(config, `export default ${JSON.stringify({
@@ -108,11 +110,12 @@ describe('Vitest filesystem isolation', () => {
       expect(child.status, output).toBe(0);
       expect(witness, `the child did not record its live HOME:\n${output}`).toBeDefined();
       expect(dirname(witness!.home)).toBe(expectedParent);
-      expect(basename(witness!.home)).toMatch(/^ws-vh-/);
+      expect(witness!.home.slice(0, homePrefix.length)).toBe(homePrefix);
+      expect(witness!.home.slice(homePrefix.length)).toMatch(/^[A-Za-z0-9]{6}$/);
       expect(lstatSync(witness!.home, { throwIfNoEntry: false }), `child HOME survived process exit: ${witness!.home}`).toBeUndefined();
     } finally {
       // A failing regression must not leave its own witnessed fixture behind.
-      if (witness && dirname(witness.home) === expectedParent && basename(witness.home).startsWith('ws-vh-')) {
+      if (witness && dirname(witness.home) === expectedParent && witness.home.startsWith(homePrefix)) {
         const stat = lstatSync(witness.home, { throwIfNoEntry: false });
         if (stat?.isDirectory() && !stat.isSymbolicLink()
           && realpathSync(witness.home) === witness.home

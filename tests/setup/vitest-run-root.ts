@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, sep } from 'node:path';
 
 // One temporary root per Vitest run (Vitest globalSetup).
 //
 // Each test file gets a fresh fork worker, and bot-errors-vitest-isolation.ts
-// makes a `ws-vh-*` HOME for it. Vitest ends a worker with SIGTERM (then
+// makes a HOME for it in the run root. Vitest ends a worker with SIGTERM (then
 // SIGKILL after 500 ms) once its file is done, and Node does not emit `exit`
 // on a signal death, so a worker whose afterAll did not run or failed
 // (collection-only passes, bailed files, a child still writing into the
@@ -15,8 +15,14 @@ import { isAbsolute, join } from 'node:path';
 // process.env when it schedules the files), and teardown removes the run root
 // with every worker HOME still inside it.
 export const RUN_ROOT_ENV = 'WHATSOUP_VITEST_RUN_ROOT';
-export const RUN_ROOT_PREFIX = 'ws-vr-';
+// The run root and the worker HOME in it are on the path of every socket a test
+// makes in its TMPDIR, and macOS limits a socket path to 103 bytes
+// (vitest-socket-path-length.test.ts). So the run root gets a one-letter prefix,
+// and a HOME in it gets none (workerHomePrefix).
+export const RUN_ROOT_PREFIX = 'w';
 export const RUN_ROOT_MARKER = '.whatsoup-vitest-run-root';
+// A worker HOME made directly in /tmp, when no run root is exported.
+export const WORKER_HOME_PREFIX = 'ws-vh-';
 
 // Retries cover ENOTEMPTY/EBUSY from a process that is still writing into a
 // tree while it is removed.
@@ -45,7 +51,7 @@ function isMarkedRunRoot(root: string, token?: string): boolean {
   }
 }
 
-// The directory a worker creates its `ws-vh-*` HOME in, which is also the
+// The directory a worker creates its HOME in, which is also the
 // containment root its cleanup checks against: the run root when a marked one
 // is exported, else /tmp. A nested run whose config lacks this globalSetup still
 // inherits the parent run's root through its environment and nests there; only
@@ -57,6 +63,15 @@ export function resolveWorkerTempRoot(env: NodeJS.ProcessEnv = process.env): str
     throw new Error(`${RUN_ROOT_ENV} is set but does not name a marked Vitest run root: ${runRoot}`);
   }
   return runRoot;
+}
+
+// The mkdtempSync prefix for a worker HOME in tempRoot (resolveWorkerTempRoot).
+// In a run root the HOME name is only the six random characters: the root is
+// this run's own and is removed whole. The trailing separator makes the HOME a
+// child of the root; without it mkdtempSync would create a sibling in /tmp.
+// Directly in /tmp, a shared directory, the HOME keeps a recognizable prefix.
+export function workerHomePrefix(tempRoot: string): string {
+  return tempRoot === defaultTempParent() ? join(tempRoot, WORKER_HOME_PREFIX) : `${tempRoot}${sep}`;
 }
 
 export type RemoveTree = (root: string) => void;
