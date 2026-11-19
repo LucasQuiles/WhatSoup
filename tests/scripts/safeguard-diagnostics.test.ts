@@ -316,10 +316,11 @@ const requiredPrivateTestIntegrityWorkflow = [
   '    types: [completed]',
   'jobs:',
   '  private-scanner:',
-  '    if: github.event.workflow_run.head_repository.full_name == github.repository',
+  "    if: github.repository == 'LucasQuiles/WhatSoup' && github.event.workflow_run.status == 'completed' && github.event.workflow_run.head_repository.full_name == github.repository && ( github.event.workflow_run.event == 'pull_request' || (github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))) || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main') )",
   '    steps:',
   '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
   '        with:',
+  '          repository: LucasQuiles/test-integrity',
   '          ref: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
   '          persist-credentials: false',
 ].join('\n');
@@ -1379,6 +1380,12 @@ describe('safeguard diagnostics', () => {
     ['private-test-integrity.yml', 'drops the same-repository condition', 'head_repository.full_name == github.repository', 'status == \'completed\'', 'private-test-integrity-gate', 'private-scanner must run only for same-repository Quality runs'],
     ['private-test-integrity.yml', 'persists checkout credentials', 'persist-credentials: false', 'persist-credentials: true', 'private-test-integrity-gate', 'private-scanner checkout must set persist-credentials: false'],
     ['private-test-integrity.yml', 'stops starting on Quality', 'workflows: [Quality]', 'workflows: [Other]', 'private-test-integrity-gate', 'private test-integrity workflow must start on workflow_run of Quality'],
+    ['private-test-integrity.yml', 'adds a second trigger', 'on:\n  workflow_run:', 'on:\n  workflow_dispatch:\n  workflow_run:', 'private-test-integrity-gate', 'private test-integrity workflow must declare no trigger other than workflow_run'],
+    ['private-test-integrity.yml', 'also starts on requested Quality runs', 'types: [completed]', 'types: [completed, requested]', 'private-test-integrity-gate', 'private test-integrity workflow must start only on completed Quality runs'],
+    ['private-test-integrity.yml', 'pins the scanner commit in another repository', 'repository: LucasQuiles/test-integrity', 'repository: example/test-integrity', 'private-test-integrity-gate', 'private-scanner must check out the private test-integrity repository'],
+    ['private-test-integrity.yml', 'makes the same-repository condition optional', "== 'main') )", "== 'main') ) || true", 'private-test-integrity-gate', 'private-scanner must run only for same-repository Quality runs'],
+    ['private-test-integrity.yml', 'negates the same-repository comparison', 'full_name == github.repository', 'full_name != github.repository', 'private-test-integrity-gate', 'private-scanner must run only for same-repository Quality runs'],
+    ['private-test-integrity.yml', 'quotes persist-credentials as a string', 'persist-credentials: false', "persist-credentials: 'false'", 'private-test-integrity-gate', 'private-scanner checkout must set persist-credentials: false'],
   ])('fails when %s %s', (file, _name, anchor, replacement, checkId, evidence) => {
     const path = `.github/workflows/${file}`;
     const workflow = requiredFiles[path]!;
