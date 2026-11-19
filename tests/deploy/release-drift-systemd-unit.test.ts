@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { writeGetentShim } from '../helpers/user-database-shim.ts';
 
 const repoRoot = path.resolve(import.meta.dirname, '../..');
 const unitPath = path.join(repoRoot, 'deploy/whatsoup-release-drift.service');
@@ -65,8 +66,8 @@ function writeLabelFile(home: string, content: string): void {
 }
 
 /**
- * Run the wrapper as the unit runs it: the label file path, %h's
- * .config/whatsoup/release-drift.env, is its only argument. HOME is `env.HOME` or
+ * Run the wrapper as the unit runs it: `--label-file` and the label file path,
+ * %h's .config/whatsoup/release-drift.env. HOME is `env.HOME` or
  * a fresh folder, and is unset with `unsetHome`. The label file sits under
  * `labelHome` (default: that HOME), standing in for %h. A label in `env` is also
  * written to that file, as systemd would have loaded it from there, unless
@@ -86,7 +87,7 @@ function runWrapper(
   if (content !== null) writeLabelFile(labelHome, content);
   const runEnv: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, ...env };
   if (options.unsetHome) delete runEnv.HOME;
-  return spawnSync('bash', [wrapperPath, ...(options.args ?? [labelFilePath(labelHome)])], {
+  return spawnSync('bash', [wrapperPath, ...(options.args ?? ['--label-file', labelFilePath(labelHome)])], {
     encoding: 'utf8',
     env: runEnv,
   });
@@ -175,16 +176,15 @@ describe('whatsoup-release-drift systemd unit', () => {
     ]);
   });
 
-  it('passes the wrapper the same label file path that its EnvironmentFile line loads', () => {
-    // One specifier names the file twice, so the wrapper reads the file systemd
-    // loaded; bot-errors.env can change HOME but not an argument.
+  it('passes the wrapper, with --label-file, the path its EnvironmentFile line loads, character for character', () => {
+    // systemd resolves the one specifier for both lines, so the wrapper reads the
+    // file systemd loaded; bot-errors.env can change HOME or PATH but not an argument.
     const unit = readFileSync(unitPath, 'utf8');
     const labelFile = /^EnvironmentFile=-(.*\/release-drift\.env)$/m.exec(unit)?.[1];
     expect(labelFile).toBe('%h/.config/whatsoup/release-drift.env');
-    expect(/^ExecStart=(.*)$/m.exec(unit)?.[1].split(/\s+/)).toEqual([
-      '%h/.local/bin/whatsoup-release-drift-linux.sh',
-      labelFile,
-    ]);
+    const execStart = /^ExecStart=(.*)$/m.exec(unit)?.[1].split(/\s+/) ?? [];
+    expect(execStart).toEqual(['%h/.local/bin/whatsoup-release-drift-linux.sh', '--label-file', labelFile]);
+    expect(execStart[2] === labelFile).toBe(true);
   });
 
   it('a wrapper configuration error fails the unit visibly', () => {
@@ -379,10 +379,32 @@ describe('whatsoup-release-drift systemd unit', () => {
     expect(existsSync(release.argsFile)).toBe(false);
   });
 
+  it('reads the --label-file path whatever PATH holds: a getent there naming another home changes nothing', () => {
+    // The wrapper looks nothing up; this getent would name a home whose label file
+    // agrees with the environment while the named file does not.
+    const release = fakeRelease(0);
+    const otherHome = tmp.make('other-home');
+    writeLabelFile(otherHome, 'WHATSOUP_RELEASE_DRIFT_INSTANCE=bot-b\n');
+    const shims = tmp.make('shims');
+    writeGetentShim(shims, otherHome);
+    const result = runWrapper({
+      PATH: `${shims}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      WHATSOUP_RELEASE_DRIFT_INSTANCE: 'bot-b',
+      WHATSOUP_LAUNCHER: release.launcher,
+      WHATSOUP_RELEASE_DRIFT_LOG_DIR: release.logDir,
+    }, { labelFile: '' });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('WHATSOUP_RELEASE_DRIFT_INSTANCE is not set');
+    expect(existsSync(release.argsFile)).toBe(false);
+  });
+
   it.each([
     ['no argument', []],
-    ['a relative path', ['.config/whatsoup/release-drift.env']],
-    ['two arguments', ['/nonexistent/a', '/nonexistent/b']],
+    ['the path without --label-file', ['/nonexistent/release-drift.env']],
+    ['--label-file without a path', ['--label-file']],
+    ['a relative path', ['--label-file', '.config/whatsoup/release-drift.env']],
+    ['an extra argument', ['--label-file', '/nonexistent/a', '/nonexistent/b']],
   ])('fails closed with %s for the label file, and never falls back to HOME', (_name, args) => {
     const release = fakeRelease(0);
     const result = runWrapper({
@@ -392,7 +414,7 @@ describe('whatsoup-release-drift systemd unit', () => {
     }, { args });
 
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain('label file as the only argument');
+    expect(result.stderr).toContain('--label-file');
     expect(existsSync(release.argsFile)).toBe(false);
   });
 

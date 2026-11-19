@@ -60,22 +60,26 @@ describe('readFileFlags', () => {
     const folder = mkdtempSync(path.join(tmpdir(), 'launchd-plist-flags-real-'));
     const file = path.join(folder, 'flagged');
     writeFileSync(file, '');
-    let immutable = false;
-    let cleared = true;
     try {
       // A fresh file carries no flag, so each value below is the flags just set.
       expect(readFileFlags(file)).toBe(0);
       // UF_HIDDEN prints as 32768, which a hex reading would turn into 0x32768.
       expect(spawnSync('/usr/bin/chflags', ['hidden', file]).status).toBe(0);
       expect(readFileFlags(file)).toBe(0x8000);
-      const setImmutable = spawnSync('/usr/bin/chflags', ['uchg', file]);
-      immutable = setImmutable.status === 0;
-      expect(setImmutable.status).toBe(0);
+      expect(spawnSync('/usr/bin/chflags', ['uchg', file]).status).toBe(0);
       expect(readFileFlags(file)).toBe(0x8000 | 0x2);
     } finally {
-      if (immutable) cleared = spawnSync('/usr/bin/chflags', ['nouchg', file]).status === 0;
+      // Clear uchg whatever happened above, then reread the flags: removal waits
+      // until uchg is gone, and this check runs even after an earlier failure.
+      spawnSync('/usr/bin/chflags', ['nouchg', file]);
+      let cleared: boolean;
+      try {
+        cleared = (readFileFlags(file) & 0x2) === 0;
+      } catch {
+        cleared = false;
+      }
       if (cleared) rmSync(folder, { recursive: true, force: true });
+      expect(cleared, `${file} keeps its uchg flag after chflags nouchg`).toBe(true);
     }
-    expect(cleared, `chflags nouchg failed: ${file} keeps its uchg flag`).toBe(true);
   });
 });
