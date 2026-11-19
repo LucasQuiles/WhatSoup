@@ -1,8 +1,10 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { checkSafeguards, type DiagnosticCheck } from '../../scripts/safeguard-diagnostics.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -11,9 +13,15 @@ const tmp = trackTmpDirs('');
 const QUALITY_WORKFLOW = '.github/workflows/quality.yml';
 const workflow = readFileSync(path.join(repoRoot, QUALITY_WORKFLOW), 'utf8');
 
-// The lane-partition check reads only the Quality workflow; checkSafeguards also
-// loads both package manifests, so the tree holds those three files. Every other
-// check fails in such a tree, so only the lane-partition result is asserted.
+function git(cwd: string, args: string[]): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanGitEnv() });
+}
+
+// The lane-partition check reads only the Quality workflow. checkSafeguards also
+// loads both package manifests and reads the Git inventory, which throws outside
+// a repository, so the tree is a repository with those three files, set up with
+// the steps of makeRepo in safeguard-diagnostics.test.ts. Most other checks fail
+// in such a tree, so only the lane-partition result is asserted.
 function lanePartitionCheck(workflowText: string): DiagnosticCheck | undefined {
   const tree = tmp.make('safeguard-macos-lane');
   const files: Record<string, string> = {
@@ -25,6 +33,11 @@ function lanePartitionCheck(workflowText: string): DiagnosticCheck | undefined {
     mkdirSync(path.dirname(path.join(tree, relativePath)), { recursive: true });
     writeFileSync(path.join(tree, relativePath), text);
   }
+  git(tree, ['init']);
+  git(tree, ['config', 'user.name', 'WhatSoup Test']);
+  git(tree, ['config', 'user.email', 'whatsoup-test@users.noreply.github.com']);
+  git(tree, ['add', '.']);
+  git(tree, ['commit', '-m', 'fixture']);
   return checkSafeguards(tree).checks.find((check) => check.id === 'quality-ci-lane-partition');
 }
 
