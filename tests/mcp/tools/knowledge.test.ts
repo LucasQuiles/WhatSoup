@@ -960,6 +960,35 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
     });
   });
 
+  it('keeps only the source-set-id record when a legacy-id record carries the same text', async () => {
+    // One consolidated fact stored under its legacy claim-hash id and again
+    // under its source-set id. The newer record survives, in its own rank.
+    searchRecordsMock.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'durable:0123456789abcdef', _score: 0.9, fields: { text: 'user-a prefers green tea' } },
+          { _id: 'rec-other', _score: 0.8, fields: { text: 'user-a lives near the coast' } },
+          { _id: 'durable:l1:0123456789abcdef0123456789abcdef', _score: 0.7, fields: { text: ' user-a  prefers green tea' } },
+        ],
+      },
+    });
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'green tea' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toMatchObject({
+      results_count: 2,
+      results: [
+        { id: 'rec-other', score: 0.8, entity_type: 'unknown' },
+        { id: 'durable:l1:0123456789abcdef0123456789abcdef', score: 0.7, entity_type: 'unknown' },
+      ],
+    });
+  });
+
   it('searches vector indexes by embedding once and querying every namespace', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
