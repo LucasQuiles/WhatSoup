@@ -483,6 +483,24 @@ describe('release:activate-host group transaction', () => {
     expect(rows[0]!.detail).toContain(`boot the job out (loaded from ${elsewhere})`);
     expect(rows[0]!.detail).toContain(script);
     expect(rows[0]!.detail.includes(canonical)).toBe(canonicalPresent);
+    // The loaded-from plist is in the remove list itself, first, not only in the boot-out text.
+    expect(rows[0]!.detail.split(', then remove ')[1]?.split(' and ')).toEqual([elsewhere, ...(canonicalPresent ? [canonical] : []), script]);
+  });
+
+  it('leaves a canonical plist whose Label is another job out of the remove list while the retired job is loaded from elsewhere', async () => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const script = path.join(world.home, '.local', 'bin', 'ms365-token-backup'); writeFileSync(script, '#!/bin/sh\n');
+    const elsewhere = path.join(world.root, 'elsewhere', `${label}.plist`); mkdirSync(path.dirname(elsewhere), { recursive: true });
+    writeFileSync(elsewhere, plist(label, [script], world.home));
+    const canonical = world.addJob(label, plist('com.example.other', ['/usr/bin/true'], world.home));
+    const fake = world.host.exec;
+    const loaded = `gui/501/${label} = {\n\tpath = ${elsewhere}\n\ttype = LaunchAgent\n\tprogram = ${script}\n\tstate = running\n\tpid = 4242\n\targuments = {\n\t\t${script}\n\t}\n}\n`;
+    world.host.exec = (file, args, options) => (file === '/bin/launchctl' && args[0] === 'print' && args[1] === `gui/501/${label}` ? Promise.resolve({ code: 0, stdout: loaded, stderr: '' }) : fake(file, args, options));
+    const rows = ((await planTwoMemberWorld(world)).document.preconditions as Array<{ id: string; detail: string }>).filter((row) => row.id.endsWith(`:${label}`));
+    expect(rows.map((row) => row.id)).toEqual([`retired:${label}`]);
+    expect(rows[0]!.detail.split(', then remove ')[1]?.split(' and ')).toEqual([elsewhere, script]);
+    expect(rows[0]!.detail).not.toContain(canonical);
   });
 
   it('checks a configured instance that owns the retired name as an instance, never as the retired job', async () => {
