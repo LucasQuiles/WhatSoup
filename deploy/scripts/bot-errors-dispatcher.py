@@ -66,14 +66,21 @@ from lib.controller_state import (
     state_diagnostic_details,
 )
 from lib.incident_authority import (
+    DEFAULT_TIMEOUT_SECONDS as INCIDENT_AUTHORITY_TIMEOUT_SECONDS,
+    OBSERVE_REQUESTS_PER_CYCLE as INCIDENT_AUTHORITY_OBSERVE_REQUESTS_PER_CYCLE,
+    OBSERVE_SECONDS_PER_CYCLE as INCIDENT_AUTHORITY_OBSERVE_SECONDS_PER_CYCLE,
+    OBSERVE_TIMEOUT_SECONDS as INCIDENT_AUTHORITY_OBSERVE_TIMEOUT_SECONDS,
     AuthorityConflict,
     AuthorityError,
     AuthorityNotReady,
     AuthorityProtocolError,
     AuthorityUnavailable,
     IncidentAuthorityClient,
+    authority_outcome_record,
+    classify_authority_outcome,
     dry_accept_for_test,
     grant_from_record,
+    incident_authority_mode,
 )
 from lib.durable_json import (
     JsonVersion,
@@ -133,6 +140,16 @@ INCIDENT_AUTHORITY_PRODUCER_ID = "bot-errors-dispatcher"
 INCIDENT_AUTHORITY_MAX_ATTEMPTS = max(
     1, min(100, int(os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS", "12")))
 )
+
+
+def _warn_incident_authority_mode(code: str) -> None:
+    print(json.dumps({"warning": code}), file=sys.stderr, flush=True)
+
+
+# The authority mode is read once per process, here, through the shared reader
+# in lib/incident_authority.py; every authority decision below uses this value.
+INCIDENT_AUTHORITY_MODE = incident_authority_mode(os.environ, _warn_incident_authority_mode)
+INCIDENT_AUTHORITY_RECORD_MAX_BYTES = 1024 * 1024
 
 
 def normalized_signal_key(value: str) -> str:
@@ -4350,7 +4367,11 @@ def email_fallback(subject: str, body: str, timeout: float = 20) -> bool:
 def _require_incident_authority_grant(
     event: dict[str, Any],
     claimed_event: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
+    if INCIDENT_AUTHORITY_MODE != "enforce":
+        # Observe mode: ask once and record the answer; the send goes ahead.
+        observe_incident_authority(event, claimed_event)
+        return None
     claim = claimed_event if claimed_event is not None else producer_claim(event)
     if not has_incident_authority(event, claim):
         mark_incident_authority_attempt(event)
@@ -5570,11 +5591,29 @@ def producer_claim(
 
 # What this cycle learned about the authority: whether any grant was obtained,
 # the last not-ready reason, and whether a rate refusal stops further requests.
-_AUTHORITY_CYCLE: dict[str, Any] = {"accepted": False, "not_ready": None, "rate_limited": False}
+# Observe mode also keeps the claim ids already asked this cycle and the
+# requests and request time spent, for its per-cycle bounds.
+_AUTHORITY_CYCLE: dict[str, Any] = {
+    "accepted": False,
+    "not_ready": None,
+    "rate_limited": False,
+    "observed": set(),
+    "observe_requests": 0,
+    "observe_seconds": 0.0,
+}
+# The clock observe mode charges request time against; a test seam.
+_authority_clock = time.monotonic
 
 
 def begin_incident_authority_cycle() -> None:
-    _AUTHORITY_CYCLE.update(accepted=False, not_ready=None, rate_limited=False)
+    _AUTHORITY_CYCLE.update(
+        accepted=False,
+        not_ready=None,
+        rate_limited=False,
+        observed=set(),
+        observe_requests=0,
+        observe_seconds=0.0,
+    )
 
 
 def authority_not_ready_record(paths: dict[str, Path]) -> dict[str, str] | None:
@@ -5582,8 +5621,11 @@ def authority_not_ready_record(paths: dict[str, Path]) -> dict[str, str] | None:
 
     A cycle that obtained any grant clears it. A cycle that made no request
     (every event in backoff) keeps the previous record, so the time it began
-    survives until the authority answers. It holds no secret.
+    survives until the authority answers. It holds no secret. Observe mode
+    holds nothing, so it records nothing here and the deadman stays quiet.
     """
+    if INCIDENT_AUTHORITY_MODE != "enforce":
+        return None
     if _AUTHORITY_CYCLE["accepted"]:
         return None
     previous: dict[str, str] | None = None
@@ -5664,6 +5706,42 @@ def accept_incident_authority(
             expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
         ).as_record()
 
+    try:
+        grant = _request_incident_authority(
+            claimed_event,
+            timeout_seconds=INCIDENT_AUTHORITY_TIMEOUT_SECONDS,
+            rate_limited=_AUTHORITY_CYCLE["rate_limited"],
+        )
+    except AuthorityNotReady as exc:
+        _AUTHORITY_CYCLE["not_ready"] = exc.reason
+        if exc.reason == "incident_authority_rate_limited":
+            _AUTHORITY_CYCLE["rate_limited"] = True
+        record_incident_authority_outcome(event, *classify_authority_outcome(exc))
+        raise
+    except Exception as exc:
+        record_incident_authority_outcome(event, *classify_authority_outcome(exc))
+        raise
+    record_incident_authority_outcome(event, *classify_authority_outcome(None))
+    _AUTHORITY_CYCLE["accepted"] = True
+    record = grant.as_record()
+    delivery["incidentAuthority"] = record
+    delivery["incidentAuthorityStatus"] = "accepted"
+    delivery["incidentAuthorityError"] = None
+    return record
+
+
+def _request_incident_authority(
+    claimed_event: dict[str, Any],
+    *,
+    timeout_seconds: float,
+    rate_limited: bool,
+) -> Any:
+    """Ask the authority (or the dry test seam) for one grant; both modes use it.
+
+    Raises ``AuthorityNotReady("incident_authority_not_configured")`` without a
+    request when the settings are missing, and ``..._rate_limited`` without a
+    request when ``rate_limited`` is set.
+    """
     dry_send_capture = os.environ.get("BOT_ERRORS_DRY_SEND_CAPTURE", "").strip()
     configured_dry_authority = os.environ.get("BOT_ERRORS_DRY_AUTHORITY_CAPTURE", "").strip()
     if (
@@ -5676,35 +5754,136 @@ def accept_incident_authority(
         capture = Path(
             configured_dry_authority or f"{dry_send_capture}.incident-authority.jsonl"
         ).expanduser()
-        grant = dry_accept_for_test(claimed_event, capture)
-    else:
-        url = os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_URL", "").strip()
-        credential = os.environ.get(
-            "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE", ""
-        ).strip()
-        if not url or not credential:
-            _AUTHORITY_CYCLE["not_ready"] = "incident_authority_not_configured"
-            raise AuthorityNotReady("incident_authority_not_configured")
+        return dry_accept_for_test(claimed_event, capture)
+    url = os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_URL", "").strip()
+    credential = os.environ.get(
+        "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE", ""
+    ).strip()
+    if not url or not credential:
+        raise AuthorityNotReady("incident_authority_not_configured")
+    if rate_limited:
+        # One rate refusal stops every further request for this cycle.
+        raise AuthorityNotReady("incident_authority_rate_limited")
+    return IncidentAuthorityClient(
+        url,
+        Path(credential).expanduser(),
+        expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+        timeout_seconds=timeout_seconds,
+    ).accept(claimed_event)
+
+
+def incident_authority_record_path(paths: dict[str, Path]) -> Path:
+    return paths["logs"] / "incident-authority.jsonl"
+
+
+def _authority_event_class(event: dict[str, Any]) -> str:
+    event_type = event.get("eventType") if isinstance(event, dict) else None
+    return event_type if isinstance(event_type, str) else "other"
+
+
+def record_incident_authority_outcome(
+    event: dict[str, Any], outcome: str, reason: str
+) -> None:
+    """Append one line to the bounded authority record; never raises.
+
+    The line holds the time, the event class, the outcome, its reason code and
+    the mode, all closed codes (see ``authority_outcome_record``).
+    """
+    try:
+        record = authority_outcome_record(
+            event_class=_authority_event_class(event),
+            outcome=outcome,
+            reason=reason,
+            mode=INCIDENT_AUTHORITY_MODE,
+            observed_epoch=int(time.time()),
+        )
+        require_bounded_jsonl_commit(
+            append_bounded_jsonl(
+                incident_authority_record_path(state_paths()),
+                record,
+                component="dispatcher.incident_authority_record",
+                max_bytes=INCIDENT_AUTHORITY_RECORD_MAX_BYTES,
+                durability="best_effort",
+            )
+        )
+    except Exception:  # noqa: BLE001 - the record is diagnostic; it never stops a send
+        pass
+
+
+def _observe_claim(event: dict[str, Any], claimed_event: dict[str, Any] | None) -> dict[str, Any]:
+    claim = dict(claimed_event) if claimed_event is not None else producer_claim(event)
+    created_at = claim.get("createdAt")
+    if not (isinstance(created_at, str) and created_at.strip()):
+        # Observe mode never writes to the event, so a legacy event without
+        # createdAt gets its authority clock on this copy only.
+        observed_at = claim.get("authorityObservedAt")
+        if not (isinstance(observed_at, str) and observed_at.strip()):
+            claim["authorityObservedAt"] = now_iso()
+    return claim
+
+
+def observe_incident_authority(
+    event: dict[str, Any], claimed_event: dict[str, Any] | None = None
+) -> str | None:
+    """Observe mode: ask once per event per cycle, record the answer, send anyway.
+
+    Never raises and never writes to the event. Returns the recorded outcome,
+    or None when this event was already asked this cycle.
+    """
+    try:
+        claim = _observe_claim(event, claimed_event)
+        key = str(claim.get("id"))
+        if key in _AUTHORITY_CYCLE["observed"]:
+            return None
+        _AUTHORITY_CYCLE["observed"].add(key)
         if _AUTHORITY_CYCLE["rate_limited"]:
-            # One rate refusal stops every further request for this cycle.
-            raise AuthorityNotReady("incident_authority_rate_limited")
-        try:
-            grant = IncidentAuthorityClient(
-                url,
-                Path(credential).expanduser(),
-                expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
-            ).accept(claimed_event)
-        except AuthorityNotReady as exc:
-            _AUTHORITY_CYCLE["not_ready"] = exc.reason
-            if exc.reason == "incident_authority_rate_limited":
+            outcome, reason = "not_asked", "incident_authority_rate_limited"
+        elif (
+            _AUTHORITY_CYCLE["observe_requests"] >= INCIDENT_AUTHORITY_OBSERVE_REQUESTS_PER_CYCLE
+            or _AUTHORITY_CYCLE["observe_seconds"] >= INCIDENT_AUTHORITY_OBSERVE_SECONDS_PER_CYCLE
+        ):
+            outcome, reason = "not_asked", "incident_authority_cycle_bound"
+        else:
+            started = _authority_clock()
+            error: BaseException | None = None
+            try:
+                _request_incident_authority(
+                    claim,
+                    timeout_seconds=INCIDENT_AUTHORITY_OBSERVE_TIMEOUT_SECONDS,
+                    rate_limited=False,
+                )
+            except Exception as exc:  # noqa: BLE001 - every answer is recorded, none stops a send
+                error = exc
+            outcome, reason = classify_authority_outcome(error)
+            if outcome != "not_configured":
+                _AUTHORITY_CYCLE["observe_requests"] += 1
+                _AUTHORITY_CYCLE["observe_seconds"] += max(0.0, _authority_clock() - started)
+            if reason == "incident_authority_rate_limited":
                 _AUTHORITY_CYCLE["rate_limited"] = True
-            raise
-    _AUTHORITY_CYCLE["accepted"] = True
-    record = grant.as_record()
-    delivery["incidentAuthority"] = record
-    delivery["incidentAuthorityStatus"] = "accepted"
-    delivery["incidentAuthorityError"] = None
-    return record
+    except Exception:  # noqa: BLE001 - observation must never affect delivery
+        outcome, reason = "protocol_error", "authority_client_error"
+    record_incident_authority_outcome(event, outcome, reason)
+    return outcome
+
+
+def _observe_ready_events(paths: dict[str, Path]) -> dict[str, int]:
+    """Observe-mode preflight: ask for ready events, never hold or change one."""
+    counts = {"accepted": 0, "unavailable": 0, "rejected": 0, "not_ready": 0}
+    for path in sorted(paths["outbox"].glob("*.json")):
+        try:
+            event = normalize_event(safe_read_json(path))
+            if not delivery_ready(event):
+                continue
+            claimed_event = producer_claim(
+                event,
+                injected_dispatch_log=str(paths["logs"] / "dispatch.jsonl"),
+            )
+            if matched_test_leak_pattern(claimed_event) is not None:
+                continue
+        except Exception:  # noqa: BLE001 - delivery validation owns malformed events
+            continue
+        observe_incident_authority(event, claimed_event)
+    return counts
 
 
 def mark_incident_authority_unavailable(event: dict[str, Any], reason: str) -> int:
@@ -5764,8 +5943,13 @@ def authorize_ready_events(paths: dict[str, Path]) -> dict[str, int]:
     before ``process_one``.  This pass is therefore the earliest shared gate:
     a deferred or rejected event becomes non-ready before any of those passes
     can mutate incident state or create a derived notification.
+
+    In observe mode (the default) it only asks and records; no event is held,
+    changed, quarantined or dead-lettered.
     """
 
+    if INCIDENT_AUTHORITY_MODE != "enforce":
+        return _observe_ready_events(paths)
     counts = {"accepted": 0, "unavailable": 0, "rejected": 0, "not_ready": 0}
     for path in sorted(paths["outbox"].glob("*.json")):
         try:
@@ -10828,7 +11012,9 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     # pipeline; over-catching costs one quarantined event and a meta-alert
     # naming it. Quarantine is the right shape for ANY snapshot failure.
     try:
-        ensure_incident_authority_observed_at(event)
+        if INCIDENT_AUTHORITY_MODE == "enforce":
+            # Observe mode never writes authority fields into the event.
+            ensure_incident_authority_observed_at(event)
         claimed_event = producer_claim(
             event,
             injected_dispatch_log=str(paths["logs"] / "dispatch.jsonl"),
@@ -10864,7 +11050,9 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     # incident mutation and notification.  Persist the attempt before network
     # I/O; a crash after commit safely replays the same canonical bytes.  A
     # valid persisted receipt is re-bound to the producer claim on restart.
-    if not has_incident_authority(event, claimed_event):
+    # Observe mode skips this gate: the send wrappers record the answer and
+    # deliver as before the authority existed.
+    if INCIDENT_AUTHORITY_MODE == "enforce" and not has_incident_authority(event, claimed_event):
         authority_attempt = mark_incident_authority_attempt(event)
         authority_attempt_target = _durable_target(claimed)
         authority_attempt_observation = observe_json(authority_attempt_target)
@@ -11606,11 +11794,16 @@ def drain_owner_route_queue(paths: dict[str, Path]) -> None:
                 is_alert=is_alert,
                 group_text=text,
                 state_dir=paths["root"],
-                authority_grant=event["delivery"]["incidentAuthority"],
+                authority_grant=(
+                    event["delivery"]["incidentAuthority"]
+                    if INCIDENT_AUTHORITY_MODE == "enforce"
+                    else None
+                ),
                 json_rpc_call=json_rpc_call,
                 email_fallback=email_fallback,
                 log=lambda record: append_dispatch_log(paths, record),
                 deadline=deadline,
+                authority_mode=INCIDENT_AUTHORITY_MODE,
             )
         except Exception:  # noqa: BLE001 - must never affect group delivery
             _log_owner_route_error(paths, event)
@@ -12063,29 +12256,36 @@ def send_credential_pages(paths: dict[str, Path]) -> None:
             from lib.owner_route import send_credential_page
 
             attempt_at = item.get("attemptAt")
-            if type(attempt_at) is not int or attempt_at <= 0:
+            authority_event: dict[str, Any] | None = None
+            authority_grant: dict[str, Any] | None = None
+            valid_attempt_at = type(attempt_at) is int and attempt_at > 0
+            if INCIDENT_AUTHORITY_MODE == "enforce" and not valid_attempt_at:
                 raise AuthorityProtocolError("credential_page_time_invalid")
-            page_identity = hashlib.sha256(
-                json.dumps(
-                    [item.get("scope"), attempt_at, item.get("before")],
-                    ensure_ascii=True,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()[:32]
-            authority_event = {
-                **new_event_fields("observation", "info"),
-                "id": f"credential-repage-{page_identity}",
-                "createdAt": time.strftime(
-                    "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(attempt_at)
-                ),
-                "source": "credential_repage_page",
-                "machine": event_machine(),
-                "instance": "bot-errors-dispatcher",
-            }
-            authority_grant = accept_incident_authority(
-                authority_event, authority_event
-            )
+            if valid_attempt_at:
+                page_identity = hashlib.sha256(
+                    json.dumps(
+                        [item.get("scope"), attempt_at, item.get("before")],
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                authority_event = {
+                    **new_event_fields("observation", "info"),
+                    "id": f"credential-repage-{page_identity}",
+                    "createdAt": time.strftime(
+                        "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(attempt_at)
+                    ),
+                    "source": "credential_repage_page",
+                    "machine": event_machine(),
+                    "instance": "bot-errors-dispatcher",
+                }
+                if INCIDENT_AUTHORITY_MODE == "enforce":
+                    authority_grant = accept_incident_authority(
+                        authority_event, authority_event
+                    )
+                else:
+                    observe_incident_authority(authority_event, authority_event)
 
             accepted = send_credential_page(
                 item["line"],
@@ -12097,6 +12297,7 @@ def send_credential_pages(paths: dict[str, Path]) -> None:
                 email_fallback=email_fallback,
                 log=lambda record: append_dispatch_log(paths, record),
                 deadline=deadline,
+                authority_mode=INCIDENT_AUTHORITY_MODE,
             )
             if accepted:
                 result = credential_repage.ACCEPTED
@@ -12153,6 +12354,10 @@ def run_once(max_events: int) -> dict[str, Any]:
     lock_path = paths["locks"] / "dispatcher.lock"
     with lock_path.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Before any pass that can ask the authority (a poison meta-alert in
+        # the first queue scan can), so a rate refusal or the observe-mode
+        # bounds hold for the whole cycle.
+        begin_incident_authority_cycle()
         # #2723 R5.3: open controller state session BEFORE any domain effect
         # (recover_writefail_breadcrumbs, reclaim_processing, etc.).
         # ControllerStateRequired / recovery_required raises before ANY queue
@@ -12203,7 +12408,6 @@ def run_once(max_events: int) -> dict[str, Any]:
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
-            begin_incident_authority_cycle()
             authority_preflight = authorize_ready_events(paths)
             # Credential re-page: after the fixture events are retired and before
             # any pass that can move a member event out of the outbox.

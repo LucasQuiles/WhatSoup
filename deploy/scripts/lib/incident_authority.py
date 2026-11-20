@@ -15,9 +15,10 @@ import json
 import os
 import re
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 
@@ -25,6 +26,97 @@ MAX_CREDENTIAL_BYTES = 4096
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_SIGNAL_BYTES = 32 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
+
+# The authority mode, one setting for the dispatcher and the Q loop. "observe"
+# (the default) asks for a grant and records the answer, but every notice is
+# delivered as before the authority existed. "enforce" sends nothing without a
+# grant. The owner switches a host to "enforce" after enrolling it.
+AUTHORITY_MODE_SETTING = "BOT_ERRORS_INCIDENT_AUTHORITY_MODE"
+AUTHORITY_MODES = ("observe", "enforce")
+# Observe-mode bounds: one request per event per cycle with this timeout, and
+# at most this many requests and this much request time per cycle. After a
+# bound, the rest of the cycle is recorded "not_asked" and still sent.
+OBSERVE_TIMEOUT_SECONDS = 2.0
+OBSERVE_REQUESTS_PER_CYCLE = 8
+OBSERVE_SECONDS_PER_CYCLE = 8.0
+AUTHORITY_OUTCOMES = (
+    "granted",
+    "refused",
+    "not_ready",
+    "protocol_error",
+    "not_configured",
+    "not_asked",
+)
+# Outcomes that enforce mode would have held or refused.
+ENFORCE_WOULD_STOP_OUTCOMES = ("refused", "not_ready", "protocol_error", "not_configured")
+_RECORD_EVENT_CLASSES = ("alert", "clear", "observation", "q_notice")
+_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_REFUSED_REASONS = (
+    "incident_authority_identity_conflict",
+    "authority_credential_rejected",
+    "authority_scope_denied",
+)
+
+
+def incident_authority_mode(environ: Mapping[str, str], warn: Callable[[str], None]) -> str:
+    """Return the authority mode; the one reader of the setting.
+
+    Absent, empty or any value other than exactly ``observe`` or ``enforce``
+    (after trimming white space) means ``observe``. An unknown value calls
+    ``warn`` once with a fixed code; the value itself is never logged.
+    """
+    value = str(environ.get(AUTHORITY_MODE_SETTING, "") or "").strip()
+    if value in AUTHORITY_MODES:
+        return value
+    if value:
+        warn("incident_authority_mode_unknown")
+    return "observe"
+
+
+def _reason_code(text: str) -> str:
+    return text if _REASON_CODE.fullmatch(text) else "authority_client_error"
+
+
+def classify_authority_outcome(error: BaseException | None) -> tuple[str, str]:
+    """Map one authority answer to a recorded (outcome, reason code) pair."""
+    if error is None:
+        return "granted", "none"
+    if isinstance(error, AuthorityConflict):
+        return "refused", "incident_authority_identity_conflict"
+    if isinstance(error, AuthorityNotReady):
+        reason = _reason_code(error.reason)
+        if reason == "incident_authority_not_configured":
+            return "not_configured", reason
+        if reason in _REFUSED_REASONS:
+            return "refused", reason
+        return "not_ready", reason
+    if isinstance(error, AuthorityUnavailable):
+        return "not_ready", "incident_authority_unavailable"
+    if isinstance(error, AuthorityProtocolError):
+        return "protocol_error", _reason_code(str(error))
+    return "protocol_error", "authority_client_error"
+
+
+def authority_outcome_record(
+    *,
+    event_class: str,
+    outcome: str,
+    reason: str,
+    mode: str,
+    observed_epoch: int,
+) -> dict[str, str]:
+    """One record line: time, event class, outcome, reason code and mode.
+
+    Every value is a closed code; no message content, path, name or chat id
+    can enter the record.
+    """
+    return {
+        "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(observed_epoch)),
+        "eventClass": event_class if event_class in _RECORD_EVENT_CLASSES else "other",
+        "outcome": outcome if outcome in AUTHORITY_OUTCOMES else "protocol_error",
+        "reason": _reason_code(reason) if outcome in AUTHORITY_OUTCOMES else "authority_client_error",
+        "mode": mode if mode in AUTHORITY_MODES else "observe",
+    }
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,125}$")
 _ALLOWED_DISPOSITIONS = {
     "incident_opened",
@@ -446,8 +538,8 @@ class IncidentAuthorityClient:
             raise AuthorityNotReady("incident_authority_unavailable") from exc
         finally:
             connection.close()
-        if len(payload) > MAX_RESPONSE_BYTES:
-            raise AuthorityProtocolError("authority_response_oversized")
+        # The status decides before the body size: a proxy's large error page
+        # on a refusal or an outage must not become a protocol error.
         if response.status == 409:
             raise AuthorityConflict("incident_authority_identity_conflict")
         if response.status == 401:
@@ -460,6 +552,8 @@ class IncidentAuthorityClient:
             raise AuthorityNotReady("incident_authority_unavailable")
         if 300 <= response.status < 400:
             raise AuthorityProtocolError("authority_redirect_rejected")
+        if len(payload) > MAX_RESPONSE_BYTES:
+            raise AuthorityProtocolError("authority_response_oversized")
         replay = response.status == 200
         if response.status not in {200, 201}:
             raise AuthorityProtocolError("authority_response_status_rejected")

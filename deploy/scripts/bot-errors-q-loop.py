@@ -45,11 +45,16 @@ from lib.durable_json import (
     require_advance,
 )
 from lib.incident_authority import (
+    DEFAULT_TIMEOUT_SECONDS,
+    OBSERVE_TIMEOUT_SECONDS,
     AuthorityNotReady,
     AuthorityProtocolError,
     IncidentAuthorityClient,
+    authority_outcome_record,
+    classify_authority_outcome,
     dry_accept_for_test,
     grant_from_record,
+    incident_authority_mode,
 )
 from lib.state_root import q_loop_state_root, state_root
 
@@ -68,6 +73,15 @@ ACTIVITY_LOG = STATE_DIR / "activity.jsonl"
 LOCK_FILE = STATE_DIR / "loop.lock"
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("q_loop")
 INCIDENT_AUTHORITY_PRODUCER_ID = "bot-errors-q-loop"
+INCIDENT_AUTHORITY_RECORD = STATE_DIR / "incident-authority.jsonl"
+
+
+def _warn_incident_authority_mode(code: str) -> None:
+    print(json.dumps({"warning": code}), file=sys.stderr, flush=True)
+
+
+# Read once per process, here, through the reader the dispatcher uses too.
+INCIDENT_AUTHORITY_MODE = incident_authority_mode(os.environ, _warn_incident_authority_mode)
 
 REQUIRED_MESSAGE_COLUMNS = {
     "pk",
@@ -775,10 +789,67 @@ def _authority_notification_claim(event_id: str, observed_epoch: int) -> dict[st
     }
 
 
+def _request_notification_authority(
+    claim: dict[str, Any], *, timeout_seconds: float
+) -> Any:
+    """Ask the authority (or the dry test seam) for one grant; both modes use it."""
+    dry_capture = os.environ.get("BOT_ERRORS_DRY_AUTHORITY_CAPTURE", "").strip()
+    if dry_capture:
+        if os.environ.get("BOT_ERRORS_TEST_MODE") != "1":
+            raise AuthorityProtocolError("dry_authority_requires_test_mode")
+        return dry_accept_for_test(
+            claim,
+            Path(dry_capture).expanduser(),
+            producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+        )
+    url = os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_URL", "").strip()
+    credential = os.environ.get(
+        "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE", ""
+    ).strip()
+    if not url or not credential:
+        raise AuthorityNotReady("incident_authority_not_configured")
+    return IncidentAuthorityClient(
+        url,
+        Path(credential).expanduser(),
+        expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+        timeout_seconds=timeout_seconds,
+    ).accept(claim)
+
+
+def _record_notification_authority(error: BaseException | None) -> None:
+    """Append one line to the Q loop's bounded authority record; never raises."""
+    try:
+        outcome, reason = classify_authority_outcome(error)
+        append_private_jsonl(
+            INCIDENT_AUTHORITY_RECORD,
+            authority_outcome_record(
+                event_class="q_notice",
+                outcome=outcome,
+                reason=reason,
+                mode=INCIDENT_AUTHORITY_MODE,
+                observed_epoch=now(),
+            ),
+        )
+    except Exception:  # noqa: BLE001 - the record is diagnostic; it never stops a send
+        pass
+
+
 def _authorize_notification(
     state: dict[str, Any], event_id: str, observed_epoch: int
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     claim = _authority_notification_claim(event_id, observed_epoch)
+    if INCIDENT_AUTHORITY_MODE != "enforce":
+        # Observe mode: one bounded request, the answer recorded, nothing
+        # stored in the loop state, and the notification is sent anyway.
+        error: BaseException | None = None
+        try:
+            _request_notification_authority(
+                claim, timeout_seconds=OBSERVE_TIMEOUT_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 - every answer is recorded, none stops a send
+            error = exc
+        _record_notification_authority(error)
+        return None
     records = state.setdefault("notification_authority", {})
     if not isinstance(records, dict):
         records = {}
@@ -790,27 +861,14 @@ def _authorize_notification(
             claim,
             expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
         ).as_record()
-    dry_capture = os.environ.get("BOT_ERRORS_DRY_AUTHORITY_CAPTURE", "").strip()
-    if dry_capture:
-        if os.environ.get("BOT_ERRORS_TEST_MODE") != "1":
-            raise AuthorityProtocolError("dry_authority_requires_test_mode")
-        grant = dry_accept_for_test(
-            claim,
-            Path(dry_capture).expanduser(),
-            producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+    try:
+        grant = _request_notification_authority(
+            claim, timeout_seconds=DEFAULT_TIMEOUT_SECONDS
         )
-    else:
-        url = os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_URL", "").strip()
-        credential = os.environ.get(
-            "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE", ""
-        ).strip()
-        if not url or not credential:
-            raise AuthorityNotReady("incident_authority_not_configured")
-        grant = IncidentAuthorityClient(
-            url,
-            Path(credential).expanduser(),
-            expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
-        ).accept(claim)
+    except Exception as exc:
+        _record_notification_authority(exc)
+        raise
+    _record_notification_authority(None)
     record = grant.as_record()
     records[event_id] = record
     while len(records) > 100:

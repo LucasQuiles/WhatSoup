@@ -9162,6 +9162,77 @@ def authority_not_ready_member(state_data: Any, now_epoch: float) -> dict[str, A
     return {"reason": reason, "not_ready_seconds": age, "events_waiting": waiting}
 
 
+INCIDENT_AUTHORITY_RECORD_NAME = "incident-authority.jsonl"
+INCIDENT_AUTHORITY_RECORD_WINDOW_SECONDS = 86400
+INCIDENT_AUTHORITY_RECORD_READ_BYTES = 4 * 1024 * 1024
+_INCIDENT_AUTHORITY_OUTCOMES = (
+    "granted",
+    "refused",
+    "not_ready",
+    "protocol_error",
+    "not_configured",
+    "not_asked",
+)
+_INCIDENT_AUTHORITY_ENFORCE_WOULD_STOP = ("refused", "not_ready", "protocol_error", "not_configured")
+
+
+def incident_authority_record_line(producer: str, path: Path, now_epoch: float) -> str | None:
+    """Daily-report summary of one producer's authority record, last 24 hours.
+
+    Counts per outcome and how many notices enforce mode would have held or
+    refused, so the owner can see when a host is ready for enforce. Returns
+    None when the record does not exist. Plain text, not WARN: observe mode
+    holds nothing.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            if size > INCIDENT_AUTHORITY_RECORD_READ_BYTES:
+                handle.seek(size - INCIDENT_AUTHORITY_RECORD_READ_BYTES)
+            text = handle.read(INCIDENT_AUTHORITY_RECORD_READ_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return f"incident_authority_record: producer={producer} unreadable"
+    counts = {outcome: 0 for outcome in _INCIDENT_AUTHORITY_OUTCOMES}
+    modes: set[str] = set()
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("outcome") not in counts:
+            continue
+        observed = parse_iso_epoch(record.get("time"))
+        if observed is None or not (
+            now_epoch - INCIDENT_AUTHORITY_RECORD_WINDOW_SECONDS <= observed <= now_epoch + 300
+        ):
+            continue
+        counts[record["outcome"]] += 1
+        if record.get("mode") in ("observe", "enforce"):
+            modes.add(record["mode"])
+    would_stop = sum(counts[outcome] for outcome in _INCIDENT_AUTHORITY_ENFORCE_WOULD_STOP)
+    outcome_text = " ".join(f"{outcome}={counts[outcome]}" for outcome in _INCIDENT_AUTHORITY_OUTCOMES)
+    return (
+        f"incident_authority_record: producer={producer} last_24h total={sum(counts.values())} "
+        f"{outcome_text} would_hold_or_refuse_in_enforce={would_stop} "
+        f"mode={','.join(sorted(modes)) or 'none'}"
+    )
+
+
+def incident_authority_record_lines(now_epoch: float | None = None) -> list[str]:
+    current = time.time() if now_epoch is None else now_epoch
+    lines: list[str] = []
+    for producer, path in (
+        ("dispatcher", state_root() / "logs" / INCIDENT_AUTHORITY_RECORD_NAME),
+        ("q_loop", q_loop_state_root().expanduser() / INCIDENT_AUTHORITY_RECORD_NAME),
+    ):
+        line = incident_authority_record_line(producer, path, current)
+        if line is not None:
+            lines.append(line)
+    return lines
+
+
 def queue_inventory() -> list[str]:
     root = state_root()
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
@@ -9194,6 +9265,7 @@ def queue_inventory() -> list[str]:
     else:
         prefix = "dispatcher_state:" if state_problem.startswith("missing ") else "FAIL dispatcher_state:"
         lines.append(f"{prefix} {state_problem}")
+    lines.extend(incident_authority_record_lines())
 
     lines.append(queue_directory_line(
         "outbox",

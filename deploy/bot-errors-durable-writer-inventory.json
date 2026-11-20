@@ -357,6 +357,35 @@
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
+      "site_id": "dispatcher-incident-authority-not-ready",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "process_one",
+      "logical_publication": "dispatcher.incident_authority_not_ready",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "process_one",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-incident-authority-record",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "record_incident_authority_outcome",
+      "logical_publication": "dispatcher.incident_authority_record",
+      "kind": "diagnostic_jsonl_append",
+      "operation_identity_source": "bounded_jsonl.record_sha256.evidence_only.v1",
+      "result_policy": "require_bounded_jsonl_commit",
+      "result_consumer": "record_incident_authority_outcome",
+      "fault_test_ids": [
+        "jsonl.serialization",
+        "jsonl.lock-concurrency",
+        "jsonl.retention",
+        "jsonl.post-replace-unproven",
+        "jsonl.unsafe-entry",
+        "jsonl.adapter"
+      ]
+    },
+    {
       "site_id": "dispatcher-dead-letter-meta-clear",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
       "function": "queue_dead_letter_meta_alert",
