@@ -537,6 +537,115 @@ def test_observe_sends_a_credential_meta_alert(tmp_path, outcome):
     assert len(messages) == 1
 
 
+def _slow_authority(seconds: float):
+    def request(claim, *, timeout_seconds, rate_limited, deadline_seconds=None):
+        time.sleep(seconds)
+        return object()
+
+    return request
+
+
+def _credential_page_legs(mod, paths, tmp_path, monkeypatch, authority) -> list:
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_JID", "owner-chat.invalid")
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_SOCKET", str(tmp_path / "line.sock"))
+    monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_EMAIL", "1")
+    monkeypatch.setattr(owner_route, "validate_send_acceptance", lambda result, jid: {"audit_receipt": "r1"})
+    mod._credential_pages[:] = [
+        {
+            "scope": f"scope-{index}",
+            "before": {"lastAttemptAt": index + 1},
+            "attemptAt": 1_763_600_000 + index,
+            "line": f"page {index}",
+            "body": f"body {index}",
+            "count": 1,
+            "failedAttempts": 0,
+            "hours": 4,
+        }
+        for index in range(3)
+    ]
+    legs: list = []
+    with authority, patch.object(mod.credential_repage, "CLASS_BUDGET_SECONDS", 1.5), patch.object(
+        mod,
+        "json_rpc_call",
+        side_effect=lambda _socket, _method, params, **_k: legs.append(
+            ("whatsapp", params["arguments"]["text"])
+        ) or {"ok": True},
+    ), patch.object(
+        mod, "email_fallback", side_effect=lambda subject, _body, **_k: legs.append(("email", subject)) or True
+    ):
+        mod.begin_incident_authority_cycle()
+        mod.send_credential_pages(paths)
+    return legs
+
+
+def test_observe_sends_the_same_credential_pages_with_a_slow_authority(tmp_path, monkeypatch):
+    # The class budget is 1.5 s here and each observation takes 0.4 s. Time
+    # spent asking must not cut a page or skip its e-mail leg: same pages, same
+    # legs, same order as the authority-free baseline.
+    baseline_mod = _load_dispatcher(tmp_path / "pages-baseline")
+    baseline = _credential_page_legs(
+        baseline_mod,
+        baseline_mod.setup_dirs(),
+        tmp_path,
+        monkeypatch,
+        patch.object(baseline_mod, "observe_incident_authority", side_effect=lambda *_a, **_k: None),
+    )
+    slow_mod = _load_dispatcher(tmp_path / "pages-slow")
+    slow_paths = slow_mod.setup_dirs()
+    slow = _credential_page_legs(
+        slow_mod,
+        slow_paths,
+        tmp_path,
+        monkeypatch,
+        patch.object(slow_mod, "_request_incident_authority", _slow_authority(0.4)),
+    )
+    assert baseline == [
+        (leg, f"page {index}") for index in range(3) for leg in ("whatsapp", "email")
+    ]
+    assert slow == baseline
+    assert [r["outcome"] for r in _dispatcher_records(slow_mod, slow_paths)] == ["granted"] * 3
+
+
+def test_observe_time_does_not_shorten_a_credential_meta_alert(tmp_path):
+    # The group leg fails; the e-mail leg needs a second of the deadline left.
+    # A 0.7 s observation must not use up that second.
+    mod = _load_dispatcher(tmp_path / "meta-slow")
+    mod.setup_dirs()
+    legs: list = []
+
+    def _down(text, *_a, **_k):
+        legs.append("whatsapp")
+        raise RuntimeError("socket down")
+
+    with patch.object(mod, "_request_incident_authority", _slow_authority(0.7)), patch.object(
+        mod, "send_whatsapp", side_effect=_down
+    ), patch.object(mod, "email_fallback", side_effect=lambda *_a, **_k: legs.append("email") or True):
+        mod.begin_incident_authority_cycle()
+        taken = mod.credential_meta_alert(
+            mod.credential_repage.META_PASS_ERROR, "summary", time.monotonic() + 1.5
+        )
+    assert legs == ["whatsapp", "email"]
+    assert taken is not None
+
+
+def test_observe_time_does_not_cut_the_next_credential_meta_alert(tmp_path):
+    # Two owed alerts in a 1.5 s budget; each observation takes 0.7 s. The
+    # second alert is sent as it would be without the authority.
+    mod = _load_dispatcher(tmp_path / "meta-loop")
+    paths = mod.setup_dirs()
+    sources = [mod.credential_repage.META_PASS_ERROR, mod.credential_repage.META_ROSTER_UNREADABLE]
+    mod._credential_meta_alerts[:] = [
+        {"source": name, "line": f"line {name}", "day": "2026-11-20"} for name in sources
+    ]
+    mod._credential_meta_taken.clear()
+    with patch.object(mod, "_request_incident_authority", _slow_authority(0.7)), patch.object(
+        mod, "send_whatsapp", side_effect=lambda *_a, **_k: {"ok": "1"}
+    ), patch.object(mod, "CREDENTIAL_META_BUDGET_SECONDS", 1.5):
+        mod.begin_incident_authority_cycle()
+        mod.send_credential_meta_alerts(paths)
+    assert [item["source"] for item in mod._credential_meta_taken] == sources
+
+
 @pytest.mark.parametrize("outcome", OUTCOME_NAMES)
 def test_observe_queues_and_sends_the_owner_copy(tmp_path, outcome, monkeypatch):
     mod = _load_dispatcher(tmp_path / f"owner-{outcome}")
