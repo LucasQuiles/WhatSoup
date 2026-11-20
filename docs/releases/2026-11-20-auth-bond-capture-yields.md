@@ -91,5 +91,8 @@
   re-arm and the 5-minute floor space those runs, so a tree that never reads
   completely pages about 30 minutes after its first incomplete read, where it
   used to page at once.
-- The open handler's two synchronous walks, and the persist after a capture
-  settles, still run on the event loop and can add stalls on a large tree.
+- With a data root set, some synchronous walks still run on the event loop and
+  can add stalls on a large tree. The open handler pays three: the
+  `connection_open` record's fields, its bond event and the persist. Just after
+  a capture settles, the bond event of its captured, skipped or failed record
+  and the settle persist pay one each. The deferred re-arm's record pays none.
