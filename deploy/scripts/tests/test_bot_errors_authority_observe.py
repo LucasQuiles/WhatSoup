@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -242,6 +243,10 @@ def _snapshot(paths) -> dict[str, str]:
     return tree
 
 
+# One hour after the matrix event's createdAt.
+_MATRIX_SENT_AT = int(datetime.fromisoformat("2026-09-02T02:33:05.995+00:00").timestamp()) + 3600
+
+
 def _run_queued_alert(state_dir: Path, outcome: str | None) -> dict:
     """One queued alert through process_one, in observe mode.
 
@@ -260,7 +265,12 @@ def _run_queued_alert(state_dir: Path, outcome: str | None) -> dict:
         if outcome is None
         else patch.object(mod, "_request_incident_authority", _answering(outcome, calls))
     )
+    # The re-delivery age in the message and the stored event is read from the
+    # live clock; both runs get the same send time, so the age is compared too.
+    stamp = mod.stamp_delivery_freshness
     with authority, patch.object(
+        mod, "stamp_delivery_freshness", side_effect=lambda stamped, _current: stamp(stamped, _MATRIX_SENT_AT)
+    ), patch.object(
         mod, "send_whatsapp", side_effect=lambda text, *_a, **_k: messages.append(text)
     ):
         mod.begin_incident_authority_cycle()
@@ -297,6 +307,8 @@ def test_observe_delivers_a_queued_alert_as_without_the_authority(tmp_path, outc
     observed = _run_queued_alert(tmp_path / outcome, outcome)
 
     assert len(baseline["messages"]) == 1, "the baseline must deliver the alert"
+    # The age is compared, not normalized away: one hour, in whole seconds.
+    assert "  > delivery_age_seconds: 3600" in baseline["messages"][0].splitlines()
     assert observed["result"] == baseline["result"]
     assert observed["messages"] == baseline["messages"]
     assert observed["tree"] == baseline["tree"], "observe mode must write the same state files"
@@ -581,7 +593,7 @@ def _credential_page_legs(mod, paths, tmp_path, monkeypatch, authority) -> list:
         for index in range(3)
     ]
     legs: list = []
-    with authority, patch.object(mod.credential_repage, "CLASS_BUDGET_SECONDS", 1.5), patch.object(
+    with authority, patch.object(mod.credential_repage, "CLASS_BUDGET_SECONDS", 2.5), patch.object(
         mod,
         "json_rpc_call",
         side_effect=lambda _socket, _method, params, **_k: legs.append(
@@ -596,9 +608,11 @@ def _credential_page_legs(mod, paths, tmp_path, monkeypatch, authority) -> list:
 
 
 def test_observe_sends_the_same_credential_pages_with_a_slow_authority(tmp_path, monkeypatch):
-    # The class budget is 1.5 s here and each observation takes 0.4 s. Time
+    # The class budget is 2.5 s here and each observation takes 0.8 s. Time
     # spent asking must not cut a page or skip its e-mail leg: same pages, same
-    # legs, same order as the authority-free baseline.
+    # legs, same order as the authority-free baseline. Counted against the
+    # budget, the observations would leave 0.9 s for the third page, which a
+    # page needs 1 s to start; excluded, each page keeps about 1.5 s of slack.
     baseline_mod = _load_dispatcher(tmp_path / "pages-baseline")
     baseline = _credential_page_legs(
         baseline_mod,
@@ -614,7 +628,7 @@ def test_observe_sends_the_same_credential_pages_with_a_slow_authority(tmp_path,
         slow_paths,
         tmp_path,
         monkeypatch,
-        patch.object(slow_mod, "_request_incident_authority", _slow_authority(0.4)),
+        patch.object(slow_mod, "_request_incident_authority", _slow_authority(0.8)),
     )
     assert baseline == [
         (leg, f"page {index}") for index in range(3) for leg in ("whatsapp", "email")
@@ -625,7 +639,8 @@ def test_observe_sends_the_same_credential_pages_with_a_slow_authority(tmp_path,
 
 def test_observe_time_does_not_shorten_a_credential_meta_alert(tmp_path):
     # The group leg fails; the e-mail leg needs a second of the deadline left.
-    # A 0.7 s observation must not use up that second.
+    # A 1.7 s observation of a 2.5 s deadline must not use up that second:
+    # counted, it would leave 0.8 s; excluded, about 1.5 s of slack remain.
     mod = _load_dispatcher(tmp_path / "meta-slow")
     mod.setup_dirs()
     legs: list = []
@@ -634,20 +649,21 @@ def test_observe_time_does_not_shorten_a_credential_meta_alert(tmp_path):
         legs.append("whatsapp")
         raise RuntimeError("socket down")
 
-    with patch.object(mod, "_request_incident_authority", _slow_authority(0.7)), patch.object(
+    with patch.object(mod, "_request_incident_authority", _slow_authority(1.7)), patch.object(
         mod, "send_whatsapp", side_effect=_down
     ), patch.object(mod, "email_fallback", side_effect=lambda *_a, **_k: legs.append("email") or True):
         mod.begin_incident_authority_cycle()
         taken = mod.credential_meta_alert(
-            mod.credential_repage.META_PASS_ERROR, "summary", time.monotonic() + 1.5
+            mod.credential_repage.META_PASS_ERROR, "summary", time.monotonic() + 2.5
         )
     assert legs == ["whatsapp", "email"]
     assert taken is not None
 
 
 def test_observe_time_does_not_cut_the_next_credential_meta_alert(tmp_path):
-    # Two owed alerts in a 1.5 s budget; each observation takes 0.7 s. The
-    # second alert is sent as it would be without the authority.
+    # Two owed alerts in a 2.5 s budget; each observation takes 1.7 s. The
+    # second alert is sent as it would be without the authority: counted, the
+    # first observation would leave 0.8 s, under the 1 s an alert needs to start.
     mod = _load_dispatcher(tmp_path / "meta-loop")
     paths = mod.setup_dirs()
     sources = [mod.credential_repage.META_PASS_ERROR, mod.credential_repage.META_ROSTER_UNREADABLE]
@@ -655,9 +671,9 @@ def test_observe_time_does_not_cut_the_next_credential_meta_alert(tmp_path):
         {"source": name, "line": f"line {name}", "day": "2026-11-20"} for name in sources
     ]
     mod._credential_meta_taken.clear()
-    with patch.object(mod, "_request_incident_authority", _slow_authority(0.7)), patch.object(
+    with patch.object(mod, "_request_incident_authority", _slow_authority(1.7)), patch.object(
         mod, "send_whatsapp", side_effect=lambda *_a, **_k: {"ok": "1"}
-    ), patch.object(mod, "CREDENTIAL_META_BUDGET_SECONDS", 1.5):
+    ), patch.object(mod, "CREDENTIAL_META_BUDGET_SECONDS", 2.5):
         mod.begin_incident_authority_cycle()
         mod.send_credential_meta_alerts(paths)
     assert [item["source"] for item in mod._credential_meta_taken] == sources
