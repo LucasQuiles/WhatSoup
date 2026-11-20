@@ -1,0 +1,388 @@
+import json
+import contextlib
+import io
+import os
+import runpy
+import select
+import signal
+import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+import pytest
+from hypothesis import example, given, strategies as st
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "mcp_probe_remote.py"
+SERVER = """
+import json, os, pathlib, signal, subprocess, sys, time
+root = pathlib.Path(sys.argv[1])
+child = subprocess.Popen([sys.executable, '-c', '''
+import os, pathlib, signal, sys
+root = pathlib.Path(sys.argv[1])
+if sys.argv[2] in ('ignores-term', 'closed-stderr-ignores-term'):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+os.close(1)
+if sys.argv[2].startswith('closed-stderr'):
+    os.close(2)
+receipt = os.open(root / 'lifetime', os.O_WRONLY)
+stop = os.open(root / 'keep-running', os.O_RDONLY)
+os.write(receipt, b'R')
+(root / 'child-ready').write_text(str(os.getpid()))
+os.read(stop, 1)
+''', str(root), sys.argv[3]], start_new_session=sys.argv[3] == 'escaped')
+deadline = time.monotonic() + 3
+while not (root / 'child-ready').exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+def stop(signum, frame):
+    child.terminate()
+    child.wait(timeout=1)
+    (root / 'graceful-stop').write_text('completed')
+    raise SystemExit(0)
+if sys.argv[2] == 'on-termination':
+    signal.signal(signal.SIGTERM, stop)
+if sys.argv[2] == 'ignore-termination':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if sys.argv[2] == 'before-reply':
+    os._exit(0)
+if sys.argv[2] == 'block-initialize':
+    receipt = os.open(root / 'server-lifetime', os.O_WRONLY)
+    stop = os.open(root / 'server-stop', os.O_RDONLY)
+    os.write(receipt, b'R')
+    os.read(stop, 1)
+    raise SystemExit(0)
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    result = {'tools': []} if request['method'] == 'tools/list' else {}
+    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+    if request['method'] == 'tools/list' and sys.argv[2] not in ('on-termination', 'ignore-termination'):
+        os._exit(0)
+"""
+DRIVER = """
+import pathlib, runpy, sys
+from unittest.mock import patch
+with patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[1])):
+    runpy.run_path(sys.argv[2])
+"""
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGKILL])
+@pytest.mark.parametrize("child_mode", ["inherited", "closed-stderr"])
+def test_observer_cancellation_stops_server_and_descendant(tmp_path, signum, child_mode):
+    server = tmp_path / "server.py"
+    server.write_text(SERVER)
+    for name in ("keep-running", "lifetime", "server-stop", "server-lifetime"):
+        os.mkfifo(tmp_path / name)
+    stops = [os.open(tmp_path / name, os.O_RDWR | os.O_NONBLOCK)
+             for name in ("keep-running", "server-stop")]
+    receipts = [os.open(tmp_path / name, os.O_RDONLY | os.O_NONBLOCK)
+                for name in ("lifetime", "server-lifetime")]
+    instance = tmp_path / ".config/whatsoup/instances/synthetic"
+    instance.mkdir(parents=True)
+    (instance / "config.json").write_text(json.dumps({"agentOptions": {}}))
+    (instance / "agent365.mcp.json").write_text(json.dumps({"mcpServers": {
+        "microsoft_365": {"command": sys.executable,
+                          "args": [str(server), str(tmp_path), "block-initialize", child_mode]}
+    }}))
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                start_new_session=True)
+    process = subprocess.Popen(
+        [sys.executable, "-c", DRIVER, str(tmp_path), str(SCRIPT)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    ready = []
+    closed = set()
+    try:
+        for receipt in receipts:
+            if select.select([receipt], [], [], 5)[0] and os.read(receipt, 1) == b"R":
+                ready.append(receipt)
+            assert receipt in ready, "native fixture did not become ready"
+        process.send_signal(signum)
+        assert process.wait(timeout=3) == -signum
+        deadline = time.monotonic() + 4
+        ended = []
+        for receipt in receipts:
+            readable = select.select([receipt], [], [], max(0, deadline - time.monotonic()))[0]
+            eof = bool(readable) and os.read(receipt, 1) == b""
+            ended.append(eof)
+            if eof:
+                closed.add(receipt)
+        assert sentinel.poll() is None, "observer cancellation signaled an unrelated group"
+        assert all(ended), "server or descendant survived observer cancellation"
+    finally:
+        for stop in stops:
+            os.close(stop)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        for stream in (process.stdout, process.stderr):
+            stream.close()
+        sentinel.terminate()
+        sentinel.wait(timeout=3)
+        try:
+            for receipt in ready:
+                if receipt in closed:
+                    continue
+                assert select.select([receipt], [], [], 3)[0], "fixture did not stop after release"
+                assert os.read(receipt, 1) == b"", "fixture lifetime was not closed"
+        finally:
+            for receipt in receipts:
+                os.close(receipt)
+
+
+@given(data=st.binary(max_size=1024), limit=st.integers(min_value=0, max_value=1025))
+@example(data=b"diagnostic", limit=10)
+@example(data=b"diagnostic!", limit=10)
+def test_stderr_capture_preserves_exact_limit_and_detects_overflow(data, limit):
+    with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+        with contextlib.redirect_stdout(io.StringIO()):
+            reader = runpy.run_path(str(SCRIPT))["read_stderr"]
+        read_fd, write_fd = os.pipe()
+        try:
+            if data:
+                assert os.write(write_fd, data) == len(data)
+            os.close(write_fd)
+            write_fd = None
+            with os.fdopen(read_fd, "rb") as stream:
+                read_fd = None
+                assert reader(stream, time.monotonic() + 1, limit) == (data[:limit], len(data) <= limit)
+        finally:
+            if read_fd is not None:
+                os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
+
+
+def test_guard_preserves_server_identity_and_graceful_exit_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        helpers = runpy.run_path(str(SCRIPT))
+    code = "import os,signal,time; signal.signal(signal.SIGTERM,lambda *_:exit(37)); print(os.getpid(),flush=True); time.sleep(60)"
+    process, owner, result, server_pid = helpers["start_process"](
+        [sys.executable, "-c", code], os.environ.copy(), str(tmp_path),
+    )
+    try:
+        assert select.select([process.stdout], [], [], 3)[0]
+        assert int(process.stdout.readline()) == server_pid
+        assert server_pid != process.pid
+        assert os.getpgid(server_pid) == process.pid
+    finally:
+        diagnostics, error, status = helpers["finish_process"](process, owner, result)
+    assert (diagnostics, error, status) == ("", None, 37)
+    assert process.returncode == -signal.SIGKILL
+
+
+def test_guard_reports_missing_server_and_closes_launch_resources(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        helpers = runpy.run_path(str(SCRIPT))
+    launched = []
+    popen = subprocess.Popen
+
+    def record_launch(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        launched.append(process)
+        return process
+
+    with patch.object(subprocess, "Popen", side_effect=record_launch):
+        with pytest.raises(FileNotFoundError):
+            helpers["start_process"]([str(tmp_path / "missing")], os.environ.copy(), str(tmp_path))
+    assert len(launched) == 1
+    process = launched[0]
+    assert process.returncode == -signal.SIGKILL
+    assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+
+
+def test_mcp_cleanup_closes_remaining_pipes_after_close_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        helper = runpy.run_path(str(SCRIPT))["finish_process"]
+    closed = []
+    reader, writer = os.pipe()
+    os.write(writer, b"diagnostic")
+    os.close(writer)
+    owner_read, owner = os.pipe()
+    result, result_write = os.pipe()
+    os.write(result_write, struct.pack('!bi', 0, 0))
+    os.close(result_write)
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def fileno(self):
+            return reader
+
+        def close(self):
+            closed.append(self.name)
+            if self.name == "stdin":
+                raise BrokenPipeError("synthetic closed input")
+
+    process = SimpleNamespace(pid=123, wait=lambda **_: 0,
+                              **{name: Stream(name) for name in ("stdin", "stdout", "stderr")})
+    monkeypatch.setattr(os, "killpg", lambda *_: None)
+    try:
+        assert helper(process, owner, result) == ("diagnostic", "BrokenPipeError", 0)
+        assert closed == ["stdin", "stdout", "stderr"]
+    finally:
+        os.close(reader)
+        os.close(owner_read)
+
+
+@pytest.mark.parametrize("fault", ["setup", "read"])
+def test_mcp_cleanup_stops_descendant_when_stderr_read_fails(tmp_path, monkeypatch, fault):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with contextlib.redirect_stdout(io.StringIO()):
+        helpers = runpy.run_path(str(SCRIPT))
+        helper = helpers["finish_process"]
+    server = tmp_path / "server.py"
+    server.write_text(SERVER.replace("os.close(1)", "os.close(1)\nos.write(2, b'diagnostic')"))
+    os.mkfifo(tmp_path / "keep-running")
+    os.mkfifo(tmp_path / "lifetime")
+    stop = os.open(tmp_path / "keep-running", os.O_RDWR | os.O_NONBLOCK)
+    receipt = os.open(tmp_path / "lifetime", os.O_RDONLY | os.O_NONBLOCK)
+    process, owner, result, server_pid = helpers["start_process"](
+        [sys.executable, str(server), str(tmp_path), "before-reply", "ignores-term"],
+        os.environ.copy(), str(tmp_path),
+    )
+    ended = False
+    signals = []
+    killpg = os.killpg
+    target = os.set_blocking if fault == "setup" else os.read
+
+    def fail_stderr(fd, *args):
+        if fd == process.stderr.fileno():
+            raise OSError("synthetic stderr failure")
+        return target(fd, *args)
+
+    def signal_group(pid, signum):
+        assert process.returncode is None, "group signal followed leader reaping"
+        signals.append(signum)
+        return killpg(pid, signum)
+
+    try:
+        assert select.select([process.stdout], [], [], 3)[0], "server did not exit"
+        assert os.read(process.stdout.fileno(), 1) == b""
+        assert (tmp_path / "child-ready").exists()
+        assert os.read(receipt, 1) == b"R"
+        with patch.object(os, "killpg", side_effect=signal_group), patch.object(
+            os, "set_blocking" if fault == "setup" else "read",
+            side_effect=fail_stderr,
+        ):
+            assert helper(process, owner, result) == ("", "OSError", 0)
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        assert server_pid != process.pid
+        assert process.returncode == -signal.SIGKILL
+        assert select.select([receipt], [], [], 1)[0], "descendant survived read failure"
+        assert os.read(receipt, 1) == b""
+        ended = True
+    finally:
+        os.close(stop)
+        if process.returncode is None:
+            try:
+                killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=3)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()
+        try:
+            if not ended and (tmp_path / "child-ready").exists():
+                deadline = time.monotonic() + 3
+                while True:
+                    assert select.select([receipt], [], [], max(0, deadline - time.monotonic()))[0]
+                    if os.read(receipt, 2) == b"":
+                        break
+        finally:
+            os.close(receipt)
+
+
+@pytest.mark.parametrize("exit_at,group", [
+    (exit_at, group)
+    for exit_at in ("before-reply", "after-reply", "on-termination")
+    for group in ("inherited", "escaped")
+] + [("before-reply", "ignores-term"), ("after-reply", "ignores-term"),
+     ("before-reply", "closed-stderr-ignores-term"), ("after-reply", "closed-stderr-ignores-term"),
+     ("ignore-termination", "inherited")])
+def test_mcp_parent_exit_does_not_wait_for_descendant_stderr(tmp_path, exit_at, group):
+    server = tmp_path / "server.py"
+    server.write_text(SERVER)
+    keep = tmp_path / "keep-running"
+    lifetime = tmp_path / "lifetime"
+    os.mkfifo(keep)
+    os.mkfifo(lifetime)
+    stop = os.open(keep, os.O_RDWR | os.O_NONBLOCK)
+    receipt = os.open(lifetime, os.O_RDONLY | os.O_NONBLOCK)
+    instance = tmp_path / ".config/whatsoup/instances/synthetic"
+    instance.mkdir(parents=True)
+    (instance / "config.json").write_text(json.dumps({"agentOptions": {}}))
+    (instance / "agent365.mcp.json").write_text(json.dumps({"mcpServers": {
+        "microsoft_365": {"command": sys.executable, "args": [str(server), str(tmp_path), exit_at, group]}
+    }}))
+    process = subprocess.Popen(
+        [sys.executable, "-c", DRIVER, str(tmp_path), str(SCRIPT)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    child = None
+    child_ended = False
+    completed = False
+    completion_timeout = 6 if exit_at == "ignore-termination" or group in ("ignores-term", "escaped") else 3
+    started = time.monotonic()
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=completion_timeout)
+            completed = True
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=3)
+        ready = tmp_path / "child-ready"
+        assert ready.exists(), stderr.decode(errors="replace")
+        child = int(ready.read_text())
+        assert os.read(receipt, 1) == b'R'
+        assert completed, "MCP probe blocked after its direct child exited"
+        assert process.returncode == 0, stderr.decode(errors="replace")
+        row = json.loads(stdout)["probes"][0]
+        assert row.get("process_exit") == (-9 if exit_at == "ignore-termination" else 0), row
+        assert time.monotonic() - started < completion_timeout
+        if group == "escaped" and exit_at != "on-termination":
+            # The escaped child still owns stderr, so cleanup is unverified on either host.
+            assert row["error"] == "mcp_cleanup_unverified"
+            assert row["cleanup_error"] == "stderr_incomplete"
+        elif exit_at == "before-reply":
+            assert row["error"] == "mcp_closed"
+        else:
+            assert row["tool_count"] == 0
+        if exit_at == "on-termination":
+            assert (tmp_path / "graceful-stop").read_text() == 'completed'
+        if group in ("inherited", "ignores-term", "closed-stderr-ignores-term") or exit_at == "on-termination":
+            assert "cleanup_error" not in row, row
+            assert select.select([receipt], [], [], 1)[0], "owned process-group member survived cleanup"
+            assert os.read(receipt, 1) == b''
+            child_ended = True
+        else:
+            # An escaped group is outside the helper's signal authority.
+            assert not select.select([receipt], [], [], 0)[0]
+    finally:
+        os.close(stop)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        process.stdout.close()
+        process.stderr.close()
+        ready = tmp_path / "child-ready"
+        if child is None and ready.exists():
+            child = int(ready.read_text())
+        try:
+            deadline = time.monotonic() + 3
+            while child is not None and not child_ended:
+                assert select.select([receipt], [], [], max(0, deadline - time.monotonic()))[0], "synthetic descendant did not exit after fixture cleanup"
+                child_ended = os.read(receipt, 2) == b''
+        finally:
+            os.close(receipt)
