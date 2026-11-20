@@ -4,12 +4,13 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
 import {
   createContainerBuildReceipt,
   parseArgs,
+  run,
   sha256File,
   verifyContainerBuildReceipt,
   verifyOciArchiveAttestations,
@@ -906,6 +907,41 @@ describe('container build evidence CI contract', () => {
     }));
     expect(() => verifyContainerBuildReceipt(sbomReceipt, sbomInput)).toThrow(
       'SBOM does not match the verified embedded SPDX predicate',
+    );
+  });
+
+  it('verifies a stored receipt in one pass and publishes the receipt that passed comparison', () => {
+    const input = makeReceiptInput();
+    const stored = createContainerBuildReceipt(input);
+    expect(verifyContainerBuildReceipt(stored, input)).toEqual(stored);
+    const dir = path.dirname(input.metadataPath);
+    const receiptPath = path.join(dir, 'receipt.json');
+    const githubOutput = path.join(dir, 'github-output');
+    writeFileSync(receiptPath, `${JSON.stringify(stored, null, 2)}\n`);
+    // A tar shim on PATH counts archive reads, so the number of verification passes is observable.
+    const bin = tmp.make('tar-shim');
+    const callLog = path.join(bin, 'calls');
+    writeFileSync(path.join(bin, 'tar'), `#!/bin/sh\necho call >> '${callLog}'\nexec /usr/bin/tar "$@"\n`, { mode: 0o755 });
+    const reads = () => (existsSync(callLog) ? readFileSync(callLog, 'utf8').split('\n').filter(Boolean).length : 0);
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+    try {
+      createContainerBuildReceipt(input);
+      const onePass = reads();
+      expect(onePass).toBeGreaterThan(0);
+      const published = run([
+        '--metadata', input.metadataPath, '--runtime-evidence', input.runtimeEvidencePath, '--sbom', input.sbomPath,
+        '--image', input.imagePath, '--source', input.sourceRevision, '--builder', input.builder,
+        '--buildx-version', input.buildxVersion, '--buildkit-version', input.buildkitVersion,
+        '--provenance-builder-id', input.provenanceBuilderId, '--repo-root', input.repoRoot,
+        '--receipt', receiptPath, '--github-output', githubOutput,
+      ], dir);
+      expect(reads()).toBe(2 * onePass);
+      expect(published).toEqual(stored);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(readFileSync(githubOutput, 'utf8')).toBe(
+      `image_digest=${stored.imageDigest}\nexternal_sbom_sha256=${stored.sbomSha256}\n`,
     );
   });
 
