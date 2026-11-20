@@ -499,6 +499,17 @@ describe('Quality workflow scan step, run under bash with a fake gitleaks on PAT
     expect(existsSync(fake.calls)).toBe(false);
   });
 
+  // A push whose after-value is all-zero deletes the ref (such as a v* tag): it adds no commit.
+  // A pull request or merge group with an all-zero head still fails closed (cases above).
+  it('lets a push with an all-zero head, a ref deletion, pass with the nothing-to-scan line', () => {
+    const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
+    expect(runScan({ EVENT_NAME: 'push', PUSH_BEFORE_SHA: commits.head, PUSH_AFTER_SHA: ZERO_SHA })).toEqual({
+      status: 0,
+      lines: ['gitleaks: the push event names no change range; nothing to scan'],
+    });
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
   it('scans a push with the pushed commit\'s own .gitleaks.toml and an empty ignore folder', () => {
     const fake = writeFakeGitleaks(bin, { name: 'gitleaks', version: GITLEAKS_VERSION });
     expect(runScan(pushEvent())).toEqual({ status: 0, lines: [`gitleaks: no findings in ${commits.base}..${commits.head}`] });

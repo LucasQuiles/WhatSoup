@@ -538,7 +538,9 @@ export function runPrePushGuard(
   dependencies.assertConsoleDependencies(cwd);
 
   // The ref-name scan and the secret scan are quick next to the composite, so they run first.
-  // Preservation and delete-only pushes returned above: they publish no new ref or commit.
+  // Preservation and delete-only pushes returned above, so neither reaches these scans: a
+  // preservation push creates refs/preserve/* refs on the preserve mirror only, and a delete-only
+  // push adds no ref and no commit.
   scanPushedRefNames(parsedUpdates, cwd);
   runGitleaksStep(input, cwd, remote?.remoteName ?? '');
 
