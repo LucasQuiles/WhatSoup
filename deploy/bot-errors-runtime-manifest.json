@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "8bf6e2abaf3d6bbb48c733b4c27a91b21eb5ac007983349c259aceac33763b0a",
+      "sha256": "c4ebe316dbd684f18a8034fa22d2cb037b01fd3751f2d05765526ce9a9d2780f",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -180,7 +180,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "e99163b07e6169d8e87c7f166150a777e6ad1daac8a4cbf493d0115467544a7e",
+      "sha256": "50dea2284c0f894cea398f643e8fab2d37dfb7458ac03935bcdb6fa49d6ad6f3",
       "mustContain": [
         "critical_file_problem",
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -324,7 +324,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "36d0f4b35154a027c04c006a377f33257be1b63769c980fe32ca0f160d8ad643",
+      "sha256": "568204e957ced221d02b67e2847fe584d06944eee0604df318d3116aac7ab65b",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -669,7 +669,7 @@
     },
     {
       "path": "deploy/scripts/lib/incident_authority.py",
-      "sha256": "c6d85e152bc2ec7db5954b1ce5c251e23e06850b13f66805116f7c2287bb23fe",
+      "sha256": "a77412d306f102420a492b7f4ddc81072d7aaa760031990f2f72205fcdda1ed8",
       "mustContain": [
         "class IncidentAuthorityClient:",
         "def canonical_signal(",
@@ -938,7 +938,7 @@
     },
     {
       "path": "deploy/scripts/lib/owner_route.py",
-      "sha256": "5c03e5987ffa288d55ddbf63d987176c52dec86ce68ace599156b95eaf39345b",
+      "sha256": "57e812bb557613ccb3edece7e0c39ff363a93f8f5424f32e8e54b1ddb3a04db5",
       "mustContain": [
         "def route_owner_critical(",
         "def qualifies(",
