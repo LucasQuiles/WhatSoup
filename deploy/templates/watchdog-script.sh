@@ -101,9 +101,10 @@ HEALTH_READ_DEADLINE_SECONDS=8
 # could not be read at either end defers the restart to the next run; only a
 # job as the silent read saw it is restarted, through every gate again.
 # Nothing is kept between runs. On a steady clock a confirm read is running
-# at the window's end or starts then, so the last one starts about 82 to 90 s
-# (the window less one 8 s read deadline, up to the window) after the window
-# opens. The silence had already lasted the silent read's own wait: 5 s for a
+# at the window's end or starts then. A bot read can take 8 s; a fleet
+# confirmation includes an 8 s PID query plus an 8 s HTTP read. The last
+# confirmation starts no earlier than 82 s (bot) or 74 s (fleet) if it
+# finishes past the 90 s window. The silence had already lasted the silent read's own wait: 5 s for a
 # reader timeout, 8 s at the deadline, none for a reset or EOF. Each confirm
 # read of a silent target costs one reader timeout, so a 15 s step makes
 # about five reads.
@@ -498,6 +499,25 @@ job_identity() {
   '
 }
 
+# The single running pid launchd reports for the job; fails when the job is
+# unreadable, not running, or reports more than one pid. $2 bounds the query.
+loaded_service_pid() {
+  local job_label="$1" deadline="${2:-15}" launchd_state
+  launchd_state="$(run_with_timeout "$deadline" launchctl print "$domain/$job_label" 2>/dev/null)" || return 1
+  print -r -- "$launchd_state" | awk '
+    /^[[:space:]]*pid[[:space:]]*=[[:space:]]*[1-9][0-9]*[[:space:]]*$/ {
+      count++
+      value = $0
+      sub(/^[[:space:]]*pid[[:space:]]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+    }
+    END {
+      if (count == 1) print value
+      else exit 1
+    }
+  '
+}
+
 # Restart a job with a 5-minute cooldown to avoid restart storms. A third
 # argument "silent" marks evidence from a read that connected but got no
 # answer: once every gate below has passed, such a restart is confirmed first
@@ -647,24 +667,23 @@ restart_label() {
 
 # One confirm read ($2 numbers it in the log) of a target whose silent read
 # would restart it, with the same reader, binding and token handling as the
-# main read. Exit 0 only for a trusted answer: the fleet console's HTTP status
-# below 400, or a bot body the decision block reads without a restart verdict
+# main read. Exit 0 only for a trusted answer: the fleet console's live JSON
+# matching its loaded PID, or a bot body read without a restart verdict
 # (exits 0, 3, 4, 5 and 7). Every other result, a restart verdict (1) and an
 # untrusted body (6) included, is exit 1. It changes no run state: no
 # wd_note, no exit status, no marker or paging; only log lines.
 confirm_read() {
-  local job_label="$1" number="$2" answer answer_rc answer_code answer_body token decision_rc
+  local job_label="$1" number="$2" answer answer_rc answer_code answer_body token decision_rc fleet_pid
   if [ "$job_label" = "$FLEET_LABEL" ]; then
-    answer="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
+    fleet_pid="$(loaded_service_pid "$job_label" "$HEALTH_READ_DEADLINE_SECONDS")"
+    answer="$(read_health_response FLEET_PORT /livez "$fleet_pid" </dev/null 2>>"$LOG")"
     answer_rc=$?
-    answer_code="${answer##*$'\n'}"
-    if [ "$answer_rc" -ne 0 ] || [[ "$answer_code" != [1-5][0-9][0-9] ]]; then
-      log "$job_label confirm read $number: no HTTP answer (reader exit $answer_rc)"
-      return 1
+    if [ "$answer_rc" -eq 0 ] && [ -n "$fleet_pid" ] && [ "$answer" = FLEET_LIVENESS_OK ]; then
+      log "$job_label confirm read $number: loaded process liveness verified"
+      return 0
     fi
-    log "$job_label confirm read $number: HTTP $answer_code"
-    [ "$answer_code" -lt 400 ]
-    return
+    log "$job_label confirm read $number: liveness unverified (reader exit $answer_rc)"
+    return 1
   fi
   if ! token="$(read_health_token 2>>"$LOG")"; then
     token=""
@@ -693,30 +712,21 @@ confirm_read() {
   return 1
 }
 
-# Confirm a silent read's restart (see CONFIRM_WINDOW_SECONDS) once every
-# restart gate has passed. Re-reads the target every CONFIRM_STEP_SECONDS and
-# ends with the first read that finishes at or after the window's end, so on
-# a steady clock a read is running at that moment or starts then, and the
-# window lasts at most CONFIRM_WINDOW_SECONDS plus one 8 s read deadline. The
-# window is measured by the clock and the reads are capped at max_reads: a
-# forward clock step shortens the window, and a backward one lengthens it up
-# to that cap, every read after a full step: 6 x (15 s + 8 s), about 138 s.
-# A sleep that fails ends the window at once, with the restart still due.
-# Exit 0 when a confirm read got a trusted answer: the restart is avoided.
-# Exit 1 when the window ended without one: the restart is still due.
-# Around the window restart_label also runs launchctl print (15 s limit) for
-# the job's identity at the silent read and at the window's end and for the
-# second gate pass, and one binding check (8 s), so a restart comes at most
-# about 191 s later than an immediate restart, and about 90 to 100 s later
-# when nothing hangs. Those figures count the timed reads, the launchctl
-# queries and the binding check only: the per-read token and decision steps
-# (read_health_token, bot_decision) and ensure_loaded's launchctl print have
-# no deadline, as at base. Counting the bounded steps alone, a run with a bot
-# and a fleet window takes at most about 500 s, inside the invocation lock's
-# 600 s. Such a run can outlast the 120 s StartInterval: launchd never runs
-# two instances of one job, so the next run starts late. A watchdog killed
-# during a window performs no restart for that read; the next run decides
-# again from its own read.
+# Confirm a silent read after every restart gate has passed. A trusted answer
+# cancels the restart. The clock bounds the window; max_reads also bounds it
+# after a backward clock step. A bot read has an 8 s HTTP deadline. A fleet
+# read first checks the loaded PID with an 8 s deadline, then reads HTTP with
+# the same deadline: at most 16 s per confirmation. Thus a steady-clock
+# window can end up to 8 s (bot) or 16 s (fleet) after its 90 s deadline;
+# six full 15 s steps and reads cost at most 138 s or 186 s respectively.
+# Start/end identity and the second gate query add three 15 s bounds, and the
+# reader binding check adds 8 s: up to 191 s (bot) or 239 s (fleet) extra
+# bounded work compared with an immediate restart. Token/decision steps and
+# ensure_loaded's print remain unbounded, so these are not whole-run limits.
+# The invocation lock's 600 s stale age is not an execution deadline. Launchd
+# does not overlap one job's runs; a late run delays the next StartInterval.
+# Killing a watchdog during a window performs no restart for that read;
+# the next run decides again from its own observations.
 confirm_silent_read() {
   local job_label="$1" reason="$2" deadline pause reads=0 max_reads sleep_rc
   max_reads=$(( (CONFIRM_WINDOW_SECONDS + CONFIRM_STEP_SECONDS - 1) / CONFIRM_STEP_SECONDS ))
@@ -855,7 +865,7 @@ read_health_response() {
   run_with_timeout "$HEALTH_READ_DEADLINE_SECONDS" python3 -c '
 import errno, hashlib, os, re, stat, sys
 try:
-    source_path, expected, port_text, request_path, timeout_text = sys.argv[1:]
+    source_path, expected, port_text, request_path, timeout_text, expected_pid_text = sys.argv[1:]
     if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         raise ValueError()
     if re.fullmatch(r"[1-9][0-9]?", timeout_text) is None:
@@ -875,6 +885,8 @@ try:
             raise ValueError()
         print("VERIFIED")
         raise SystemExit(0)
+    if expected_pid_text and (request_path != "/livez" or re.fullmatch(r"[1-9][0-9]{0,9}", expected_pid_text) is None):
+        raise ValueError()
     with os.fdopen(3, "rb") as token_pipe:
         token = token_pipe.read(65).decode("ascii")
     if request_path == "/health":
@@ -903,11 +915,23 @@ try:
         raise ValueError()
     if len(body.encode("utf-8")) > 65536:
         raise ValueError()
+    if expected_pid_text:
+        verifier = namespace.get("verify_fleet_liveness")
+        if not callable(verifier):
+            raise ValueError()
+        verified, reason = verifier(code, body, int(expected_pid_text))
+        if type(verified) is not bool or type(reason) is not str or re.fullmatch(r"[a-z_]+", reason) is None:
+            raise ValueError()
+        if verified:
+            print("FLEET_LIVENESS_OK")
+            raise SystemExit(0)
+        print("FLEET_LIVENESS_UNVERIFIED:" + reason)
+        raise SystemExit(8)
     print(body + "\n" + str(code), end="")
 except Exception:
     print("watchdog: health reader unavailable or invalid", file=sys.stderr)
     raise SystemExit(3)
-' "$HEALTH_READER_PATH" "$HEALTH_READER_SHA256" "$1" "$2" "$HEALTH_READ_TIMEOUT_SECONDS" 3<&0
+' "$HEALTH_READER_PATH" "$HEALTH_READER_SHA256" "$1" "$2" "$HEALTH_READ_TIMEOUT_SECONDS" "${3:-}" 3<&0
 }
 
 # An unverifiable reader leaves this cycle without evidence: no restart, no
@@ -1683,12 +1707,20 @@ fi
 # Probe /livez, not the console root: the root serves built static assets and
 # 404s on a release without them while the fleet process is healthy. It runs
 # after the bot section, so after a bot confirm window it starts later than it
-# would have: about 90 to 100 s, at most about 191 s (confirm_silent_read).
+# would have; confirm_silent_read documents the bounded components.
 # It does not run at all when the reader stopped verifying by the end of a bot
-# window: that ends the run (restart_label).
-fleet_resp="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
+# window: that ends the run (restart_label). A 200 /livez only counts when its
+# pid is the one launchd reports for the fleet job.
+fleet_pid="$(loaded_service_pid "$FLEET_LABEL")"
+fleet_pid_rc=$?
+if [ "$fleet_pid_rc" -eq 0 ]; then
+  fleet_resp="$(read_health_response FLEET_PORT /livez "$fleet_pid" </dev/null 2>>"$LOG")"
+else
+  # A missing launchd PID cannot validate a successful response, but it must
+  # not suppress the established recovery path for a refused fleet transport.
+  fleet_resp="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
+fi
 probe_rc=$?
-fleet_code="${fleet_resp##*$'\n'}"
 if [ "$probe_rc" -eq 2 ] && [ "$fleet_resp" = EADDRNOTAVAIL ]; then
   health_unknown "fleet loopback connect failed: EADDRNOTAVAIL"
 elif [ "$probe_rc" -eq 7 ] && [ "$fleet_resp" = TRANSPORT_FAILURE ]; then
@@ -1697,10 +1729,25 @@ elif [ "$probe_rc" -eq 8 ] && [ "$fleet_resp" = TRANSPORT_SILENT ]; then
   restart_label "$FLEET_LABEL" "fleet console unreachable: connection accepted, response timed out or was reset" silent
 elif [ "$probe_rc" -eq 124 ] && [ -z "$fleet_resp" ]; then
   restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s" silent
-elif [ "$probe_rc" -ne 0 ] || [[ "$fleet_code" != [1-5][0-9][0-9] ]]; then
-  health_unknown "fleet health reader unavailable or invalid"
-elif [ "$fleet_code" -ge 400 ]; then
+elif [ "$probe_rc" -eq 8 ] && [ "$fleet_resp" = FLEET_LIVENESS_UNVERIFIED:http_error_status ]; then
+  # An HTTP 4xx/5xx answer restarts whatever its body names, as before PID binding.
   restart_label "$FLEET_LABEL" "fleet console unreachable"
+elif [ "$probe_rc" -eq 8 ] && [[ "$fleet_resp" == FLEET_LIVENESS_UNVERIFIED:* ]]; then
+  health_unknown "fleet liveness contract or PID unverified"
+elif [ "$probe_rc" -ne 0 ]; then
+  health_unknown "fleet health reader unavailable or invalid"
+elif [ "$fleet_pid_rc" -ne 0 ] && [[ "${fleet_resp##*$'\n'}" == [45][0-9][0-9] ]]; then
+  # Without a launchd PID the reader returns the raw answer, status last; an
+  # HTTP error still restarts, as a refused transport does above.
+  restart_label "$FLEET_LABEL" "fleet console unreachable"
+elif [ "$fleet_pid_rc" -ne 0 ]; then
+  log "HEALTH-UNKNOWN: fleet loaded PID unavailable or invalid"
+  if [ "$WD_FINAL" != ERROR ]; then
+    wd_note HEALTH-UNKNOWN
+    WD_EXIT=2
+  fi
+elif [ "$fleet_resp" != FLEET_LIVENESS_OK ]; then
+  health_unknown "fleet health reader unavailable or invalid"
 fi
 
 log "$WD_FINAL"

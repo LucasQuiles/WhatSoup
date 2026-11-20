@@ -94,8 +94,9 @@ fall out of sync.
   resilience scan's territory).
 - **class ownership** (review-level today): the `soup-switch*` class family should be
   applied only by this primitive — a raw consumer pairing `role="switch"` with a sliding
-  thumb is the anti-pattern. A dedicated `soup/no-raw-switch` shadow rule (paralleling
-  `soup/no-inline-seg`) is a candidate enforcement; not yet wired.
+  thumb is the anti-pattern. A dedicated `soup/no-raw-switch` shadow rule (paralleling the
+  equally unwired `soup/no-inline-seg` candidate) is a candidate enforcement;
+  not yet wired.
 - **behavioural** (active): `aria-checked` reflects `checked`, Space/Enter toggle,
   and disabled-never-fires are covered by the behavioural suite
   `tests/console/switch.test.tsx`, which satisfies the G3 gate for this spec.

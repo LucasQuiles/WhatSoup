@@ -20,9 +20,9 @@
  *
  * Notice ETA provenance is pinned at the production notifier
  * (notifyProviderFallbackActivated via handleEventWithContext): only a reset
- * parsed from the PRIMARY's own failure yields "until about <time>"; an
- * unknown reset, the fallback-window end, or a fallback entry's parsed reset
- * never does.
+ * from a failure attributed to the PRIMARY yields "until about <time>"; an
+ * unknown reset, the fallback-window end, a fallback entry's parsed reset, or
+ * a reset from a session whose route attribution fails closed never does.
  *
  * Harness mirrors fallback-reason-provenance.test.ts.
  */
@@ -145,14 +145,21 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-function makeRuntime(agentFallbacks?: Array<{ provider: string; model?: string }>): AgentRuntime {
+/**
+ * `primaryModel: null` builds a provider-default primary (no configured model).
+ * It is null, not undefined, because an explicit undefined would take the default.
+ */
+function makeRuntime(
+  agentFallbacks?: Array<{ provider: string; model?: string }>,
+  primaryModel: string | null = 'claude-opus-4-8[1m]',
+): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = 'claude-cli';
   config['agentFallbacks'] = agentFallbacks;
   config['agentFallbackProvider'] = agentFallbacks ? undefined : 'opencode-cli';
   config['agentFallbackModel'] = agentFallbacks ? undefined : 'minimax/minimax-m2';
-  return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
-    model: 'claude-opus-4-8[1m]',
+  return new AgentRuntime(makeDb(), makeMessenger(), 'test', primaryModel === null ? {} : {
+    model: primaryModel,
   });
 }
 
@@ -513,5 +520,169 @@ describe('fallback-provider usage-limit cascade', () => {
       expect(notice).not.toContain('until about');
       expect(notice).not.toContain(formatClockForUser(fallbackResetMs));
     }
+  });
+
+  // A wildcard (model-undefined) entry on the primary's own provider matches
+  // every claude-cli session, so each such session also matches the primary
+  // route; only the exact configured primary model resolves it to the primary.
+  const WILDCARD_SAME_PROVIDER_CHAIN = [{ provider: 'claude-cli' }];
+  // A same-provider entry that names its model: a window route on it carries
+  // that model, so it never starts an undefined-model session.
+  const NAMED_SAME_PROVIDER_CHAIN = [{ provider: 'claude-cli', model: 'claude-haiku-4-5' }];
+
+  /** Session double; only the provider and the model ref vary. */
+  function providerSession(modelRef: string | undefined, provider = 'claude-cli') {
+    return new Proxy(
+      {
+        getProviderId: vi.fn(() => provider),
+        getModelRef: vi.fn(() => modelRef),
+        getStatus: vi.fn(() => ({
+          active: true,
+          pid: null,
+          sessionId: `${provider}-1`,
+          startedAt: new Date().toISOString(),
+          messageCount: 1,
+          lastMessageAt: new Date().toISOString(),
+        })),
+        getDbRowId: vi.fn(() => null),
+        clearTurnWatchdog: vi.fn(),
+        completeProviderTurn: vi.fn(),
+        shutdown: vi.fn(async () => {}),
+      } as Record<string, unknown>,
+      { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
+    );
+  }
+
+  it('an ambiguous same-provider failure with no window state arms a window but gives the notice no time', () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    // A provider-default session (undefined model ref), for example one the
+    // wildcard entry started during an earlier window, cannot be told apart
+    // from the primary, so its parsed reset is not proven to be the primary's.
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      providerSession(undefined),
+      'conv-key',
+      1,
+      'mapkey-ambiguous-no-window',
+    );
+
+    // Failover still works: the failure armed a fresh window and the notice
+    // names the switch (not the credentials-missing template).
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('Primary model hit a usage/quota limit');
+    expect(notices[0]).toContain('Switching to');
+    expect(notices[0]).not.toContain('until about');
+    expect(notices[0]).not.toContain(formatClockForUser(resetMs));
+  });
+
+  it('a same-provider failure proven primary by the exact configured model still shows its reset as the time', () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      providerSession('claude-opus-4-8[1m]'),
+      'conv-key',
+      1,
+      'mapkey-proven-primary-no-window',
+    );
+
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(
+      `Primary model hit a usage/quota limit until about ${formatClockForUser(resetMs)}.`,
+    );
+  });
+
+  it('a provider-default primary keeps its reset as the time when every same-provider entry names a model', () => {
+    const runtime = makeRuntime(NAMED_SAME_PROVIDER_CHAIN, null);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    // With no configured primary model, primary routes start undefined-model
+    // sessions, and a window route on the named entry carries that entry's
+    // model, so an undefined-model session on this provider is the primary's.
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      providerSession(undefined),
+      'conv-key',
+      1,
+      'mapkey-default-primary-named-entry',
+    );
+
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('Switching to');
+    expect(notices[0]).toContain(
+      `Primary model hit a usage/quota limit until about ${formatClockForUser(resetMs)}.`,
+    );
+  });
+
+  it('a provider-default primary beside a wildcard same-provider entry gives the notice no time', () => {
+    const runtime = makeRuntime(WILDCARD_SAME_PROVIDER_CHAIN, null);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    // A window route on the wildcard entry also starts undefined-model
+    // sessions, so this session may be the entry's: attribution fails closed.
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      providerSession(undefined),
+      'conv-key',
+      1,
+      'mapkey-default-primary-wildcard-entry',
+    );
+
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('Primary model hit a usage/quota limit');
+    expect(notices[0]).toContain('Switching to');
+    expect(notices[0]).not.toContain('until about');
+    expect(notices[0]).not.toContain(formatClockForUser(resetMs));
+  });
+
+  it('a foreign-provider failure with no window state gives the notice no time', () => {
+    const runtime = makeRuntime(NAMED_SAME_PROVIDER_CHAIN, null);
+    expect(cv(runtime).fallbackWindow.activeUntil).toBeNull();
+    // A session on a provider that is neither the primary's nor in the chain
+    // (a pin cannot target one; a chain change can leave one running) matches
+    // neither route, so its reset is not the primary's, even with a
+    // provider-default primary.
+    const resetMs = parsedResetMs(USAGE_LIMIT_TEXT);
+
+    const queue = makeFakeQueue();
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      providerSession(undefined, 'codex-cli'),
+      'conv-key',
+      1,
+      'mapkey-foreign-provider-no-window',
+    );
+
+    expect(cv(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    const notices = enqueuedNotices(queue);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('Primary model hit a usage/quota limit');
+    expect(notices[0]).toContain('Switching to');
+    expect(notices[0]).not.toContain('until about');
+    expect(notices[0]).not.toContain(formatClockForUser(resetMs));
   });
 });

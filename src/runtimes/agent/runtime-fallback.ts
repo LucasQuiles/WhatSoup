@@ -105,12 +105,15 @@ import type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './runt
 const log = createChildLogger('agent-runtime');
 
 /**
- * Which provider tier produced the failure driving a (re-)activation. The
- * reason taxonomy (ProviderFallbackReason) encodes WHY the primary was left,
- * never WHICH TIER just failed — so the tier is derived, in ONE place, from
- * route-identity attribution (failureTierForSession). A fallback-tier
- * failure carries no evidence about the PRIMARY: it must advance the chain
- * without extending the window, overwriting the stored resetAt, or
+ * Which provider tier produced the failure driving a (re-)activation, derived
+ * in ONE place from route identity (failureTierForSession); only the empty-turn
+ * advance fixes it, to 'fallback'. The reason names the current failure and
+ * armReason the first, except that the empty and process advances pass the
+ * window's arm reason as the reason, with 'auth-required' in place of one that
+ * is not a provider reason (such as 'admin-forced'). A fallback-tier failure
+ * carries no evidence about the PRIMARY: it never gives the notice a primary
+ * ETA, arms like a primary failure when no window state exists, and otherwise
+ * is handled without extending the window, overwriting the stored resetAt, or
  * restarting the primary recovery clocks (live ph-bot 2026-08-26: a dead
  * fallback tier plus user traffic postponed primary recovery indefinitely).
  */
@@ -386,11 +389,13 @@ export class RuntimeFallbackCoordinator {
   }
 
   /**
-   * Pure attribution predicate: does `session` serve the ACTIVE fallback
-   * entry? The SINGLE identity mechanism behind both failed-entry marking
-   * (markActiveFallbackFailed) and failure-tier derivation — a session is
-   * fallback-tier evidence exactly when this holds, so the two can never
-   * disagree. No side effects.
+   * Pure marking predicate: does `session` serve the ACTIVE fallback entry?
+   * Read by markActiveFallbackFailed and the empty-turn count; always false
+   * with no active window. The tier (failureTierForSession) can differ: a
+   * PRIOR entry's running session is fallback-tier yet does not serve a named
+   * active entry with another model (it does serve a same-provider wildcard
+   * entry), and a wildcard entry matches a primary-model session the tier
+   * calls primary.
    */
   private sessionServesActiveFallbackEntry(session: SessionManager | null): boolean {
     if (!this.host.isFallbackWindowActive || !this.host.fallbackWindow.activeEntry || !session) return false;
@@ -417,8 +422,8 @@ export class RuntimeFallbackCoordinator {
    * in-flight revert-probe gap, where the deadline is past but the window's
    * state (activeEntry, resetAt, activatedAt, the probe's own pending
    * decision) is still live. Clock/window state worth protecting exists
-   * exactly when this holds — the tier fail-closed scope and the no-arm scope
-   * both key on it, and MUST stay on the same predicate.
+   * exactly when this holds — activateProviderFallback's no-arm scope and its
+   * clock-preserving scope both key on it, and MUST stay on the same predicate.
    */
   private fallbackWindowStateExists(): boolean {
     return this.host.fallbackWindow.activeUntil !== null;
@@ -428,28 +433,25 @@ export class RuntimeFallbackCoordinator {
    * Failure-tier derivation by ROUTE identity — a different question from the
    * marking predicate above. Marking asks "does this session serve the ACTIVE
    * entry?" (evidence against that entry). The tier asks "is this session NOT
-   * the primary?" — a session attributable to ANY configured fallback entry,
-   * active or a PRIOR entry still running across a chain advance, is
-   * fallback-tier evidence and must not move the window clocks.
+   * the primary?" — a session that only fallback entries match (the active one,
+   * or a PRIOR entry still running across a chain advance) is fallback-tier
+   * evidence and must not move the window clocks.
    *
-   * Attribution mirrors the route-currency compare (sessionMatchesCurrentRoute):
-   * the primary compare is provider-only (isCrossProviderSession's inverse) —
-   * disambiguation comes from the model-aware fallback-entry side, because a
-   * same-provider chain differs from the primary only by model, plus one
-   * tiebreak: a session whose model exactly equals the EXPLICITLY configured
-   * primary model is the primary even when a wildcard (model-undefined)
-   * same-provider entry also matches it. When positive attribution is
-   * impossible (ambiguous same-provider session with a null model ref, a
-   * provider-default primary beside a wildcard same-provider entry, or a
-   * foreign provider), fail CLOSED for CLOCKS: with window state present the
-   * failure must not be able to move it; with no window at all there are no
-   * clocks to protect, and refusing to arm would break primary failover — so
-   * the legacy primary tier applies there.
+   * The primary compare is provider-only (isCrossProviderSession's inverse);
+   * the fallback-entry side is model-aware, since a same-provider chain differs
+   * from the primary only by model. Two tiebreaks attribute a session matching
+   * both to the primary's provider and model: its model equals the EXPLICITLY
+   * configured primary model; or the primary has no configured model, the
+   * session has none, and every same-provider entry names a model. A window
+   * route on a named entry carries that model or a verified pinned one, so such
+   * a session came from a non-window route on the primary provider (a default,
+   * provider-only pin or primary-mapped tier route). Any other match of both or
+   * neither fails CLOSED to the fallback tier: with window state the failure
+   * cannot move the clocks; with none, it still arms a window, but the unproven
+   * reset never becomes the user-facing primary ETA.
    */
   private failureTierForSession(session: SessionManager | null): FallbackFailureTier {
     if (!session) return 'primary';
-    const failClosedTier: FallbackFailureTier =
-      this.fallbackWindowStateExists() ? 'fallback' : 'primary';
     const provider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
     if (provider === null) {
       // Last-resort sessionId-prefix attribution, mirroring the marking
@@ -460,7 +462,7 @@ export class RuntimeFallbackCoordinator {
       const prefixPrimary = sessionId.startsWith(`${this.host.agentProvider}-`);
       if (prefixFallback && !prefixPrimary) return 'fallback';
       if (prefixPrimary && !prefixFallback) return 'primary';
-      return failClosedTier;
+      return 'fallback';
     }
     // getModelRef() returns `string | undefined` — a provider-default spawn
     // returns UNDEFINED (the common real case). Normalize at the read: a
@@ -475,19 +477,18 @@ export class RuntimeFallbackCoordinator {
     const matchesPrimary = provider === this.host.agentProvider;
     if (matchesFallback && !matchesPrimary) return 'fallback';
     if (matchesPrimary && !matchesFallback) return 'primary';
-    // Exact-primary disambiguation (review 2): a wildcard (model-undefined)
-    // fallback entry matches ANY session on its provider, which used to drop
-    // a failing PRIMARY session into the ambiguous bucket and discard its
-    // resetAt evidence under a legal config. When the primary route carries
-    // an EXPLICITLY configured model and the session's model equals it, the
-    // session IS the primary — the exact match beats the wildcard. The
-    // remainder stays fail-closed: a null session model on a same-provider
-    // chain, or a provider-default primary (host.model undefined) beside a
-    // wildcard same-provider entry, cannot be positively attributed.
-    if (matchesPrimary && matchesFallback && this.host.model !== undefined && model === this.host.model) {
-      return 'primary';
-    }
-    return failClosedTier;
+    // Primary tiebreaks for a session matching both routes. A wildcard
+    // (model-undefined) entry matches ANY session on its provider, so a
+    // session model equal to an EXPLICITLY configured primary model is the
+    // proof. With a provider-default primary, resolveRoute gives a window
+    // route on a named entry that entry's (or a pinned) model, so with no
+    // wildcard same-provider entry a null-model session runs on the primary's
+    // provider and model. Any other both-or-neither match fails closed.
+    const explicitPrimary = this.host.model !== undefined && model === this.host.model;
+    const defaultPrimary = this.host.model === undefined && model === null
+      && this.host.agentFallbacks.every((entry) => entry.provider !== provider || entry.model !== undefined);
+    if (matchesPrimary && matchesFallback && (explicitPrimary || defaultPrimary)) return 'primary';
+    return 'fallback';
   }
 
   private markActiveFallbackFailed(
@@ -744,15 +745,33 @@ export class RuntimeFallbackCoordinator {
     session: SessionManager | null,
     evidenceText?: string,
   ): ProviderFallbackActivation | null {
-    const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
     // SINGLE tier source: route-identity attribution (failureTierForSession).
-    // Deliberately NOT derived from failedKey — marking answers "serves the
+    // Deliberately NOT derived from marking — marking answers "serves the
     // ACTIVE entry" while the tier must answer "is NOT the primary": a stale
     // PRIOR-entry session left running across a chain advance is unmarked
     // (correctly) yet still fallback-tier. Callers never pass a tier, so no
     // call site can disagree with the attribution and every future call site
-    // is clock-safe by construction.
-    const tier = this.failureTierForSession(session);
+    // is clock-safe by construction. Only the empty-turn advance fixes the
+    // tier, through the private body below, and only to 'fallback'.
+    return this.markAndActivateAtTier(resetAt, reason, session, this.failureTierForSession(session), evidenceText);
+  }
+
+  /**
+   * Body of {@link activateProviderFallbackAfterTerminalResult} at a given
+   * tier: mark the active entry failed when `session` serves it, re-select,
+   * and keep the current entry when no alternate exists. Its one other caller
+   * is the empty-turn advance in recordFallbackTurnOutcome, which passes
+   * 'fallback'. A 'fallback' activation with window state never moves a
+   * window clock, so a new caller that fixes the tier may pass only that.
+   */
+  private markAndActivateAtTier(
+    resetAt: Date | null,
+    reason: ProviderFallbackReason,
+    session: SessionManager | null,
+    tier: FallbackFailureTier,
+    evidenceText?: string,
+  ): ProviderFallbackActivation | null {
+    const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
     const activation = this.activateProviderFallback(resetAt, reason, tier);
     if (activation || !failedKey) return activation;
 
@@ -1077,7 +1096,6 @@ export class RuntimeFallbackCoordinator {
       return;
     }
     this.host.fallbackMetrics.recordEmptyTurn();
-    this.host.fallbackEmptyAdvance.recordEmpty();
     const entry = this.host.fallbackWindow.activeEntry ?? this.host.agentFallbacks[0] ?? null;
     log.warn({
       chatJid: queue.targetChatJid,
@@ -1104,25 +1122,28 @@ export class RuntimeFallbackCoordinator {
       );
     }
 
-    // Advance the chain when the ACTIVE fallback entry is structurally empty.
-    // An entry that connects but emits no assistant text (e.g. a broken
-    // opencode provider integration) produces no terminal-failure MESSAGE, so
-    // the text-driven advance path (activateProviderFallbackAfterTerminalResult
-    // on a classified failure) never fires and the bot pins to the dead entry,
-    // emitting "_backup returned no reply — resend_" every turn while a working
-    // entry sits behind it. Mirror the PRIMARY empty-output trigger: after
-    // EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive empty turns on the same entry,
-    // route it through the SAME advance path terminal failures use — mark the
-    // entry failed and re-select the next eligible entry. Preserve the window's
-    // original arm reason so selection keeps skipping same-as-primary entries
-    // (an auth-required window must not advance back onto a dead primary
-    // provider). The attempted-key guard stops re-advancing (and re-alerting)
-    // the same entry when no alternate exists. Reuses the terminal path's
-    // single-fallback preservation: when no alternate remains the window keeps
-    // the current entry rather than reverting to a known-bad primary.
+    // Advance the chain when the ACTIVE fallback entry is structurally empty:
+    // an entry that connects but emits no assistant text produces no terminal
+    // failure MESSAGE, so the text-driven advance never fires and the bot pins
+    // to the dead entry while a working entry sits behind it. Count a turn only
+    // from a session that serves the active entry (the marking predicate, as in
+    // recordFallbackTurnProcessFailure), whatever route started it: a wildcard
+    // entry's window keeps a same-provider primary manager as its session. An
+    // in-flight primary turn or a prior entry's late turn whose model differs
+    // from a named active entry does not serve it and is no evidence against
+    // it. After EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive counted turns, mark
+    // the entry failed and re-select through the terminal path's body at the
+    // FALLBACK tier: the run is evidence against the entry, not the primary, so
+    // the advance keeps the window end, the stored reset, the revert timer and
+    // the probe countdown even where route attribution would call the session
+    // primary. The window's original arm reason keeps an auth-required window
+    // skipping same-as-primary entries. The attempted-key guard stops
+    // re-advancing (and re-alerting) the same entry; with no alternate left,
+    // the single-fallback preservation keeps the current entry.
+    if (!this.sessionServesActiveFallbackEntry(session)) return;
+    this.host.fallbackEmptyAdvance.recordEmpty();
     const entryKey = entry ? this.host.fallbackChain.entryKey(entry) : null;
     if (
-      session !== null &&
       entryKey !== null &&
       this.host.fallbackEmptyAdvance.shouldAttemptAdvance(entryKey, EMPTY_OUTPUT_FALLBACK_THRESHOLD)
     ) {
@@ -1130,10 +1151,11 @@ export class RuntimeFallbackCoordinator {
         ? this.host.fallbackWindow.armReason
         : 'auth-required';
       const resetAt = this.host.fallbackWindow.resetAt !== null ? new Date(this.host.fallbackWindow.resetAt) : null;
-      const activation = this.activateProviderFallbackAfterTerminalResult(
+      const activation = this.markAndActivateAtTier(
         resetAt,
         advanceReason,
         session,
+        'fallback',
         'fallback entry returned empty output',
       );
       if (activation) {
@@ -1998,9 +2020,9 @@ export class RuntimeFallbackCoordinator {
       fallbackModel: fallbackEntry.model,
       reason,
       resetAt,
-      // Tier, not the stored window value, decides provenance: the no-window
-      // fallback-tier arm above also stores its resetAt, so only a
-      // primary-tier activation may hand its reset to the user as the ETA.
+      // Tier, not the stored window value, decides provenance: a no-window
+      // fallback-tier arm (an attributed or fail-closed fallback session) also
+      // stores its resetAt, so only a primary-tier activation gives the user an ETA.
       primaryResetAt: failureTier === 'primary' ? (resetAt?.getTime() ?? null) : null,
       activeUntil: until,
       extended: wasActive,

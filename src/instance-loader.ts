@@ -5,6 +5,7 @@
 // Exports: loadInstance(name: string): void
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { configRoot as fleetConfigRoot, instancePaths, type InstancePaths } from './fleet/paths.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
@@ -184,6 +185,7 @@ function validateInstance(raw: Record<string, unknown>, name: string, authOnly =
     name,
     mode: 'load',
     authOnly,
+    filesystem: { homeDirectory: os.homedir() },
   });
   if (error) {
     // Permanent config-validation failure (schema/required-field/enum) — exit

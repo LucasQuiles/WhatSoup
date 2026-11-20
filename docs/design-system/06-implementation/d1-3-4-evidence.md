@@ -45,7 +45,7 @@ counters; "Soup Kitchen" ×5 → C3/C4; protected contracts all present).
 | DD-4 (Google Fonts) comment-only | **FIXED** — formal entry in debt register below w/ expiry |
 | Reduced-motion incomplete | **FIXED** — global off-and-instant policy (the 3s/1.2s/1.5s loops + 0.25s/0.3s timings now neutralize under the media query; loops additionally governed by waivers WVR-005/006 pending C5 motion disposition) |
 | Animated focus ring | **FIXED** — transition removed |
-| Status law not implemented (StatusDot dot-only; badge test enforces rounded-full) | **DEBT DD-6, phase C2** — canonical Badge/StatusChip primitive (shape law disc/diamond/square/outline + label) replaces StatusDot; `badge-components.test.tsx:83` is updated in the same C2 slice. Until then the old law intentionally stands (no half-migration) |
+| Status law not implemented (StatusDot dot-only; badge test enforces rounded-full) | **RESOLVED (2026-09-27 re-check):** `console/src/components/StatusDot.tsx` is now a thin wrapper over `StatusCell`, which always renders shape + label per the shape law, and `badge-components.test.tsx` no longer asserts uniform `rounded-full`. Original entry: **DEBT DD-6, phase C2** — resolved by the canonical Badge/StatusChip primitive (shape law disc/diamond/square/outline + label) replacing the old StatusDot contract. |
 | Brand/vocabulary incomplete (split wordmark, Soup Kitchen, instance copy) | **SCHEDULED C3/C4** — already lint-tracked (brand-regression 2 hits, vocabulary 5 hits in regression suite); branding-touchpoints.md is the classification evidence, now branch-local |
 | Modal focus restoration missing | **DEBT DD-7, phase C2** — `useDismissable` + Modal primitive (spec components/modal.md); lint rule `modal-must-restore-focus` stubbed, activates with primitive |
 | --text-3/t5 contrast below 4.5:1 at use sites | **DEBT DD-8, phase C3** — spec restricts text-3/ghost to non-essential metadata; C3 screen polish re-points essential small text to --text-2; use-site audit rides the per-screen migration. (Values are spec-conformant: ghost tier is intentionally sub-AA for decorative metadata) |
@@ -60,7 +60,7 @@ counters; "Soup Kitchen" ×5 → C3/C4; protected contracts all present).
 |---|---|---|---|
 | DD-4 | Geist via Google Fonts runtime import (offline/privacy/CSP impact) | C2 | self-host before any deploy; hard expiry 2026-07-31 |
 | DD-5 | Theme toggle minimal ghost button | C3 | nameplate/Nav polish slice |
-| DD-6 | Status shape law not yet rendered (StatusDot + test enforce dot-only) | C2 | Badge primitive slice |
+| DD-6 | Status shape law — **RESOLVED** (2026-09-27 re-check: StatusDot renders `StatusCell` with shape + label) | C2 | Badge primitive slice |
 | DD-7 | No modal focus-restoration primitive | C2 | Modal/useDismissable slice |
 | DD-8 | text-3/t5 essential-use audit | C3 | per-screen migration checklists |
 | DD-9 | Legacy half-step spacing aliases | C2/C3 | per-directory migration |
@@ -68,3 +68,5 @@ counters; "Soup Kitchen" ×5 → C3/C4; protected contracts all present).
 | WVR-001..006 | see console/eslint-waivers.yaml | various | 2026-12-31 |
 
 ## Verdict: D1.3 **PASS**, D1.4 **PASS** — D1 (token foundation stage) complete. Next: C2 primitive consolidation, first slice = Badge/StatusChip + Button primitives feeding the Fleet pilot (resolves DD-6 first, the audit's sharpest open conflict).
+
+Later status: that first C2 slice is recorded in `c2-1-evidence.md` (C2.1), which resolves DD-6; see the DD-6 rows above.
