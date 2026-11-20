@@ -207,6 +207,7 @@ export function sha256File(filePath: string, maxBytes = EVIDENCE_FILE_MAX_BYTES,
 }
 
 function parseJsonBytes<T>(bytes: Buffer, label: string): T {
+  if (bytes.length > JSON_MAX_BYTES) throw new Error(`${label} exceeds ${JSON_MAX_BYTES} byte limit`);
   try {
     return JSON.parse(bytes.toString('utf8')) as T;
   } catch {
@@ -301,10 +302,11 @@ function selectedSourceRepository(policy: ContainerInputPolicy, sourceRepository
   return selected;
 }
 
-function readOciArchiveEntry(archivePath: string, entry: string, budget: VerificationBudget): Buffer {
+function readOciArchiveEntry(archivePath: string, entry: string, budget: VerificationBudget,
+  entryMaxBytes = OCI_ENTRY_MAX_BYTES): Buffer {
   for (const candidate of [entry, `./${entry}`]) {
     if (++budget.entries > budget.limits.maxEntries) throw new Error('OCI extraction count limit exceeded');
-    const maxBytes = Math.min(OCI_ENTRY_MAX_BYTES, budget.remainingBytes());
+    const maxBytes = Math.min(entryMaxBytes, budget.remainingBytes());
     const timeout = Math.min(30_000, budget.remainingTime());
     try {
       const bytes = execFileSync('tar', ['-xOf', archivePath, candidate], {
@@ -315,6 +317,7 @@ function readOciArchiveEntry(archivePath: string, entry: string, budget: Verific
       return bytes;
     } catch (error) {
       budget.remainingTime();
+      if (isRecord(error) && error.code === 'ENOBUFS') throw new Error(`OCI archive entry exceeds ${maxBytes} byte limit: ${entry}`);
       // Only an ordinary missing-entry exit can use the alternate archive spelling.
       if (!isRecord(error) || (error.status !== 1 && error.status !== 2) || error.signal || error.code) throw error;
       if (Buffer.isBuffer(error.stdout)) budget.bytes += error.stdout.length;
@@ -349,10 +352,12 @@ function descriptorSize(descriptor: OciDescriptor, label: string): number {
   return descriptor.size as number;
 }
 
-function readVerifiedDescriptorBlob(archivePath: string, descriptor: OciDescriptor, label: string, budget: VerificationBudget): Buffer {
+function readVerifiedDescriptorBlob(archivePath: string, descriptor: OciDescriptor, label: string, budget: VerificationBudget,
+  entryMaxBytes = OCI_ENTRY_MAX_BYTES): Buffer {
   const digest = descriptorDigest(descriptor, label);
+  if (descriptorSize(descriptor, label) > entryMaxBytes) throw new Error(`${label} exceeds ${entryMaxBytes} byte limit`);
   if (descriptorSize(descriptor, label) > budget.remainingBytes()) throw new Error('OCI aggregate byte limit exceeded');
-  const bytes = readOciArchiveEntry(archivePath, `blobs/sha256/${digest.slice('sha256:'.length)}`, budget);
+  const bytes = readOciArchiveEntry(archivePath, `blobs/sha256/${digest.slice('sha256:'.length)}`, budget, entryMaxBytes);
   if (bytes.length !== descriptorSize(descriptor, label)) throw new Error(`OCI descriptor size does not match blob: ${label}`);
   if (sha256(bytes) !== digest) throw new Error(`OCI descriptor SHA-256 does not match blob: ${label}`);
   return bytes;
@@ -523,7 +528,7 @@ function verifyArchive(imagePath: string, expectedOutputDigest: string,
   if (!SHA256_PATTERN.test(expectedOutputDigest)) throw new Error('expected OCI output digest must be a SHA-256 digest');
   const archive = statSync(imagePath);
   if (!archive.isFile() || archive.size > EVIDENCE_FILE_MAX_BYTES) throw new Error('OCI archive exceeds byte limit');
-  const indexBytes = readOciArchiveEntry(imagePath, 'index.json', budget);
+  const indexBytes = readOciArchiveEntry(imagePath, 'index.json', budget, JSON_MAX_BYTES);
   const index = parseJsonBytes<OciIndex>(indexBytes, `OCI image archive index.json: ${imagePath}`);
   if (index.schemaVersion !== 2 || (index.mediaType !== undefined && index.mediaType !== OCI_IMAGE_INDEX_MEDIA_TYPE)) {
     throw new Error(`OCI image archive has invalid index.json: ${imagePath}`);
@@ -538,7 +543,7 @@ function verifyArchive(imagePath: string, expectedOutputDigest: string,
     }
     const outputDescriptor = nestedOutputDescriptors[0];
     imageIndexDigest = descriptorDigest(outputDescriptor, 'OCI output index descriptor');
-    const outputIndexBytes = readVerifiedDescriptorBlob(imagePath, outputDescriptor, 'OCI output index descriptor', budget);
+    const outputIndexBytes = readVerifiedDescriptorBlob(imagePath, outputDescriptor, 'OCI output index descriptor', budget, JSON_MAX_BYTES);
     const outputIndex = parseJsonBytes<OciIndex>(outputIndexBytes, 'OCI output image index');
     if (outputIndex.schemaVersion !== 2 || outputIndex.mediaType !== OCI_IMAGE_INDEX_MEDIA_TYPE) {
       throw new Error('OCI output descriptor does not reference an OCI image index');
@@ -555,12 +560,12 @@ function verifyArchive(imagePath: string, expectedOutputDigest: string,
     throw new Error('runnable image descriptor platform does not match linux/amd64');
   }
   const imageDigest = descriptorDigest(runnable, 'runnable image descriptor');
-  const imageManifestBytes = readVerifiedDescriptorBlob(imagePath, runnable, 'runnable image descriptor', budget);
+  const imageManifestBytes = readVerifiedDescriptorBlob(imagePath, runnable, 'runnable image descriptor', budget, JSON_MAX_BYTES);
   const manifest = parseJsonBytes<Record<string, unknown>>(imageManifestBytes, 'runnable image manifest');
   if (manifest.schemaVersion !== 2 || manifest.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('runnable image descriptor does not reference an OCI image manifest');
   if (!isRecord(manifest.config) || manifest.config.mediaType !== OCI_IMAGE_CONFIG_MEDIA_TYPE) throw new Error('runnable image manifest has an invalid OCI config descriptor');
   const config = parseJsonBytes<Record<string, unknown>>(
-    readVerifiedDescriptorBlob(imagePath, manifest.config as OciDescriptor, 'runnable image config descriptor', budget),
+    readVerifiedDescriptorBlob(imagePath, manifest.config as OciDescriptor, 'runnable image config descriptor', budget, JSON_MAX_BYTES),
     'runnable image config',
   );
   if (config.os !== 'linux' || config.architecture !== 'amd64') throw new Error('runnable image config does not match linux/amd64');
@@ -585,7 +590,7 @@ function verifyArchive(imagePath: string, expectedOutputDigest: string,
     if (attestationPlatform.os !== 'unknown' || attestationPlatform.architecture !== 'unknown') {
       throw new Error('OCI image archive attestation descriptor platform is not unknown/unknown');
     }
-    const attestationBytes = readVerifiedDescriptorBlob(imagePath, descriptor, 'attestation manifest descriptor', budget);
+    const attestationBytes = readVerifiedDescriptorBlob(imagePath, descriptor, 'attestation manifest descriptor', budget, JSON_MAX_BYTES);
     const attestation = parseJsonBytes<OciManifest>(attestationBytes, 'OCI image archive attestation manifest');
     if (attestation.schemaVersion !== 2 || attestation.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE || attestation.artifactType !== OCI_ATTESTATION_ARTIFACT_TYPE || !isRecord(attestation.subject)) {
       throw new Error('OCI image archive has an invalid attestation manifest');
@@ -598,7 +603,7 @@ function verifyArchive(imagePath: string, expectedOutputDigest: string,
     for (const layer of attestation.layers) {
       if (!isRecord(layer) || layer.mediaType !== IN_TOTO_MEDIA_TYPE) continue;
       const layerDescriptor = layer as OciDescriptor;
-      const layerBytes = readVerifiedDescriptorBlob(imagePath, layerDescriptor, 'attestation layer descriptor', budget);
+      const layerBytes = readVerifiedDescriptorBlob(imagePath, layerDescriptor, 'attestation layer descriptor', budget, JSON_MAX_BYTES);
       const statement = parseJsonBytes<InTotoStatement>(layerBytes, 'OCI image archive in-toto statement');
       assertStatementSubject(statement, imageDigest);
       if (typeof statement.predicateType !== 'string' || annotations(layerDescriptor)['in-toto.io/predicate-type'] !== statement.predicateType) {

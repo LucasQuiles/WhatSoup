@@ -128,6 +128,8 @@ function makeReceiptInput(options: {
 }
 
 interface OciArchiveOptions {
+  jsonBytes?: { kind: 'root index' | 'output index' | 'image manifest' | 'config' | 'attestation manifest' | 'provenance' | 'SBOM'; size: number };
+  imageLayerBytes?: number;
   sourceRevision?: string;
   sourceRepository?: string;
   provenanceBuilderId?: string;
@@ -164,6 +166,11 @@ function writeOciArchive(
   const layout = tmp.make('oci-layout');
   const blobs = path.join(layout, 'blobs/sha256');
   mkdirSync(blobs, { recursive: true });
+  const jsonBytes = (kind: NonNullable<OciArchiveOptions['jsonBytes']>['kind'], contents: string): string => (
+    options.jsonBytes?.kind === kind
+      ? contents.padEnd(options.jsonBytes.size, ' ')
+      : contents
+  );
   const writeBlob = (contents: string): { digest: string; size: number } => {
     const bytes = Buffer.from(contents, 'utf8');
     const digest = sha256(bytes);
@@ -171,8 +178,8 @@ function writeOciArchive(
     return { digest: `sha256:${digest}`, size: bytes.length };
   };
 
-  const config = writeBlob(JSON.stringify({ ...(options.configPlatform ?? { architecture: 'amd64', os: 'linux' }), rootfs: { type: 'layers', diff_ids: [] } }));
-  const layer = writeBlob('compressed-layer-bytes');
+  const config = writeBlob(jsonBytes('config', JSON.stringify({ ...(options.configPlatform ?? { architecture: 'amd64', os: 'linux' }), rootfs: { type: 'layers', diff_ids: [] } })));
+  const layer = writeBlob('compressed-layer-bytes'.padEnd(options.imageLayerBytes ?? 0, ' '));
   const configDescriptor = { mediaType: 'application/vnd.oci.image.config.v1+json', ...config };
   const layerDescriptor = { mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip', ...layer };
   if (options.invalidBlob) {
@@ -183,12 +190,12 @@ function writeOciArchive(
     if (options.invalidBlob.defect === 'size') descriptor.size += 1;
     if (options.invalidBlob.defect === 'media type') descriptor.mediaType = 'application/octet-stream';
   }
-  const runnable = writeBlob(JSON.stringify({
+  const runnable = writeBlob(jsonBytes('image manifest', JSON.stringify({
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
     config: configDescriptor,
     layers: Array.from({ length: options.imageLayerCount ?? 1 }, () => layerDescriptor),
-  }));
+  })));
   const imageDigest = runnable.digest;
   const sourceRevision = options.sourceRevision ?? SOURCE_REVISION;
   const sourceRepository = options.sourceRepository ?? SOURCE_REPOSITORY;
@@ -234,13 +241,13 @@ function writeOciArchive(
   };
   const statementSubjectDigest = options.statementSubjectDigest ?? imageDigest.slice('sha256:'.length);
   const statementPredicateType = options.predicateType ?? 'https://slsa.dev/provenance/v1';
-  const statement = writeBlob(JSON.stringify({
+  const statement = writeBlob(jsonBytes('provenance', JSON.stringify({
     _type: 'https://in-toto.io/Statement/v1',
     subject: [{ name: '_', digest: { sha256: statementSubjectDigest } }],
     predicateType: statementPredicateType,
     predicate: provenance,
-  }));
-  const sbomStatement = writeBlob(JSON.stringify({
+  })));
+  const sbomStatement = writeBlob(jsonBytes('SBOM', JSON.stringify({
     _type: 'https://in-toto.io/Statement/v1',
     subject: [{ name: '_', digest: { sha256: statementSubjectDigest } }],
     predicateType: 'https://spdx.dev/Document',
@@ -252,7 +259,7 @@ function writeOciArchive(
       creationInfo: { creators: ['Tool: buildkit-syft-scanner'] },
       packages: [],
     },
-  }));
+  })));
   const emptyConfig = writeBlob('{}');
   const manifest = JSON.stringify({
     schemaVersion: 2,
@@ -282,7 +289,7 @@ function writeOciArchive(
       }] : [])]),
     ],
   });
-  const attestation = writeBlob(manifest);
+  const attestation = writeBlob(jsonBytes('attestation manifest', manifest));
   const runnableDescriptor = {
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
     ...runnable,
@@ -298,7 +305,7 @@ function writeOciArchive(
       'vnd.docker.reference.digest': imageDigest,
     },
   };
-  const outputIndex = writeBlob(JSON.stringify({
+  const outputIndex = writeBlob(jsonBytes('output index', JSON.stringify({
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.index.v1+json',
     manifests: [
@@ -306,18 +313,18 @@ function writeOciArchive(
       ...(options.extraRunnableDescriptor ? [runnableDescriptor] : []),
       attestationDescriptor,
     ],
-  }));
+  })));
   const outputDescriptor = {
     mediaType: 'application/vnd.oci.image.index.v1+json',
     ...outputIndex,
   };
-  writeFileSync(path.join(layout, 'index.json'), JSON.stringify({
+  writeFileSync(path.join(layout, 'index.json'), jsonBytes('root index', JSON.stringify({
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.index.v1+json',
     manifests: options.directLayout
       ? [runnableDescriptor, attestationDescriptor]
       : [outputDescriptor, ...(options.extraOutputDescriptor ? [outputDescriptor] : [])],
-  }));
+  })));
   execFileSync('tar', ['-cf', archivePath, '-C', layout, 'index.json', 'blobs']);
   return {
     imageDigest,
@@ -794,6 +801,23 @@ describe('container build evidence CI contract', () => {
 });
 
 describe('primary review evidence boundaries', () => {
+  it.each(['root index', 'output index', 'image manifest', 'config', 'attestation manifest', 'provenance', 'SBOM'] as const)(
+    'rejects OCI %s JSON one byte above the 32 MiB limit', (kind) => {
+      const archive = path.join(tmp.make('oversized-oci-json'), 'image.tar');
+      const output = writeOciArchive(archive, { jsonBytes: { kind, size: 32 * 1024 * 1024 + 1 } });
+      expect(() => verifyOciArchiveAttestations(archive, output.outputDigest)).toThrow('byte limit');
+    },
+  );
+  it.each(['root index', 'provenance'] as const)('accepts OCI %s JSON exactly at the 32 MiB limit', (kind) => {
+    const archive = path.join(tmp.make('boundary-oci-json'), 'image.tar');
+    const output = writeOciArchive(archive, { jsonBytes: { kind, size: 32 * 1024 * 1024 } });
+    expect(verifyOciArchiveAttestations(archive, output.outputDigest).imageDigest).toBe(output.imageDigest);
+  });
+  it('retains the separate binary layer byte limit', () => {
+    const archive = path.join(tmp.make('binary-oci-layer'), 'image.tar');
+    const output = writeOciArchive(archive, { imageLayerBytes: 32 * 1024 * 1024 + 1 });
+    expect(verifyOciArchiveAttestations(archive, output.outputDigest).imageDigest).toBe(output.imageDigest);
+  });
   it.each(['metadataPath', 'sbomPath'] as const)('rejects oversized %s before parsing', (field) => {
     const input = makeReceiptInput();
     const bytes = readFileSync(input[field]);

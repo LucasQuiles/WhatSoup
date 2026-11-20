@@ -3742,7 +3742,10 @@ runnable manifest digest; checks the source repository, Dockerfile path, source 
 builder invocation, selected-platform base-image and SBOM-generator dependencies. It extracts the verified embedded SPDX
 predicate for attestation, so the attested SBOM is bound to the runnable manifest and to the policy-controlled scanner.
 
-The verifier caps each JSON input at 32 MiB before allocation, the OCI archive and aggregate
+The verifier caps each JSON input at 32 MiB before parsing, including the archive root index,
+nested index, image config, manifests, and attestation statements. Descriptor sizes and
+bounded extraction enforce that cap before decoding archive JSON. Binary image layers keep
+their separate 96 MiB entry limit. It caps the OCI archive and aggregate
 extracted bytes at 2 GiB, each extracted entry at 96 MiB, each descriptor list at 128, and all
 extraction attempts at 256. A shared 120-second monotonic deadline bounds archive traversal
 and hashing; each tar process also has a 30-second cap within the remaining budget. The
