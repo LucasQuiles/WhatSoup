@@ -2887,30 +2887,58 @@ describe('ConnectionManager — C8 FIX 2: logout block, vanished entries and the
     expect(readLatestAuthBond().reason).toBe('connection-open');
 
     // Every synchronous walk connection.ts takes goes through inspect(). The spy
-    // counts them and marks each snapshot, so a record built from one shows it.
+    // marks each snapshot, so a record built from one shows it, and counts each
+    // walk in the bucket of the innermost call below that is running, so the
+    // buckets stay disjoint when one calls another:
+    // - a runtime-state persist, keyed by its event;
+    // - a record's bond event (persistBondEvent), keyed by the entry's event;
+    // - a record's own work outside its bond event, keyed by its event.
+    // scheduleSettledAuthBondSnapshot reads the scheduled record's fields in its
+    // argument list, before the record call, so it shares that record's bucket.
+    // A walk outside every bucket is unattributed.
     const guard = guardOf(manager);
     const realInspect = guard.inspect.bind(guard) as () => { issues: string[] };
-    const inspectSpy = vi.spyOn(guard, 'inspect').mockImplementation(() => {
+    const running: string[] = [];
+    const walksByBucket: Record<string, number> = {};
+    vi.spyOn(guard, 'inspect').mockImplementation(() => {
+      const bucket = running.at(-1) ?? 'unattributed';
+      walksByBucket[bucket] = (walksByBucket[bucket] ?? 0) + 1;
       const snapshot = realInspect();
       return { ...snapshot, issues: [...snapshot.issues, INSPECT_MARKER] };
     });
-    const persistWalks = { count: 0 };
-    const realPersist = (manager as any).persistConnectionRuntimeState.bind(manager) as (...args: unknown[]) => void;
-    (manager as any).persistConnectionRuntimeState = (...args: unknown[]): void => {
-      const before = inspectSpy.mock.calls.length;
-      realPersist(...args);
-      persistWalks.count += inspectSpy.mock.calls.length - before;
+    const attribute = (method: string, bucketOf: (...args: any[]) => string): void => {
+      const real = (manager as any)[method].bind(manager) as (...args: unknown[]) => void;
+      (manager as any)[method] = (...args: unknown[]): void => {
+        running.push(bucketOf(...args));
+        try {
+          real(...args);
+        } finally {
+          running.pop();
+        }
+      };
     };
+    attribute('persistConnectionRuntimeState', (event: string) => `persist ${event}`);
+    attribute('persistBondEvent', (entry: { event: string }) => `bond event ${entry.event}`);
+    attribute('recordCredentialLifecycle', (event: string) => `record ${event}`);
+    attribute('scheduleSettledAuthBondSnapshot', () => 'record auth_snapshot_scheduled');
 
     // A credential write still in flight: every attempt of the next run defers.
     writeFileSync(join(testAuthDir, 'creds.json'), '');
-    const walksBefore = inspectSpy.mock.calls.length;
-    persistWalks.count = 0;
     const handled = (manager as any).captureAuthBondSnapshot('creds-update');
     await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
     await handled;
-    const walks = inspectSpy.mock.calls.length - walksBefore;
-    const persistWalksInRun = persistWalks.count;
+    // Copied before shutdown, whose persist walks as well.
+    const walks: Record<string, number> = { ...walksByBucket };
+    const namedBuckets = [
+      'persist auth_snapshot_settled',
+      'bond event auth_snapshot_skipped',
+      'record auth_snapshot_scheduled',
+      'bond event auth_snapshot_scheduled',
+      'unattributed',
+    ];
+    const otherAttributed = Object.entries(walks)
+      .filter(([bucket]) => !namedBuckets.includes(bucket))
+      .reduce((sum, [, count]) => sum + count, 0);
 
     const scheduled = lifecycle(manager).find((event) => event.event === 'auth_snapshot_scheduled'
       && event.note === 'auth-bond-capture-deferred');
@@ -2925,10 +2953,27 @@ describe('ConnectionManager — C8 FIX 2: logout block, vanished entries and the
     // The record describes the deferred run, with the guard's current backup half...
     expect(scheduled).toMatchObject({ authBondStatus: 'invalid', lastCaptureDeferredReason: 'creds-update' });
     expect(scheduled!.authBondIssues).toContain('creds_json_empty');
-    // ...and was not built from a synchronous inspect(): no marker, and no walk
-    // outside the settle persist, which keeps its own walk (C8-INSPECT-WALKS).
+    // ...and was not built from a synchronous inspect(): no marker.
     expect(scheduled!.authBondIssues).not.toContain(INSPECT_MARKER);
-    expect(walks - persistWalksInRun).toBe(0);
+    // Every walk in the run, by bucket. The scheduled record takes none, for its
+    // fields or for its bond event, and none is unattributed. The settle persist
+    // and the skipped record's bond event keep their walks, as on main; their
+    // counts also show the spy sees the walks it should.
+    expect({
+      settlePersist: walks['persist auth_snapshot_settled'] ?? 0,
+      skippedBondEvent: walks['bond event auth_snapshot_skipped'] ?? 0,
+      scheduledRecord: walks['record auth_snapshot_scheduled'] ?? 0,
+      scheduledBondEvent: walks['bond event auth_snapshot_scheduled'] ?? 0,
+      unattributed: walks['unattributed'] ?? 0,
+      otherAttributed,
+    }).toEqual({
+      settlePersist: 1,
+      skippedBondEvent: 1,
+      scheduledRecord: 0,
+      scheduledBondEvent: 0,
+      unattributed: 0,
+      otherAttributed: 0,
+    });
 
     await manager.shutdown();
   });
