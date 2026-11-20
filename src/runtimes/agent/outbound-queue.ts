@@ -1075,12 +1075,13 @@ export class OutboundQueue implements IOutboundQueue {
    * 3-second idle gap between tool calls, or after 30 seconds maximum —
    * whichever comes first. This prevents silent gaps during long tool chains.
    *
-   * Minimal mode suppresses updates; an unset mode sends them only to a configured redirect.
+   * Minimal mode suppresses updates. An unset mode batches them as full mode does, so the
+   * batch flush keeps its effects on assistant text, but sends them only to a configured redirect.
    * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
     if (this.rejectPostClosureEnqueue()) return;
-    if (this.toolUpdateMode === 'minimal' || (this.toolUpdateMode === 'unset' && this.toolUpdateRedirectJid === null)) {
+    if (this.toolUpdateMode === 'minimal') {
       this.startTyping();
       return;
     }
@@ -1757,7 +1758,7 @@ export class OutboundQueue implements IOutboundQueue {
    * never do, so content is never gated. Past the cap the liveness signal is
    * preserved (startTyping) so the user still sees "typing…" without the flood.
    */
-  private statusBudgetExhausted(attribution: OutboundAttribution): boolean {
+  private statusBudgetExhausted(attribution: OutboundAttribution, sendCapNotice = true): boolean {
     const now = Date.now();
     const windowState = statusMessageWindowState(this.senderToken, now);
     const cutoff = now - this.statusMessageWindowMs;
@@ -1788,7 +1789,7 @@ export class OutboundQueue implements IOutboundQueue {
         windowState.noticeSentAt = now;
         this.flushStreamBuffer();
         this.markVisibleTextDelivered();
-        this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
+        if (sendCapNotice) this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
     }
@@ -1800,7 +1801,7 @@ export class OutboundQueue implements IOutboundQueue {
         windowState.noticeSentAt ??= now;
         this.flushStreamBuffer();
         this.markVisibleTextDelivered();
-        this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
+        if (sendCapNotice) this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
     }
@@ -1843,9 +1844,13 @@ export class OutboundQueue implements IOutboundQueue {
         }));
         continue;
       }
-      if (this.statusBudgetExhausted(batch.attribution)) continue;
+      // An unset mode keeps the batch's budget, text flush and visible-output effects (the
+      // full-mode path) and withholds only the tool status message, cap notice included (#3830).
+      const withholdStatus = this.toolUpdateMode === 'unset';
+      if (this.statusBudgetExhausted(batch.attribution, !withholdStatus)) continue;
       this.flushStreamBuffer();
       this.markVisibleTextDelivered();
+      if (withholdStatus) continue;
       this.enqueuePreparedText(renderToolUpdates(batch.updates, this.toolUpdateMode), batch.attribution);
     }
   }
