@@ -20,8 +20,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
-import type { Messenger } from '../../../src/core/types.ts';
+import type { Messenger, TypingState } from '../../../src/core/types.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
+import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 vi.mock('../../../src/logger.ts', async () => {
@@ -76,13 +77,16 @@ async function makeUnsetQueue() {
   const { OutboundQueue } = await import('../../../src/runtimes/agent/outbound-queue.ts');
   const { buildToolUpdate } = await import('../../../src/runtimes/agent/tool-update.ts');
   const sent: Array<{ jid: string; text: string }> = [];
+  const typing: TypingState[] = [];
   const messenger: Messenger = {
     sendMessage: async (jid, text) => {
       sent.push({ jid, text });
       return { waMessageId: null };
     },
     sendMedia: async () => ({ waMessageId: null }),
-    setTyping: async () => {},
+    setTyping: async (_jid, state) => {
+      typing.push(state);
+    },
   };
   const queue = new OutboundQueue(messenger, chatJid, {
     conversationKey: toConversationKey(chatJid),
@@ -93,7 +97,7 @@ async function makeUnsetQueue() {
   queue.setToolUpdateMode(config.toolUpdateMode);
   queue.setToolUpdateRedirectJid(config.toolUpdateRedirectJid);
   queue.setTextAggregateDelayMs(config.textAggregateDelayMs);
-  return { queue, sent, buildToolUpdate, minimal: config.toolUpdateMode === 'minimal' };
+  return { queue, sent, typing, buildToolUpdate, minimal: config.toolUpdateMode === 'minimal' };
 }
 
 type Harness = Awaited<ReturnType<typeof makeUnsetQueue>>;
@@ -176,5 +180,48 @@ describe('unset tool update mode', () => {
 
     expect(sent).toEqual([{ jid: chatJid, text: `${FIRST} ${SECOND}` }]);
     expect(sent.map((message) => message.text).join('\n')).not.toContain(TOOL_PATH);
+  });
+});
+
+/** One event for each mode branch of OutboundQueue.enqueueProgressUpdate. */
+const PROGRESS_EVENTS: ReadonlyArray<{ readonly name: string; readonly event: ProgressEvent }> = [
+  { name: 'thinking_long', event: { type: 'thinking_long', gapMs: 10_000 } },
+  { name: 'thinking_stalled', event: { type: 'thinking_stalled', gapMs: 60_000 } },
+  {
+    name: 'operation_progress',
+    event: { type: 'operation_progress', toolId: 'tool-1', toolName: 'Bash', category: 'running', elapsedMs: 45_000, state: 'running' },
+  },
+  {
+    name: 'operation_slow',
+    event: { type: 'operation_slow', toolId: 'tool-1', toolName: 'Bash', category: 'running', elapsedMs: 45_000, expectedMs: 15_000 },
+  },
+  {
+    name: 'operation_stalled',
+    event: { type: 'operation_stalled', toolId: 'tool-1', toolName: 'Bash', category: 'running', elapsedMs: 75_000 },
+  },
+];
+
+/** A fresh queue per call, so the per-queue progress rate floor never suppresses the event. */
+async function sendProgress(event: ProgressEvent, mode: 'unset' | 'full'): Promise<Harness> {
+  const harness = await makeUnsetQueue();
+  if (mode === 'full') harness.queue.setToolUpdateMode('full');
+  harness.queue.enqueueProgressUpdate(event, 'bot-a');
+  await vi.advanceTimersByTimeAsync(10_000);
+  harness.queue.abortTurn();
+  return harness;
+}
+
+describe('unset tool update mode, progress events', () => {
+  // If a branch loses its unset case, or its condition is inverted, the unset
+  // queue renders a progress placeholder into the user chat. The full-mode
+  // control shows that the same event does render one.
+  it.each(PROGRESS_EVENTS)('shows only the typing indicator for $name', async ({ event }) => {
+    const unset = await sendProgress(event, 'unset');
+    expect(unset.sent).toEqual([]);
+    expect(unset.typing).toContain(true);
+
+    const full = await sendProgress(event, 'full');
+    expect(full.sent).toHaveLength(1);
+    expect(full.sent[0]?.jid).toBe(chatJid);
   });
 });
