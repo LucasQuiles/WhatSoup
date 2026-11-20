@@ -442,7 +442,11 @@ def test_dispatcher_bounded_adapter_preserves_excluded_sinks_and_decorator_order
             for call in ast.walk(node)
         )
     })
-    assert bounded_callers == ["append_dispatch_log"]
+    # The dispatch log is the controller log's one bounded writer. The
+    # authority record is a separate diagnostic publication with its own file
+    # and its own durable-writer inventory row
+    # (dispatcher-incident-authority-record), not a second dispatch-log path.
+    assert bounded_callers == ["append_dispatch_log", "record_incident_authority_outcome"]
 
 
 def test_watchdog_bounded_adapter_uses_one_exact_shared_publication(
