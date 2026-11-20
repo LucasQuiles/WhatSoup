@@ -199,8 +199,11 @@ a meta-alert, an owner copy, a credential page, a Q-loop message or an e-mail
 fallback, and nothing is written into the event. The bounds: one request per
 event per cycle with a 2 second timeout, and at most 8 requests and 8 seconds
 of request time per dispatcher cycle (`OBSERVE_*` in `lib/incident_authority.py`).
-The timeout applies to each socket operation, so a reply that trickles in can
-run past it once before the cycle bound stops further requests. After a bound,
+The timeout bounds the whole request, from the connection to the last byte of
+the reply, and the last request of a cycle gets only the request time left, so
+a reply that trickles in cannot run past either bound. Time spent asking does
+not count against the deadline of a credential page or a credential
+meta-alert. After a bound,
 or after a 429, the rest of the cycle is recorded `not_asked` and still sent.
 The Q loop asks at most once per notice, so at most three times per pass.
 Observe mode never sets `incidentAuthorityNotReady`, so the
@@ -224,7 +227,10 @@ the dispatcher keeps the event depends on the failure:
 
 No authority answer dead-letters an event. The authority-attempt cap
 (`BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS`) is reached only by a plain
-unavailability that the client no longer raises. Events that already hold a
+unavailability that the client no longer raises. In observe mode an empty or
+non-numeric value gives the default (12) and the warning
+`incident_authority_max_attempts_invalid`; in enforce mode the dispatcher
+stops on it. Events that already hold a
 receipt keep the existing delivery retry and dead-letter rules for WhatsApp
 and e-mail failures.
 
@@ -264,8 +270,10 @@ scope are `refused`; a rate limit, an outage and an unreadable credential are
 with reason `authority_client_error`. The daily health report adds, per
 producer, a plain line `incident_authority_record: producer=… last_24h
 total=… granted=… refused=… not_ready=… protocol_error=… not_configured=…
-not_asked=… would_hold_or_refuse_in_enforce=… mode=…`. The count enforce
-would have stopped is refused + not_ready + protocol_error + not_configured.
+not_asked=… would_hold_or_refuse_in_enforce=… mode=… skipped=…`. The count enforce
+would have stopped is refused + not_ready + protocol_error + not_configured;
+`skipped` counts the rows the report could not read (not JSON, or an outcome
+or reason that is not a known string).
 
 **Enrolling a host and switching it to enforce.**
 
@@ -301,7 +309,22 @@ and not fixed yet:
   (a `TypeError`). Either can stop the preflight for the rest of the cycle.
 - An existing pre-migration copy (`incidents.db.schema-v<N>.bak`) is kept
   without checking that its mode is 0600, and a WAL-backed copy can pass the
-  check through its sidecar.
+  check through its sidecar. The fleet database migration runs in either mode,
+  so this backup acceptance also governs rollback from an observe-mode host.
+- The dispatcher's observe preflight reads the whole outbox and appends one
+  record line per ready event, outside the request budget.
+- A legacy event without `createdAt` gets a new observation time in each
+  cycle, so a signal already granted can be recorded as an identity conflict
+  on retry.
+- Flap storm and resolve event construction moved outside the handlers that
+  roll back storm state and record resolve backoff, so an error while building
+  one skips them.
+- The Q loop builds its authority claim outside the observation handler, so a
+  time it cannot represent can stop a send before it is made.
+- The macOS installer prefers a value exported in its shell over the env file
+  and copies it into the dispatcher plist; it installs no Q-loop service.
+- The test matrix compares message content only for the queued alert; the
+  other paths are checked as sent, not as sent unchanged.
 
 ### Upgrading a host to this release
 
