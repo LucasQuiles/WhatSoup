@@ -191,8 +191,13 @@ def _answering(outcome: str, calls: list, clock: dict | None = None):
     """Stand-in for the one request function: records the call, then answers."""
     error = OUTCOMES[outcome][0]
 
-    def request(claim, *, timeout_seconds, rate_limited):
-        calls.append({"id": claim.get("id"), "timeout": timeout_seconds, "rate_limited": rate_limited})
+    def request(claim, *, timeout_seconds, rate_limited, deadline_seconds=None):
+        calls.append({
+            "id": claim.get("id"),
+            "timeout": timeout_seconds,
+            "rate_limited": rate_limited,
+            "deadline": deadline_seconds,
+        })
         if clock is not None:
             clock["now"] += clock["step"]
         if error is not None:
@@ -392,6 +397,24 @@ def test_the_observe_preflight_stops_asking_after_the_time_bound(tmp_path):
     }
 
 
+def test_the_last_observe_request_gets_only_the_time_left_in_the_cycle(tmp_path):
+    # Each request is bounded as a whole by its deadline, and the deadline is
+    # never longer than what is left of the cycle's request time, so the last
+    # request cannot run past the cap.
+    mod = _load_dispatcher(tmp_path / "deadline-left")
+    paths = mod.setup_dirs()
+    for index in range(4):
+        _seed_outbox(paths, _event(f"evt-deadline-{index:02d}"))
+    calls: list = []
+    clock = {"now": 0.0, "step": 3.5}
+    with patch.object(mod, "_authority_clock", lambda: clock["now"]), patch.object(
+        mod, "_request_incident_authority", _answering("unavailable", calls, clock)
+    ):
+        mod.begin_incident_authority_cycle()
+        mod.authorize_ready_events(paths)
+    assert [call["deadline"] for call in calls] == [2.0, 2.0, 1.0]
+
+
 def test_a_rate_refusal_in_observe_stops_asking_but_holds_nothing(tmp_path):
     mod = _load_dispatcher(tmp_path / "observe-rate")
     paths = mod.setup_dirs()
@@ -568,8 +591,8 @@ def test_observe_sends_every_q_loop_notice(tmp_path, outcome):
     requests: list = []
     sends: list = []
 
-    def _request(claim, *, timeout_seconds):
-        requests.append(timeout_seconds)
+    def _request(claim, *, timeout_seconds, deadline_seconds=None):
+        requests.append((timeout_seconds, deadline_seconds))
         if error is not None:
             raise error
         return object()
@@ -586,7 +609,8 @@ def test_observe_sends_every_q_loop_notice(tmp_path, outcome):
             authority_observed_epoch=1_763_600_000,
         )
     assert sent is True and len(sends) == 1
-    assert requests == [q_loop.OBSERVE_TIMEOUT_SECONDS]
+    # One request, bounded as a whole by the observe timeout.
+    assert requests == [(q_loop.OBSERVE_TIMEOUT_SECONDS, q_loop.OBSERVE_TIMEOUT_SECONDS)]
     assert state["notification_authority"] == {}, "observe mode stores nothing in the loop state"
     records = _records(q_loop.INCIDENT_AUTHORITY_RECORD)
     assert [(r["eventClass"], r["outcome"], r["reason"], r["mode"]) for r in records] == [

@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import sys
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -318,6 +320,66 @@ def test_an_oversized_refusal_is_classified_by_its_status(credential: Path, stat
     )
     with pytest.raises(AuthorityNotReady, match=rf"^{reason}$"):
         client.accept(CLAIM)
+
+
+class _SlowConnection:
+    """Accepts the request, then holds the reply until it is closed."""
+
+    def __init__(self, delay: float):
+        self.delay = delay
+        self.closed = threading.Event()
+
+    def request(self, method, path, body, headers):
+        return
+
+    def getresponse(self):
+        self.closed.wait(self.delay)
+        raise TimeoutError("no reply")
+
+    def close(self):
+        self.closed.set()
+
+
+def test_an_observe_deadline_bounds_the_whole_request(credential: Path):
+    connection = _SlowConnection(delay=5.0)
+    timeouts: list[float] = []
+    client = IncidentAuthorityClient(
+        "http://127.0.0.1:7419/api/signals",
+        credential,
+        expected_producer_id="bot-errors-dispatcher",
+        connection_factory=lambda _host, _port, timeout: timeouts.append(timeout) or connection,
+    )
+    started = time.monotonic()
+    with pytest.raises(AuthorityNotReady, match=r"^incident_authority_unavailable$"):
+        client.accept(CLAIM, deadline_seconds=0.3)
+    assert time.monotonic() - started < 1.5, "the caller waits no longer than the deadline"
+    assert timeouts == [0.3], "no socket operation may wait past the deadline"
+    assert connection.closed.wait(1.0), "the abandoned request is closed"
+
+
+class _BodylessResponse(_Response):
+    def read(self, limit):
+        raise TimeoutError("body never arrived")
+
+
+class _BodylessConnection(_Connection):
+    def request(self, method, path, body, headers):
+        status, response_headers, _payload = self.response_builder(body)
+        self.response = _BodylessResponse(status, response_headers, b"")
+
+
+@pytest.mark.parametrize("deadline", [None, 1.0])
+def test_a_rate_limit_is_recognised_when_its_body_never_arrives(credential: Path, deadline):
+    connection = _BodylessConnection(lambda _body: (429, {"Content-Type": "application/json"}, b""))
+    client = IncidentAuthorityClient(
+        "http://127.0.0.1:7419/api/signals",
+        credential,
+        expected_producer_id="bot-errors-dispatcher",
+        connection_factory=lambda _host, _port, _timeout: connection,
+    )
+    kwargs = {} if deadline is None else {"deadline_seconds": deadline}
+    with pytest.raises(AuthorityNotReady, match=r"^incident_authority_rate_limited$"):
+        client.accept(CLAIM, **kwargs)
 
 
 def test_an_oversized_success_reply_stays_a_protocol_error(credential: Path):
