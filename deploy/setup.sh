@@ -674,6 +674,9 @@ else
   append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE" \
     "${BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE:-$HOME/.config/whatsoup/bot-errors-q-loop.credential}"
   echo "  ✓ Existing BOT ERRORS routing config preserved at ~/.config/whatsoup/bot-errors.env"
+  echo "  - IncidentStore authority: enroll the dispatcher and Q-loop producers and write their credential"
+  echo "    files (deploy/scripts/README-bot-errors.md, upgrade section) before or with this upgrade."
+  echo "    Until then BOT ERRORS holds every notice in its outbox and the deadman reports it after 30 minutes."
 fi
 
 # ── Step 5: Install hardened npm defaults ───────────────────────────

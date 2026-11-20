@@ -46,6 +46,21 @@ class AuthorityUnavailable(AuthorityError):
     """The authority could not durably answer; retry is permitted."""
 
 
+class AuthorityNotReady(AuthorityUnavailable):
+    """This host cannot get an answer yet.
+
+    The settings are missing or invalid, the producer credential is missing,
+    unreadable or not private, the authority refused the credential (401) or
+    its scope (403), or it rate-limited the producer (429). The protected
+    effect waits and is retried with backoff. It is never terminal and never
+    counts as an attempt; the message is the bounded reason code.
+    """
+
+    @property
+    def reason(self) -> str:
+        return str(self)
+
+
 class AuthorityConflict(AuthorityError):
     """The stable identity was already accepted with different bytes."""
 
@@ -373,7 +388,11 @@ class IncidentAuthorityClient:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         connection_factory: Callable[[str, int, float], Any] | None = None,
     ) -> None:
-        self.destination = _validate_destination(url)
+        try:
+            self.destination = _validate_destination(url)
+        except AuthorityProtocolError as exc:
+            # A wrong local setting: the operator fixes it and the work waits.
+            raise AuthorityNotReady(str(exc)) from exc
         self.credential_path = credential_path
         if not expected_producer_id or len(expected_producer_id) > 128:
             raise AuthorityProtocolError("authority_producer_id_invalid")
@@ -385,7 +404,12 @@ class IncidentAuthorityClient:
 
     def accept(self, producer_claim: dict[str, Any]) -> AuthorityGrant:
         signal = canonical_signal(producer_claim)
-        credential = _read_private_credential(self.credential_path)
+        try:
+            credential = _read_private_credential(self.credential_path)
+        except AuthorityProtocolError as exc:
+            # Missing (not enrolled yet), unreadable or not private: nothing
+            # is sent, and the work waits for the operator to fix the file.
+            raise AuthorityNotReady(str(exc)) from exc
         connection_class = (
             http.client.HTTPSConnection if self.destination.scheme == "https" else http.client.HTTPConnection
         )
@@ -423,7 +447,13 @@ class IncidentAuthorityClient:
             raise AuthorityProtocolError("authority_response_oversized")
         if response.status == 409:
             raise AuthorityConflict("incident_authority_identity_conflict")
-        if response.status in {429, 500, 502, 503, 504, 507}:
+        if response.status == 401:
+            raise AuthorityNotReady("authority_credential_rejected")
+        if response.status == 403:
+            raise AuthorityNotReady("authority_scope_denied")
+        if response.status == 429:
+            raise AuthorityNotReady("incident_authority_rate_limited")
+        if response.status in {500, 502, 503, 504, 507}:
             raise AuthorityUnavailable("incident_authority_unavailable")
         if 300 <= response.status < 400:
             raise AuthorityProtocolError("authority_redirect_rejected")

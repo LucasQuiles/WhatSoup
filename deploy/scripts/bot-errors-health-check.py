@@ -9112,6 +9112,56 @@ def deadman_observation_gap_inventory() -> list[str]:
     return [line] if line else []
 
 
+# How long IncidentStore authority may stay not ready, with events waiting,
+# before the deadman reports it. The dispatcher's own notices need that
+# authority, so the deadman, which sends directly, is the only channel left.
+AUTHORITY_NOT_READY_DEADMAN_SECONDS = 1800
+
+
+def _authority_not_ready_fields(state_data: Any) -> tuple[str, str, int] | None:
+    if not isinstance(state_data, dict):
+        return None
+    record = state_data.get("incidentAuthorityNotReady")
+    counts = state_data.get("counts")
+    if not isinstance(record, dict) or not isinstance(counts, dict):
+        return None
+    reason = record.get("reason")
+    since = record.get("since")
+    waiting = counts.get("outbox")
+    if not isinstance(reason, str) or not isinstance(since, str) or type(waiting) is not int:
+        return None
+    return reason[:80], since, waiting
+
+
+def authority_not_ready_line(state_data: Any) -> str | None:
+    """Daily-report line for a dispatcher that holds events for authority."""
+    fields = _authority_not_ready_fields(state_data)
+    if fields is None:
+        return None
+    reason, since, waiting = fields
+    return (
+        f"WARN incident_authority: not_ready reason={reason} since={since} "
+        f"events_waiting={waiting}"
+    )
+
+
+def authority_not_ready_member(state_data: Any, now_epoch: float) -> dict[str, Any] | None:
+    """Deadman member: authority not ready past the bound while events wait."""
+    fields = _authority_not_ready_fields(state_data)
+    if fields is None:
+        return None
+    reason, since, waiting = fields
+    if waiting <= 0:
+        return None
+    try:
+        age = max(0, int(now_epoch - parse_iso_epoch(since)))
+    except Exception:  # noqa: BLE001 - an unreadable time cannot prove the bound passed
+        return None
+    if age < AUTHORITY_NOT_READY_DEADMAN_SECONDS:
+        return None
+    return {"reason": reason, "not_ready_seconds": age, "events_waiting": waiting}
+
+
 def queue_inventory() -> list[str]:
     root = state_root()
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
@@ -9138,6 +9188,9 @@ def queue_inventory() -> list[str]:
                 f"{prefix}dispatcher_state: {state} age_seconds={age} "
                 f"failed={failed} last_error={str(last_error)[:180] if last_error else 'none'}"
             )
+            authority_line = authority_not_ready_line(state_data)
+            if authority_line is not None:
+                lines.append(authority_line)
     else:
         prefix = "dispatcher_state:" if state_problem.startswith("missing ") else "FAIL dispatcher_state:"
         lines.append(f"{prefix} {state_problem}")
@@ -10076,6 +10129,9 @@ def deadman(
         state_age = max(0, int(now_epoch - state.stat().st_mtime))
         try:
             state_data = json.loads(state.read_text(encoding="utf-8"))
+            authority_member = authority_not_ready_member(state_data, now_epoch)
+            if authority_member is not None:
+                active_members["authority_not_ready"] = authority_member
             cycle_completed = state_data.get("cycleCompletedAt")
             if isinstance(cycle_completed, str):
                 completed_epoch = parse_iso_epoch(cycle_completed)

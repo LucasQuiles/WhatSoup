@@ -45,8 +45,8 @@ from lib.durable_json import (
     require_advance,
 )
 from lib.incident_authority import (
+    AuthorityNotReady,
     AuthorityProtocolError,
-    AuthorityUnavailable,
     IncidentAuthorityClient,
     dry_accept_for_test,
     grant_from_record,
@@ -805,7 +805,7 @@ def _authorize_notification(
             "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE", ""
         ).strip()
         if not url or not credential:
-            raise AuthorityUnavailable("incident_authority_not_configured")
+            raise AuthorityNotReady("incident_authority_not_configured")
         grant = IncidentAuthorityClient(
             url,
             Path(credential).expanduser(),

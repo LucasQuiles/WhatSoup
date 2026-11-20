@@ -67,6 +67,8 @@ from lib.controller_state import (
 )
 from lib.incident_authority import (
     AuthorityConflict,
+    AuthorityError,
+    AuthorityNotReady,
     AuthorityProtocolError,
     AuthorityUnavailable,
     IncidentAuthorityClient,
@@ -5566,6 +5568,64 @@ def producer_claim(
     return claim
 
 
+# What this cycle learned about the authority: whether any grant was obtained,
+# the last not-ready reason, and whether a rate refusal stops further requests.
+_AUTHORITY_CYCLE: dict[str, Any] = {"accepted": False, "not_ready": None, "rate_limited": False}
+
+
+def begin_incident_authority_cycle() -> None:
+    _AUTHORITY_CYCLE.update(accepted=False, not_ready=None, rate_limited=False)
+
+
+def authority_not_ready_record(paths: dict[str, Path]) -> dict[str, str] | None:
+    """The dispatcher-state field for a not-ready authority: reason and since when.
+
+    A cycle that obtained any grant clears it. A cycle that made no request
+    (every event in backoff) keeps the previous record, so the time it began
+    survives until the authority answers. It holds no secret.
+    """
+    if _AUTHORITY_CYCLE["accepted"]:
+        return None
+    previous: dict[str, str] | None = None
+    try:
+        loaded = safe_read_json(paths["state"])
+        candidate = loaded.get("incidentAuthorityNotReady") if isinstance(loaded, dict) else None
+        if (
+            isinstance(candidate, dict)
+            and isinstance(candidate.get("reason"), str)
+            and isinstance(candidate.get("since"), str)
+        ):
+            previous = {"reason": candidate["reason"], "since": candidate["since"]}
+    except Exception:  # noqa: BLE001 - no readable previous state means no previous record
+        previous = None
+    reason = _AUTHORITY_CYCLE["not_ready"]
+    if reason is None:
+        return previous
+    return {"reason": str(reason), "since": previous["since"] if previous else now_iso()}
+
+
+def mark_incident_authority_not_ready(event: dict[str, Any], reason: str) -> None:
+    """Hold the event after a not-ready answer.
+
+    Not ready is retried with its own backoff and never counts toward the
+    attempt cap that dead-letters an event, so the attempt that
+    ``mark_incident_authority_attempt`` recorded is given back.
+    """
+    delivery = event.setdefault("delivery", {})
+    if not isinstance(delivery, dict):
+        raise AuthorityProtocolError("authority_delivery_state_invalid")
+    attempts = delivery.get("incidentAuthorityAttempts")
+    attempts = attempts if type(attempts) is int and attempts > 0 else 1
+    delivery["incidentAuthorityAttempts"] = attempts - 1
+    waits = delivery.get("incidentAuthorityNotReadyCount")
+    waits = waits if type(waits) is int and waits >= 0 else 0
+    delivery["incidentAuthorityNotReadyCount"] = waits + 1
+    delivery["incidentAuthorityStatus"] = "not_ready"
+    delivery["incidentAuthorityError"] = reason
+    delivery["status"] = "queued"
+    delivery["nextAttemptAtEpoch"] = int(time.time()) + min(900, 2 ** min(waits + 1, 9))
+
+
 def mark_incident_authority_attempt(event: dict[str, Any]) -> int:
     delivery = event.setdefault("delivery", {})
     if not isinstance(delivery, dict):
@@ -5619,12 +5679,23 @@ def accept_incident_authority(
             "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE", ""
         ).strip()
         if not url or not credential:
-            raise AuthorityUnavailable("incident_authority_not_configured")
-        grant = IncidentAuthorityClient(
-            url,
-            Path(credential).expanduser(),
-            expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
-        ).accept(claimed_event)
+            _AUTHORITY_CYCLE["not_ready"] = "incident_authority_not_configured"
+            raise AuthorityNotReady("incident_authority_not_configured")
+        if _AUTHORITY_CYCLE["rate_limited"]:
+            # One rate refusal stops every further request for this cycle.
+            raise AuthorityNotReady("incident_authority_rate_limited")
+        try:
+            grant = IncidentAuthorityClient(
+                url,
+                Path(credential).expanduser(),
+                expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+            ).accept(claimed_event)
+        except AuthorityNotReady as exc:
+            _AUTHORITY_CYCLE["not_ready"] = exc.reason
+            if exc.reason == "incident_authority_rate_limited":
+                _AUTHORITY_CYCLE["rate_limited"] = True
+            raise
+    _AUTHORITY_CYCLE["accepted"] = True
     record = grant.as_record()
     delivery["incidentAuthority"] = record
     delivery["incidentAuthorityStatus"] = "accepted"
@@ -5691,7 +5762,7 @@ def authorize_ready_events(paths: dict[str, Path]) -> dict[str, int]:
     can mutate incident state or create a derived notification.
     """
 
-    counts = {"accepted": 0, "unavailable": 0, "rejected": 0}
+    counts = {"accepted": 0, "unavailable": 0, "rejected": 0, "not_ready": 0}
     for path in sorted(paths["outbox"].glob("*.json")):
         try:
             event = normalize_event(safe_read_json(path))
@@ -5717,6 +5788,18 @@ def authorize_ready_events(paths: dict[str, Path]) -> dict[str, int]:
         _publish_incident_authority_preflight_state(path, event)
         try:
             accept_incident_authority(event, claimed_event)
+        except AuthorityNotReady as exc:
+            # Held, never quarantined or dead-lettered for this reason.
+            mark_incident_authority_not_ready(event, exc.reason)
+            _publish_incident_authority_preflight_state(path, event)
+            counts["not_ready"] += 1
+            append_dispatch_log(
+                paths,
+                {"type": "incident_authority_not_ready", "reason": exc.reason, "retryable": True},
+                level="warning",
+                outcome="failed",
+            )
+            continue
         except AuthorityUnavailable:
             mark_incident_authority_unavailable(
                 event, "incident_authority_unavailable"
@@ -10790,6 +10873,36 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         require_all_advance([authority_attempt_publication])
         try:
             accept_incident_authority(event, claimed_event)
+        except AuthorityNotReady as exc:
+            # Held in the outbox with backoff; never quarantined, never
+            # dead-lettered, never counted as an attempt.
+            mark_incident_authority_not_ready(event, exc.reason)
+            not_ready_target = _durable_target(claimed)
+            not_ready_observation = observe_json(not_ready_target)
+            not_ready_publication = publish_state_json(
+                not_ready_target,
+                event,
+                component="dispatcher.incident_authority_not_ready",
+                operation_id=operation_id(
+                    not_ready_target,
+                    event,
+                    component="dispatcher.incident_authority_not_ready",
+                    predecessor=not_ready_observation.version,
+                ),
+                expected=not_ready_observation.version,
+                generation=(not_ready_observation.version.generation or 0) + 1,
+            )
+            require_all_advance([not_ready_publication])
+            retry_path = safe_child_path(paths["outbox"], path.name)
+            os.replace(claimed, retry_path)
+            fsync_parent(retry_path)
+            append_dispatch_log(
+                paths,
+                {"type": "incident_authority_not_ready", "reason": exc.reason, "retryable": True},
+                level="warning",
+                outcome="failed",
+            )
+            return False, "incident_authority_not_ready"
         except AuthorityUnavailable:
             attempts = mark_incident_authority_unavailable(
                 event, "incident_authority_unavailable"
@@ -12079,6 +12192,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
+            begin_incident_authority_cycle()
             authority_preflight = authorize_ready_events(paths)
             # Credential re-page: after the fixture events are retired and before
             # any pass that can move a member event out of the outbox.
@@ -12093,7 +12207,11 @@ def run_once(max_events: int) -> dict[str, Any]:
             processed = 0
             sent = 0
             suppressed = test_provenance_suppressed + recovery_deduped + recovered_before_delivery
-            failed = authority_preflight["unavailable"] + authority_preflight["rejected"]
+            failed = (
+                authority_preflight["unavailable"]
+                + authority_preflight["rejected"]
+                + authority_preflight["not_ready"]
+            )
             # #2386: quarantines the LOOP already accounted. The cycle folds a
             # delta because the pre-loop passes can quarantine before the loop
             # runs, but process_one's own site fires after `processed` was
@@ -12102,7 +12220,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             claim_race_quarantines = 0
             test_leak_dropped = 0
             last_error = (
-                "incident_authority_unavailable"
+                "incident_authority_not_ready"
+                if authority_preflight["not_ready"]
+                else "incident_authority_unavailable"
                 if authority_preflight["unavailable"]
                 else "incident_authority_rejected"
                 if authority_preflight["rejected"]
@@ -12272,6 +12392,8 @@ def run_once(max_events: int) -> dict[str, Any]:
                 incidentAuthorityAccepted=authority_preflight["accepted"],
                 incidentAuthorityUnavailable=authority_preflight["unavailable"],
                 incidentAuthorityRejected=authority_preflight["rejected"],
+                incidentAuthorityNotReadyEvents=authority_preflight["not_ready"],
+                incidentAuthorityNotReady=authority_not_ready_record(paths),
             )
             # After the completion stamp and every group send of this cycle,
             # still under the dispatcher lock that serialises the owner state.
@@ -12307,6 +12429,7 @@ def run_once(max_events: int) -> dict[str, Any]:
                 "incidentAuthorityAccepted": authority_preflight["accepted"],
                 "incidentAuthorityUnavailable": authority_preflight["unavailable"],
                 "incidentAuthorityRejected": authority_preflight["rejected"],
+                "incidentAuthorityNotReadyEvents": authority_preflight["not_ready"],
             }
 
 
@@ -12342,7 +12465,15 @@ def run_daemon(interval: int, max_events: int) -> None:
             sys.exit(INCIDENT_CYCLE_REQUIRED_EXIT)
         except Exception as exc:
             paths = setup_dirs()
-            record_state(paths, lastRunAt=now_iso(), processed=0, sent=0, failed=1, lastError=str(exc))
+            record_state(
+                paths,
+                lastRunAt=now_iso(),
+                processed=0,
+                sent=0,
+                failed=1,
+                lastError=str(exc),
+                incidentAuthorityNotReady=authority_not_ready_record(paths),
+            )
             print(json.dumps({"time": now_iso(), "error": str(exc)}), flush=True)
         time.sleep(interval)
 
