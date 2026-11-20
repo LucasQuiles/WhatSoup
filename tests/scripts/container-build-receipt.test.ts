@@ -72,6 +72,21 @@ function sha256(contents: string | Buffer): string {
 const LAYER_CONTENT = 'uncompressed-layer-bytes';
 const LAYER_DIFF_ID = `sha256:${sha256(LAYER_CONTENT)}`;
 
+type Permissions = string | Record<string, string> | undefined;
+type WorkflowPermissions = { permissions?: Permissions; jobs: Record<string, { permissions?: Permissions }> };
+
+// A scalar such as write-all or read-all grants every scope, so outside the attestation job only an
+// explicit mapping of read or none passes, and the workflow default must be exactly contents: read.
+function permissionFaults(workflow: WorkflowPermissions): string[] {
+  const readOnly = (permissions: Permissions) => typeof permissions === 'object' && permissions !== null
+    && Object.values(permissions).every((level) => level === 'read' || level === 'none');
+  const faults = JSON.stringify(workflow.permissions) === JSON.stringify({ contents: 'read' }) ? [] : ['workflow'];
+  for (const [id, job] of Object.entries(workflow.jobs)) {
+    if (id !== 'attest-container-build' && job.permissions !== undefined && !readOnly(job.permissions)) faults.push(id);
+  }
+  return faults;
+}
+
 function makeReceiptInput(options: {
   provenance?: unknown;
   builder?: string;
@@ -563,11 +578,7 @@ describe('container build evidence CI contract', () => {
       contents: 'read', 'id-token': 'write', attestations: 'write', 'artifact-metadata': 'write',
     });
     // Write permissions belong to the attestation job alone; the workflow default stays read-only.
-    expect(workflow.permissions).toEqual({ contents: 'read' });
-    for (const [id, job] of Object.entries(workflow.jobs)) {
-      if (id === 'attest-container-build') continue;
-      expect(Object.values(job.permissions ?? {}), id).not.toContain('write');
-    }
+    expect(permissionFaults(workflow)).toEqual([]);
     // The signing job only re-verifies downloaded evidence; it never builds or runs an image.
     expect(attest!.steps?.some((step) => /(^|\s)docker\s+(build|buildx|run|load|pull)\b/m.test(step.run ?? ''))).toBe(false);
     expect(qualityWorkflow).toContain('actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6');
@@ -575,6 +586,19 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('--github-output "$GITHUB_OUTPUT"');
     expect(qualityWorkflow).toContain('subject-name: ghcr.io/lucasquiles/whatsoup');
     expect(qualityWorkflow).toContain('subject-digest: ${{ steps.reverify-container-evidence.outputs.image_digest }}');
+  });
+
+  it.each([
+    ['workflow', 'write-all'],
+    ['workflow', 'read-all'],
+    ['quality', 'write-all'],
+    ['gitleaks', 'read-all'],
+    ['compatibility', { contents: 'write' }],
+  ] as const)('rejects %s permissions %j outside the attestation job', (scope, permissions) => {
+    const workflow = parse(qualityWorkflow) as WorkflowPermissions;
+    if (scope === 'workflow') workflow.permissions = permissions;
+    else workflow.jobs[scope]!.permissions = permissions;
+    expect(permissionFaults(workflow)).toEqual([scope]);
   });
 
   it('binds the source, image digest, SPDX SBOM and non-empty Buildx provenance in the receipt', () => {
