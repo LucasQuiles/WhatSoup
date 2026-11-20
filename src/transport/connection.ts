@@ -71,7 +71,12 @@ import {
 } from './auth-disconnect-policy.ts';
 import type { DisconnectClassification, DisconnectDecisionRecord } from '../lib/disconnect-classification.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
-import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
+import {
+  AuthBondGuard,
+  type AuthBondCaptureEvent,
+  type AuthBondCaptureResult,
+  type AuthBondSnapshot,
+} from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
 import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-party-console-redaction.ts';
 import { jidPattern } from '../lib/redaction-patterns.ts';
@@ -678,6 +683,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private authSnapshotFailureCount = 0;
   private authSnapshotSettledTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSettledAuthSnapshotAttemptAt: number | null = null;
+  /** One result handler per capture promise; requests folded into one run share a promise. */
+  private readonly authBondCaptureHandling = new WeakMap<Promise<AuthBondCaptureResult>, Promise<void>>();
   private credentialLifecycleEvents: CredentialLifecycleEvent[] = [];
   private readonly authBond = new AuthBondGuard({
     authDir: config.authDir,
@@ -687,6 +694,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     captureBlockReason: () => this.loggedOutAlertEmitted
       ? 'loggedOut/device-bond-lost state active; refusing to snapshot possibly poisoned credentials'
       : null,
+    // Resolved when an event fires: `log` is declared below this field.
+    onCaptureEvent: (event) => { this.logAuthBondCaptureEvent(event); },
   });
   private static readonly RECENT_DISCONNECT_WINDOW_MS = 10 * MS_PER_MINUTE;
   private static readonly MAX_FAILURE_DURATION_MS = 30 * MS_PER_MINUTE;
@@ -1425,6 +1434,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.sock = null;
     }
     this.clearIdentity();
+    // Settles an in-flight auth-bond capture on a microtask, without waiting
+    // for its next slice; its staging copy is left for the next sweep.
+    await this.authBond.shutdownCaptures();
   }
 
   private recordCredentialLifecycle(
@@ -2494,7 +2506,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.approvedOperationDispatcher?.start();
       this.lastOpenAt = Date.now();
       this.startKeepalive(sock);
-      this.captureAuthBondSnapshot('connection-open');
+      void this.captureAuthBondSnapshot('connection-open');
       this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspect() });
       // Start the first off-thread walk now rather than letting the earliest
       // health poll be the one to find an empty cache.
@@ -2739,8 +2751,29 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
-  private captureAuthBondSnapshot(reason: string): void {
-    const result = this.authBond.capture(reason);
+  /**
+   * Start an auth-bond capture and handle its result once.
+   *
+   * The guard runs the capture in slices off this turn and folds requests made
+   * during a run into one trailing run, giving every folded caller the same
+   * promise. The handler is attached once per promise, so a folded request
+   * does not record the same run twice. Never rejects.
+   */
+  private captureAuthBondSnapshot(reason: string): Promise<void> {
+    const pending = this.authBond.capture(reason);
+    const existing = this.authBondCaptureHandling.get(pending);
+    if (existing) return existing;
+    const handling = Promise.resolve(pending)
+      .then((result) => { this.handleAuthBondCaptureResult(reason, result); })
+      .catch((err: unknown) => {
+        this.log.error({ error: errorMessage(err), reason }, 'auth bond capture result handling failed');
+      })
+      .finally(() => { this.authBondCaptureHandling.delete(pending); });
+    this.authBondCaptureHandling.set(pending, handling);
+    return handling;
+  }
+
+  private handleAuthBondCaptureResult(reason: string, result: AuthBondCaptureResult): void {
     if (result.ok) {
       this.lastAuthSnapshotAt = Date.now();
       this.authSnapshotCaptureCount += 1;
@@ -2751,9 +2784,23 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (result.captured) {
         this.log.info({ backupPath: result.path, reason }, 'auth bond snapshot captured');
       }
-      return;
-    }
-    if (result.deferred) {
+    } else if (result.blocked) {
+      // A logout or bond-lost state refused the capture. That is not a local
+      // credential fault, so it neither pages nor counts as a failure: the
+      // logout path pages its own alert, and the finished line logs it at warn.
+      const blockReason = (result.error ?? '').replace(/^auth bond capture blocked: /, '');
+      this.recordCredentialLifecycle('auth_snapshot_skipped', {
+        authBond: result.snapshot,
+        note: `capture-blocked:${blockReason}`,
+      });
+    } else if (result.aborted) {
+      // A restore or shutdown stopped the run before it published. The
+      // reconnect after a restore, or the next process's open, captures again.
+      this.recordCredentialLifecycle('auth_snapshot_skipped', {
+        authBond: result.snapshot,
+        note: `capture-aborted:${result.error ?? 'unknown'}`,
+      });
+    } else if (result.deferred) {
       this.recordCredentialLifecycle('auth_snapshot_skipped', {
         authBond: result.snapshot,
         note: result.error ?? 'credential-write-in-flight',
@@ -2762,16 +2809,59 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // flight and a read that did not finish — so the reason is carried in
       // `error` rather than asserted by this line.
       this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred');
+      // Owed, not dropped: a settled snapshot asks again.
+      this.scheduleSettledAuthBondSnapshot('auth-bond-capture-deferred');
+    } else {
+      this.lastAuthSnapshotFailedAt = Date.now();
+      this.authSnapshotFailureCount += 1;
+      this.recordCredentialLifecycle('auth_snapshot_failed', {
+        authBond: result.snapshot,
+        note: result.error ?? 'unknown',
+      });
+      this.log.error({ error: result.error, reason }, 'auth bond snapshot failed');
+      this.emitLocalAuthBondFailureAlert(reason, result.snapshot);
+    }
+    // A run can settle after a close or during shutdown. It must not relabel
+    // the record those wrote.
+    if (!this.shuttingDown && this.connectionState === 'connected') {
+      this.persistConnectionRuntimeState('auth_snapshot_settled');
+    }
+  }
+
+  /** Turn the guard's capture events into the started and finished log lines. */
+  private logAuthBondCaptureEvent(event: AuthBondCaptureEvent): void {
+    if (event.kind === 'started') {
+      this.log.info({
+        event: 'auth_bond_capture_started',
+        reason: event.reason,
+        run: event.run,
+        coalescedRequests: event.coalescedRequests,
+        queuedMs: event.queuedMs,
+      }, 'auth bond capture started');
       return;
     }
-    this.lastAuthSnapshotFailedAt = Date.now();
-    this.authSnapshotFailureCount += 1;
-    this.recordCredentialLifecycle('auth_snapshot_failed', {
-      authBond: result.snapshot,
-      note: result.error ?? 'unknown',
-    });
-    this.log.error({ error: result.error, reason }, 'auth bond snapshot failed');
-    this.emitLocalAuthBondFailureAlert(reason, result.snapshot);
+    const line = {
+      event: 'auth_bond_capture_finished',
+      reason: event.reason,
+      run: event.run,
+      outcome: event.outcome,
+      elapsedMs: event.elapsedMs,
+      attempts: event.attempts,
+      slices: event.slices,
+      maxSliceMs: event.maxSliceMs,
+      phaseMs: event.phaseMs,
+      fileCount: event.fileCount,
+      totalBytes: event.totalBytes,
+      error: event.error,
+      consecutiveDeferrals: event.consecutiveDeferrals,
+    };
+    if (event.outcome === 'failed') {
+      this.log.error(line, 'auth bond capture finished');
+    } else if (event.outcome === 'captured' || event.outcome === 'unchanged') {
+      this.log.info(line, 'auth bond capture finished');
+    } else {
+      this.log.warn(line, 'auth bond capture finished');
+    }
   }
 
   /**
@@ -2874,28 +2964,42 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       note: reason,
     });
 
+    this.armSettledAuthBondSnapshot(reason, ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS);
+  }
+
+  private armSettledAuthBondSnapshot(reason: string, delayMs: number): void {
     this.authSnapshotSettledTimer = setTimeout(() => {
       this.authSnapshotSettledTimer = null;
-      if (this.shuttingDown || this.loggedOutAlertEmitted) return;
-      if (this.connectionState !== 'connected' || !this.sock) return;
-
-      const now = Date.now();
-      if (
-        this.lastSettledAuthSnapshotAttemptAt !== null
-        && now - this.lastSettledAuthSnapshotAttemptAt < ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS
-      ) {
-        this.recordCredentialLifecycle('auth_snapshot_skipped', {
-          authBond: this.authBond.inspect(),
-          note: 'settled-snapshot-min-interval',
-        });
-        return;
-      }
-
-      this.lastSettledAuthSnapshotAttemptAt = now;
-      this.captureAuthBondSnapshot(reason);
-      this.persistConnectionRuntimeState('auth_snapshot_settled');
-    }, ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS);
+      this.runSettledAuthBondSnapshot(reason);
+    }, delayMs);
     this.authSnapshotSettledTimer.unref?.();
+  }
+
+  private runSettledAuthBondSnapshot(reason: string): void {
+    if (this.shuttingDown || this.loggedOutAlertEmitted) return;
+    if (this.connectionState !== 'connected' || !this.sock) return;
+
+    const now = Date.now();
+    const sinceLastAttemptMs = this.lastSettledAuthSnapshotAttemptAt === null
+      ? null
+      : now - this.lastSettledAuthSnapshotAttemptAt;
+    if (
+      sinceLastAttemptMs !== null
+      && sinceLastAttemptMs < ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS
+    ) {
+      this.recordCredentialLifecycle('auth_snapshot_skipped', {
+        authBond: this.authBond.inspect(),
+        note: 'settled-snapshot-min-interval',
+      });
+      // Owed, not dropped: run again once the floor has passed.
+      const retryInMs = ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS - sinceLastAttemptMs;
+      this.log.info({ reason, retryInMs }, 'auth bond settled snapshot re-armed for the minimum interval');
+      this.armSettledAuthBondSnapshot(reason, retryInMs);
+      return;
+    }
+
+    this.lastSettledAuthSnapshotAttemptAt = now;
+    void this.captureAuthBondSnapshot(reason);
   }
 
   private clearAuthSnapshotSettledTimer(): void {
