@@ -37,6 +37,7 @@ describe('security boundary guard — IncidentStore authority', () => {
       'deploy/scripts/bot-errors-dispatcher.py',
       'def alternate(event, text):\n    send_whatsapp(text)\n',
     );
+    expect(findings).not.toHaveLength(0);
     expect(findings).toContainEqual(expect.objectContaining({
       code: 'security.incident-authority.raw-dispatch-send',
     }));
