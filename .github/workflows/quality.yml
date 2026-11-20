@@ -38,8 +38,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Bounds: coverage 45m, container 10m, runtime export 5m, browser
     # deps/download 5m + 17m, remaining setup/checks allowance 15m (an
-    # estimate that includes the 2m Linux policy probe). The 100m cap
-    # retains 3m of margin over these explicit bounds and the estimate.
+    # unmeasured estimate that includes the 2m Linux policy probe and up to
+    # about 2.5m of snapshot probe retries). The 100m cap retains 3m of
+    # margin over these explicit bounds and the estimate.
     timeout-minutes: 100
     steps:
       - name: Checkout

@@ -21,8 +21,8 @@ FROM base AS deps
 # their prebuilt download fails (#3889). They stay in this build stage: the
 # runtime stage copies only node_modules and package.json from here.
 # RE2_DOWNLOAD_FORCE_BUILD=1 (build arg) skips the download to test that path.
-RUN apt-get -o APT::Update::Error-Mode=any update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       ca-certificates git python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
@@ -54,8 +54,8 @@ RUN npm run build
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
 FROM base AS runtime
 
-RUN apt-get -o APT::Update::Error-Mode=any update \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       tini \
     && rm -rf /var/lib/apt/lists/*
 

@@ -3785,14 +3785,20 @@ a limit fails qualification; raise a bound only with reviewed workload evidence.
 Snapshot availability probes disable curl configuration, require HTTPS without redirects,
 and request `X-Download-Directly: 1` so Debian serves the pinned Release file without its
 normal redirect to the content-addressed file URL. Probes limit each response to 1 MiB
-with an independent parent-process output limit. Curl has
-a 30-second deadline; the parent stops it after 35 seconds.
+with an independent parent-process output limit. Each curl attempt has a 30-second deadline.
+A transient failure (timeout, refused connection, HTTP 408, 429 or 5xx) is retried at most twice,
+5 seconds apart, and no retry starts after 60 seconds, so one request ends within about 65 seconds;
+the parent stops it after 75. The two requests run one after the other, so the probe step takes at
+most about 2.5 minutes. Both APT stages set `Acquire::Retries=3`; their retries stay inside the
+container build step's 10-minute bound. An exhausted retry fails the check like any other failure.
 
 The authority job has a 100-minute deadline: 45 minutes for coverage, 10 for the container,
 5 for the runtime export, 5 for browser system dependencies, 17 for bounded browser download
 attempts and backoff, and a 15-minute estimate for the remaining setup and checks, with 3 minutes
 of margin. The estimate includes the 2-minute Linux policy probe, which runs on the loaded runtime
-image. That remainder is a planning allowance, not a separate enforced timeout. Individual failure
+image, and the snapshot probe (at most about 2.5 minutes when both requests exhaust their retries).
+That remainder is a planning allowance, not a measured or enforced timeout, so the 3-minute margin
+is arithmetic over an estimate, not measured headroom. Individual failure
 bounds remain enforced; an exhausted download bound fails the job.
 
 Successful container builds upload these files as

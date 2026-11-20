@@ -591,12 +591,21 @@ function verifyContainerSnapshotAvailability(
         '1048576',
         '--max-time',
         '30',
+        // Transient failures retry twice; no retry starts after 60 s, so one request ends within about
+        // 30 + 5 + 30 s. Every failure, including an exhausted retry, still fails the check.
+        '--retry',
+        '2',
+        '--retry-delay',
+        '5',
+        '--retry-max-time',
+        '60',
+        '--retry-connrefused',
         release,
       ], {
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
         maxBuffer: 1024 * 1024,
-        timeout: 35_000,
+        timeout: 75_000,
       });
     } catch {
       issues.push(containerInputIssue(
