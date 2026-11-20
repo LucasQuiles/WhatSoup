@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
@@ -2509,6 +2509,409 @@ describe('ConnectionManager — C8 auth-bond capture off the event loop', () => 
     const rearmed = readLatestAuthBond();
     expect(rearmed.backupPath).not.toBe(openLatest.backupPath);
     expect(rearmed.reason).toBe('auth-bond-capture-deferred');
+
+    await manager.shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C8 FIX 2 — the logout block, vanished entries and the re-arm walk, through
+// connection.ts. Ids match the "FIX 2" section of the C8 design note: C5a, C5b
+// and C6 are F2-2, C7 and C8 are N12 (F2-4), C9 is F2-7.
+// ---------------------------------------------------------------------------
+
+describe('ConnectionManager — C8 FIX 2: logout block, vanished entries and the re-arm walk', () => {
+  const backupRoot = join(testStateRoot, 'auth-bond-backups', 'WhatSoup');
+  const latestAuthBondPath = join(backupRoot, 'latest.json');
+  /** Enough key files that a capture's walks and copy cross slice boundaries. */
+  const KEY_FILES = 120;
+  /** Sorts after every other entry, so the harden walk repairs its mode last. */
+  const SENTINEL = `pre-key-${String(KEY_FILES - 1).padStart(4, '0')}.json`;
+  /** F2-4: every incomplete-read deferral's error text contains this. */
+  const INCOMPLETE_READ_DEFERRAL = 'auth bond auth tree read was incomplete';
+  /** F2-4: the bound's failure, on the seventh consecutive incomplete-read run. */
+  const INCOMPLETE_READ_BOUND_FAILURE = 'auth bond auth tree read was incomplete in 7 consecutive runs';
+  /**
+   * Drain for one capture run. Under fake timers each slice after the first is
+   * due 1 ms after the one before, and a retry waits 75 ms. This stays below
+   * the 30 s keepalive and the 60 s settle delay.
+   */
+  const RUN_DRAIN_MS = 1_000;
+  const INSPECT_MARKER = 'c8-inspect-spy-marker';
+
+  function writeKeyFiles(): void {
+    for (let index = 0; index < KEY_FILES; index += 1) {
+      writeFileSync(
+        join(testAuthDir, `pre-key-${String(index).padStart(4, '0')}.json`),
+        JSON.stringify({ keyData: `c8-fix2-key-${index}` }),
+      );
+    }
+  }
+
+  /** A creds saver temp file: the live creds with the same identity and different bytes. */
+  function writeCredsTemp(name: string, registrationId: number): string {
+    const path = join(testAuthDir, name);
+    writeFileSync(path, JSON.stringify({ ...readTestCreds(), registrationId }));
+    return path;
+  }
+
+  /** Names already copied into any staging folder. */
+  function stagedNames(): string[] {
+    const staging = join(backupRoot, 'staging');
+    if (!existsSync(staging)) return [];
+    return readdirSync(staging).flatMap((entry) => {
+      const auth = join(staging, entry, 'auth');
+      return existsSync(auth) ? readdirSync(auth) : [];
+    });
+  }
+
+  function historyNames(): string[] {
+    return readdirSync(join(backupRoot, 'history'));
+  }
+
+  function sentinelRepaired(): boolean {
+    return (statSync(join(testAuthDir, SENTINEL)).mode & 0o777) === 0o600;
+  }
+
+  /** The lifecycle records, read directly: getConnectionState() takes an inspect() of its own. */
+  function lifecycle(manager: ConnectionManager): Array<Record<string, any>> {
+    return (manager as any).credentialLifecycleEvents as Array<Record<string, any>>;
+  }
+
+  function guardOf(manager: ConnectionManager): any {
+    return (manager as any).authBond;
+  }
+
+  /**
+   * Run `hook` at every capture slice boundary, then hand the loop back through
+   * the guard's own yield, a faked setImmediate in this suite.
+   */
+  function hookCaptureYield(manager: ConnectionManager, hook: () => void): void {
+    const guard = guardOf(manager);
+    const ownYield = guard.captureYield as () => Promise<void>;
+    guard.captureYield = async (): Promise<void> => {
+      hook();
+      await ownYield();
+    };
+  }
+
+  function localFailurePages(): number {
+    return (emitAlertMock.mock.calls as unknown as unknown[][])
+      .filter((call) => call[1] === 'whatsapp_auth_bond_local_failure').length;
+  }
+
+  it.each([
+    {
+      id: 'C5a',
+      enqueue: 'returns false',
+      armAlert: (): void => { emitAlertMock.mockReturnValueOnce(false); },
+      logout: () => loggedOutStreamErrorEvent('device_removed'),
+    },
+    {
+      id: 'C5b',
+      enqueue: 'throws',
+      armAlert: (): void => {
+        emitAlertMock.mockImplementationOnce(() => { throw new Error('outbox unavailable'); });
+      },
+      logout: () => closeEvent(401),
+    },
+  ])('$id: a terminal logout mid-run whose alert enqueue $enqueue still blocks the publish', async ({ armAlert, logout }) => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    writeKeyFiles();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    expect(readLatestAuthBond().reason).toBe('connection-open');
+    const latestBefore = readFileSync(latestAuthBondPath, 'utf8');
+    const historyBefore = historyNames();
+    writeFileSync(join(testAuthDir, 'session-after-open.json'), JSON.stringify({ keyData: 'after-open' }));
+
+    const state = { loggedOut: false };
+    hookCaptureYield(manager, () => {
+      // Past the start check: the copy has begun.
+      if (state.loggedOut || stagedNames().length === 0) return;
+      state.loggedOut = true;
+      armAlert();
+      emit(logout());
+    });
+    const run = (manager as any).captureAuthBondSnapshot('creds-update');
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    await run;
+
+    // Coverage: the terminal logout landed mid-copy, its alert was attempted,
+    // and the failed enqueue left the alert flag false.
+    expect(state.loggedOut).toBe(true);
+    expect(emitAlertMock).toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_device_bond_lost',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      expect.any(Object),
+    );
+    expect((manager as any).loggedOutAlertEmitted).toBe(false);
+    // The publish was refused: nothing renamed into history/, latest.json unchanged.
+    expect(readFileSync(latestAuthBondPath, 'utf8')).toBe(latestBefore);
+    expect(historyNames()).toEqual(historyBefore);
+    expect(stagedNames()).toEqual([]);
+    expect(lifecycle(manager)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'auth_snapshot_skipped', note: expect.stringContaining('capture-blocked:') }),
+    ]));
+    expect(lifecycle(manager).filter((event) => event.event === 'auth_snapshot_captured')).toHaveLength(1);
+    expect((manager as any).authSnapshotFailureCount).toBe(0);
+
+    await manager.shutdown();
+  });
+
+  it('C6: a recoverable 401 mid-run reconnects, and the reopened connection still captures', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    writeKeyFiles();
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const socket = makeMockSocket();
+      sockets.push(socket);
+      return socket.mockSock as any;
+    });
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    sockets[0]!.emit(openEvent());
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    expect(readLatestAuthBond().reason).toBe('connection-open');
+    writeFileSync(join(testAuthDir, 'session-before-401.json'), JSON.stringify({ keyData: 'before-401' }));
+
+    const state = { closed: false };
+    hookCaptureYield(manager, () => {
+      if (state.closed || stagedNames().length === 0) return;
+      state.closed = true;
+      // Inspected and not device_removed: one bounded reconnect, not an exit.
+      sockets[0]!.emit(loggedOutStreamErrorEvent('replaced'));
+    });
+    const run = (manager as any).captureAuthBondSnapshot('creds-update');
+    // The run settles, then the 1 s reconnect backoff fires.
+    await vi.advanceTimersByTimeAsync(2 * RUN_DRAIN_MS);
+    await run;
+
+    // Coverage: the 401 landed mid-copy, was recoverable, and the manager reconnected.
+    expect(state.closed).toBe(true);
+    expect(lifecycle(manager)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'connection_close', reconnectDecision: 'reconnect:auth-401-unclassified' }),
+    ]));
+    expect(sockets).toHaveLength(2);
+
+    writeFileSync(join(testAuthDir, 'session-after-reopen.json'), JSON.stringify({ keyData: 'after-reopen' }));
+    sockets[1]!.emit(openEvent());
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+
+    const reopened = readLatestAuthBond();
+    expect(reopened.reason).toBe('connection-open');
+    expect(existsSync(join(reopened.backupPath, 'auth', 'session-after-reopen.json'))).toBe(true);
+    expect(lifecycle(manager).some((event) => String(event.note ?? '').startsWith('capture-blocked:'))).toBe(false);
+    expect(emitAlertMock).not.toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_device_bond_lost',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      expect.any(Object),
+    );
+
+    await manager.shutdown();
+  });
+
+  it('C7 (N12): entries that vanish mid-walk and mid-copy defer, the re-arm captures, and nothing pages', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    writeKeyFiles();
+    const walkTemp = writeCredsTemp('.creds.json.4242.c8-walk.tmp', 2);
+    const copyTemp = writeCredsTemp('.creds.json.4242.c8-copy.tmp', 3);
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    const openLatest = readLatestAuthBond();
+    expect(openLatest.reason).toBe('connection-open');
+    // One attempt per run, so each injected vanish decides how its run ends and
+    // the connection's deferred re-arm runs.
+    guardOf(manager).captureAttempts = 1;
+    const state: { armed: 'walk' | 'copy' | null; fired: string[] } = { armed: null, fired: [] };
+    hookCaptureYield(manager, () => {
+      if (state.armed === 'walk' && sentinelRepaired()) {
+        // The capture's harden walk repaired the sentinel's mode, last of all
+        // entries, so the tree walk has listed the folder but not read it all.
+        state.armed = null;
+        state.fired.push('walk');
+        unlinkSync(join(testAuthDir, 'pre-key-0100.json'));
+        renameSync(walkTemp, join(testAuthDir, 'creds.json'));
+      } else if (state.armed === 'copy' && stagedNames().length > 0) {
+        // A key file the copy has listed but not reached, then a temp file
+        // renamed over creds.json.
+        state.armed = null;
+        state.fired.push('copy');
+        const staged = new Set(stagedNames());
+        const unstaged = readdirSync(testAuthDir)
+          .filter((name) => name.startsWith('pre-key-') && !staged.has(name))
+          .sort();
+        unlinkSync(join(testAuthDir, unstaged[unstaged.length - 1]!));
+        renameSync(copyTemp, join(testAuthDir, 'creds.json'));
+      }
+    });
+
+    // Run 1: entries vanish after the walk listed them.
+    chmodSync(join(testAuthDir, SENTINEL), 0o644);
+    state.armed = 'walk';
+    const walkRun = (manager as any).captureAuthBondSnapshot('creds-update');
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    await walkRun;
+    expect(state.fired).toEqual(['walk']);
+    expect(lifecycle(manager)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'auth_snapshot_skipped', note: expect.stringContaining(INCOMPLETE_READ_DEFERRAL) }),
+      expect.objectContaining({ event: 'auth_snapshot_scheduled', note: 'auth-bond-capture-deferred' }),
+    ]));
+
+    // Run 2, the deferred re-arm 60 s later: entries vanish mid-copy.
+    state.armed = 'copy';
+    await vi.advanceTimersByTimeAsync(60_000 + RUN_DRAIN_MS);
+    expect(state.fired).toEqual(['walk', 'copy']);
+    expect(lifecycle(manager)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'auth_snapshot_skipped',
+        note: expect.stringContaining('changed during capture with the same identity'),
+      }),
+    ]));
+    // Its re-arm record carries this deferral, not the earlier one (F2-7).
+    const scheduled = lifecycle(manager).filter((event) => event.event === 'auth_snapshot_scheduled'
+      && event.note === 'auth-bond-capture-deferred');
+    expect(scheduled).toHaveLength(2);
+    expect(scheduled[1]).toMatchObject({ lastCaptureDeferredReason: 'auth-bond-capture-deferred' });
+
+    // Run 3: the floor re-arm runs on a quiet tree and captures.
+    await vi.advanceTimersByTimeAsync(300_000 + RUN_DRAIN_MS);
+    const rearmed = readLatestAuthBond();
+    expect(rearmed.backupPath).not.toBe(openLatest.backupPath);
+    expect(rearmed.reason).toBe('auth-bond-capture-deferred');
+    expect(lifecycle(manager).map((event) => event.event)).not.toContain('auth_snapshot_failed');
+    expect((manager as any).authSnapshotFailureCount).toBe(0);
+    expect((manager as any).localAuthAlertEmitted).toBe(false);
+    expect(localFailurePages()).toBe(0);
+
+    await manager.shutdown();
+  });
+
+  it('C8 (N12 bound): six consecutive incomplete-read deferrals, then the seventh fails and pages', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    writeKeyFiles();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    expect(readLatestAuthBond().reason).toBe('connection-open');
+    guardOf(manager).captureAttempts = 1;
+    const state: { victim: string | null } = { victim: null };
+    hookCaptureYield(manager, () => {
+      if (state.victim === null || !sentinelRepaired()) return;
+      unlinkSync(state.victim);
+      state.victim = null;
+    });
+    // Each run is started directly and drained well inside the 60 s settle
+    // delay, so the re-arm that the first deferral arms never fires here.
+    const vanishRun = async (run: number): Promise<void> => {
+      chmodSync(join(testAuthDir, SENTINEL), 0o644);
+      state.victim = join(testAuthDir, `pre-key-${String(80 + run).padStart(4, '0')}.json`);
+      const handled = (manager as any).captureAuthBondSnapshot('creds-update');
+      await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+      await handled;
+      expect(state.victim, `the vanish landed inside run ${run}`).toBeNull();
+    };
+
+    for (let run = 1; run <= 6; run += 1) await vanishRun(run);
+    expect(lifecycle(manager).filter((event) => event.event === 'auth_snapshot_skipped'
+      && String(event.note).includes(INCOMPLETE_READ_DEFERRAL))).toHaveLength(6);
+    expect(localFailurePages()).toBe(0);
+    expect((manager as any).localAuthAlertEmitted).toBe(false);
+
+    await vanishRun(7);
+    expect(localFailurePages()).toBe(1);
+    expect((manager as any).localAuthAlertEmitted).toBe(true);
+    expect((manager as any).authSnapshotFailureCount).toBe(1);
+    expect(lifecycle(manager)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'auth_snapshot_failed',
+        note: expect.stringContaining(INCOMPLETE_READ_BOUND_FAILURE),
+      }),
+    ]));
+
+    await manager.shutdown();
+  });
+
+  it('C9 (F2-7): the deferred re-arm records its schedule from the run result, with no inspect() walk', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    expect(readLatestAuthBond().reason).toBe('connection-open');
+
+    // Every synchronous walk connection.ts takes goes through inspect(). The spy
+    // counts them and marks each snapshot, so a record built from one shows it.
+    const guard = guardOf(manager);
+    const realInspect = guard.inspect.bind(guard) as () => { issues: string[] };
+    const inspectSpy = vi.spyOn(guard, 'inspect').mockImplementation(() => {
+      const snapshot = realInspect();
+      return { ...snapshot, issues: [...snapshot.issues, INSPECT_MARKER] };
+    });
+    const persistWalks = { count: 0 };
+    const realPersist = (manager as any).persistConnectionRuntimeState.bind(manager) as (...args: unknown[]) => void;
+    (manager as any).persistConnectionRuntimeState = (...args: unknown[]): void => {
+      const before = inspectSpy.mock.calls.length;
+      realPersist(...args);
+      persistWalks.count += inspectSpy.mock.calls.length - before;
+    };
+
+    // A credential write still in flight: every attempt of the next run defers.
+    writeFileSync(join(testAuthDir, 'creds.json'), '');
+    const walksBefore = inspectSpy.mock.calls.length;
+    persistWalks.count = 0;
+    const handled = (manager as any).captureAuthBondSnapshot('creds-update');
+    await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
+    await handled;
+    const walks = inspectSpy.mock.calls.length - walksBefore;
+    const persistWalksInRun = persistWalks.count;
+
+    const scheduled = lifecycle(manager).find((event) => event.event === 'auth_snapshot_scheduled'
+      && event.note === 'auth-bond-capture-deferred');
+    // Coverage: the run ended deferred and the re-arm recorded its schedule.
+    expect(lifecycle(manager)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'auth_snapshot_skipped',
+        note: expect.stringContaining('credential write still in flight'),
+      }),
+    ]));
+    expect(scheduled).toBeDefined();
+    // The record describes the deferred run, with the guard's current backup half...
+    expect(scheduled).toMatchObject({ authBondStatus: 'invalid', lastCaptureDeferredReason: 'creds-update' });
+    expect(scheduled!.authBondIssues).toContain('creds_json_empty');
+    // ...and was not built from a synchronous inspect(): no marker, and no walk
+    // outside the settle persist, which keeps its own walk (C8-INSPECT-WALKS).
+    expect(scheduled!.authBondIssues).not.toContain(INSPECT_MARKER);
+    expect(walks - persistWalksInRun).toBe(0);
 
     await manager.shutdown();
   });
