@@ -110,7 +110,7 @@ describe('consolidationLineage (#2569 source-set identity)', () => {
 
   it('keeps the durable: prefix and can never equal a legacy claim-hash id', () => {
     const lineage = consolidationLineage(scope, ['rec-a'], cluster);
-    expect(lineage?.recordId.startsWith('durable:')).toBe(true);
+    expect(lineage?.recordId).toMatch(/^durable:/);
     expect(lineage?.recordId).not.toMatch(/^durable:[0-9a-f]{16}$/);
   });
 });
