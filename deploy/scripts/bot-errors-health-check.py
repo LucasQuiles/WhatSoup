@@ -9180,9 +9180,9 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
     """Daily-report summary of one producer's authority record, last 24 hours.
 
     Counts per outcome and how many notices enforce mode would have held or
-    refused, so the owner can see when a host is ready for enforce. Returns
-    None when the record does not exist. Plain text, not WARN: observe mode
-    holds nothing.
+    refused, so the owner can see when a host is ready for enforce, and how
+    many rows it could not read. Returns None when the record does not exist.
+    Plain text, not WARN: observe mode holds nothing.
     """
     try:
         if path.is_symlink() or not path.is_file():
@@ -9196,12 +9196,24 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
         return f"incident_authority_record: producer={producer} unreadable"
     counts = {outcome: 0 for outcome in _INCIDENT_AUTHORITY_OUTCOMES}
     modes: set[str] = set()
+    skipped = 0
     for line in text.splitlines():
+        if not line.strip():
+            continue
         try:
             record = json.loads(line)
         except ValueError:
+            skipped += 1
             continue
-        if not isinstance(record, dict) or record.get("outcome") not in counts:
+        # A row the reader cannot use is counted, never raised on: a list
+        # outcome would raise in the lookup below.
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("outcome"), str)
+            or not isinstance(record.get("reason"), str)
+            or record["outcome"] not in counts
+        ):
+            skipped += 1
             continue
         observed = parse_iso_epoch(record.get("time"))
         if observed is None or not (
@@ -9216,7 +9228,7 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
     return (
         f"incident_authority_record: producer={producer} last_24h total={sum(counts.values())} "
         f"{outcome_text} would_hold_or_refuse_in_enforce={would_stop} "
-        f"mode={','.join(sorted(modes)) or 'none'}"
+        f"mode={','.join(sorted(modes)) or 'none'} skipped={skipped}"
     )
 
 
