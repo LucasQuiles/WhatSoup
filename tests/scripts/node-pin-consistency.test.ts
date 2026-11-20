@@ -1,4 +1,7 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { X509Certificate } from 'node:crypto';
+import { rootCertificates } from 'node:tls';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +14,9 @@ import {
 } from '../../scripts/check-node-pin-consistency.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+const TEST_DOCKER_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
+const TEST_SNAPSHOT = '20261001T000000Z';
+const CA_BOOTSTRAP = "RUN node -e \"require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\\n') + '\\n')\"";
 
 /**
  * Build a minimal repo fixture with the four pin surfaces (nvmrc, package.json,
@@ -22,6 +28,9 @@ function makeFixture(opts: {
   voltaNode?: string;
   enginesNode?: string;
   dockerVersion?: string;
+  dockerDigest?: string | null;
+  aptSnapshot?: string;
+  aptSource?: 'approved' | 'http-snapshot' | 'mutable' | 'unavailable';
   wrapperVersion?: string | 'reads-nvmrc' | 'none';
   wrappers?: (
     | 'deploy/whatsoup'
@@ -37,6 +46,11 @@ function makeFixture(opts: {
   const voltaNode = opts.voltaNode ?? '24.15.0';
   const enginesNode = opts.enginesNode ?? '>=24.0.0 <26';
   const dockerVersion = opts.dockerVersion ?? '24.15.0';
+  const dockerDigest = opts.dockerDigest === undefined
+    ? TEST_DOCKER_DIGEST
+    : opts.dockerDigest;
+  const aptSnapshot = opts.aptSnapshot ?? TEST_SNAPSHOT;
+  const aptSource = opts.aptSource ?? 'approved';
   const wrapperVersion = opts.wrapperVersion ?? 'reads-nvmrc';
   const wrappers = opts.wrappers ?? [
     'deploy/whatsoup',
@@ -63,9 +77,71 @@ function makeFixture(opts: {
   );
 
   mkdirSync(path.join(dir, 'docker'), { recursive: true });
+  const approvedDebianSource = `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`;
+  const approvedDebianSecuritySource = `https://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`;
+  const sourceUrl = aptSource === 'mutable'
+    ? 'http://deb.debian.org/debian/'
+    : aptSource === 'unavailable'
+      ? `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`
+      : aptSource === 'http-snapshot'
+        ? `http://snapshot.debian.org/archive/debian/${aptSnapshot}/`
+      : approvedDebianSource;
+  const securitySourceUrl = aptSource === 'approved'
+    ? approvedDebianSecuritySource
+    : aptSource === 'http-snapshot'
+      ? `http://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`
+      : sourceUrl;
   writeFileSync(
     path.join(dir, 'docker/Dockerfile'),
-    `FROM node:${dockerVersion}-slim AS deps\nFROM node:${dockerVersion}-slim AS runtime\n`,
+    [
+      `FROM node:${dockerVersion}-slim${dockerDigest === null ? '' : `@sha256:${dockerDigest}`} AS base`,
+      CA_BOOTSTRAP,
+      'RUN printf \'%s\\n\' \\',
+      `  'deb [check-valid-until=no] ${sourceUrl} bookworm main' \\`,
+      `  'deb [check-valid-until=no] ${securitySourceUrl} bookworm-security main' \\`,
+      '  > /etc/apt/sources.list \\',
+      '  && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'RUN apt-get -o APT::Update::Error-Mode=any update',
+      'FROM base AS runtime',
+      'RUN apt-get -o APT::Update::Error-Mode=any update',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(
+    path.join(dir, 'docker/container-inputs.json'),
+    `${JSON.stringify({
+      schemaVersion: 3,
+      platform: 'linux/amd64',
+      sourceRepository: 'https://github.com/LucasQuiles/WhatSoup.git',
+      baseImage: `node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST}`,
+      baseImageDependency: 'pkg:docker/node@24.15.0-slim?digest=sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d&platform=linux%2Famd64',
+      baseImageResolvedDigest: `sha256:${TEST_DOCKER_DIGEST}`,
+      builder: {
+        name: 'whatsoup-ci-builder',
+        driver: 'docker-container',
+        provenanceIdPrefix: 'https://github.com/LucasQuiles/WhatSoup/actions/runs/',
+      },
+      buildx: {
+        version: 'v0.38.0',
+        asset: 'buildx-v0.38.0.linux-amd64',
+        sha256: `sha256:${'c'.repeat(64)}`,
+        buildkitImage: `moby/buildkit:v0.33.1@sha256:${'b'.repeat(64)}`,
+      },
+      sbom: {
+        generator: 'docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9',
+        dependency: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9&platform=linux%2Famd64',
+        resolvedDigest: 'sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9',
+      },
+      apt: {
+        snapshot: aptSnapshot,
+        sources: [
+          `${approvedDebianSource} bookworm main`,
+          `${approvedDebianSecuritySource} bookworm-security main`,
+        ],
+      },
+    }, null, 2)}\n`,
     'utf8',
   );
 
@@ -158,6 +234,642 @@ describe('node-pin consistency check', () => {
     for (const m of dockerMismatches) {
       expect(m.version).toBe('24.14.0');
     }
+  });
+
+  it('rejects a Dockerfile base that omits an immutable image digest', () => {
+    const dir = makeFixture({ dockerDigest: null });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: path.join(dir, 'docker/Dockerfile'),
+      reason: 'base image is not pinned by digest',
+    });
+  });
+
+  it('rejects a base digest changed from the reviewed container-input policy', () => {
+    const dir = makeFixture({ dockerDigest: 'b'.repeat(64) });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: path.join(dir, 'docker/Dockerfile'),
+      reason: 'base image does not match docker/container-inputs.json',
+    });
+  });
+
+  it('requires reviewed Buildx and BuildKit identities in the container input policy', () => {
+    const dir = makeFixture({});
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+    policy.buildx = { version: 'latest', buildkitImage: 'moby/buildkit:latest' };
+    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: policyPath,
+      reason: 'invalid container input policy shape',
+    });
+  });
+
+  it('requires provenance dependency PURLs to bind the immutable input digest', () => {
+    const dir = makeFixture({});
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+    policy.baseImageDependency = 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64';
+    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: policyPath,
+      reason: 'invalid container input policy shape',
+    });
+  });
+
+  it('requires provenance digest fields to equal their immutable image input digests', () => {
+    const dir = makeFixture({});
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, any>;
+    policy.baseImageResolvedDigest = `sha256:${'d'.repeat(64)}`;
+    policy.sbom.resolvedDigest = `sha256:${'f'.repeat(64)}`;
+    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: policyPath,
+      reason: 'invalid container input policy shape',
+    });
+  });
+
+  it('rejects a policy that omits the immutable SBOM generator identity', () => {
+    const dir = makeFixture({});
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+    delete policy.sbom;
+    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: policyPath,
+      reason: 'invalid container input policy shape',
+    });
+  });
+
+  it('rejects mutable package sources outside the approved snapshot policy', () => {
+    const dir = makeFixture({ aptSource: 'mutable' });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: path.join(dir, 'docker/Dockerfile'),
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('requires the pinned CA bootstrap before any APT stage', () => {
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, readFileSync(filePath, 'utf8').replace(CA_BOOTSTRAP + '\n', ''));
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath,
+      reason: 'Dockerfile must bootstrap the pinned Node CA roots before APT and preserve that trust store',
+    });
+  });
+
+  it('exports real bundled CA certificates without a system certificate package', () => {
+    const dir = makeFixture({});
+    const actual = readFileSync(path.join(repoRoot, 'docker/Dockerfile'), 'utf8')
+      .split('\n').find((line) => line.startsWith('RUN node -e '));
+    expect(actual).toBeDefined();
+    const script = actual!.slice('RUN node -e "'.length, -1).replaceAll('/etc/ssl/certs', path.join(dir, 'certs'));
+    execFileSync(process.execPath, ['-e', script], { env: { PATH: process.env.PATH }, timeout: 10_000 });
+    const pem = readFileSync(path.join(dir, 'certs/ca-certificates.crt'), 'utf8');
+    const certs = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+    expect(certs.length).toBe(rootCertificates.length);
+    expect(certs.length).toBeGreaterThan(100);
+    expect(certs.map((cert) => new X509Certificate(cert).fingerprint256))
+      .toEqual(rootCertificates.map((cert) => new X509Certificate(cert).fingerprint256));
+  });
+
+  it('rejects replayable HTTP even when policy and Dockerfile agree', () => {
+    const dir = makeFixture({});
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(policyPath, readFileSync(policyPath, 'utf8').replaceAll('https://snapshot.', 'http://snapshot.'));
+    writeFileSync(dockerfilePath, readFileSync(dockerfilePath, 'utf8').replaceAll('https://snapshot.', 'http://snapshot.'));
+
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/container-inputs.json', filePath: policyPath,
+      reason: 'APT sources must use authenticated HTTPS to the approved Debian snapshot',
+    });
+  });
+
+  it.each([
+    "'Acquire::https::Verify-Peer=fal''se'",
+    'Acquire::https::Verify-"Peer"=false',
+    'Acquire::https::Verify-Peer=fal\\se',
+  ])('rejects literal shell spellings that disable TLS: %s', (word) => {
+    expect(execFileSync('/bin/sh', ['-c', `set -- ${word}; printf '%s' "$1"`], { encoding: 'utf8' }))
+      .toBe('Acquire::https::Verify-Peer=false');
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, readFileSync(filePath, 'utf8')
+      + `RUN apt-get -o ${word} -o APT::Update::Error-Mode=any update\n`);
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath,
+      reason: 'Dockerfile may not disable APT repository authentication',
+    });
+  });
+
+  it.each([
+    'RUN apt-get -o Acquire::https::Verify-Peer=false update',
+    'RUN apt-get -o Acquire::https::Verify-Host=false update',
+    `RUN printf '%s\\n' 'Acquire::https::Verify-Peer "false";' > /tmp/apt.conf`,
+  ])('rejects TLS authentication bypasses: %s', (instruction) => {
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, readFileSync(filePath, 'utf8') + instruction + '\n');
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath,
+      reason: 'Dockerfile may not disable APT repository authentication',
+    });
+  });
+
+  it.each([
+    'RUN apt-get update --allow-insecure-repositories',
+    'RUN apt-get update --allow-weak-repositories',
+    'RUN apt-get install --allow-unauthenticated tini',
+    'RUN apt-get -o Acquire::AllowInsecureRepositories=true update',
+    'RUN apt-get -o Acquire::AllowWeakRepositories=true update',
+    'RUN apt-get -o Acquire::AllowDowngradeToInsecureRepositories=1 update',
+    'RUN apt-get -o APT::Get::AllowUnauthenticated=true install tini',
+    `RUN printf '%s\\n' 'Acquire::AllowInsecureRepositories "true";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf -o APT::Update::Error-Mode=any update`,
+    `RUN printf '%s\\n' 'Acquire::AllowWeakRepositories "yes";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf -o APT::Update::Error-Mode=any update`,
+    `RUN printf '%s\\n' 'Acquire::AllowDowngradeToInsecureRepositories "1";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf -o APT::Update::Error-Mode=any update`,
+    `RUN printf '%s\\n' 'APT::Get::AllowUnauthenticated "true";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf install tini`,
+    "RUN printf '%s\\n' 'deb [allow-weak=yes] http://example.invalid/debian bookworm main' > /tmp/source.list",
+  ])('rejects APT authentication bypasses: %s', (unsafeInstruction) => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}${unsafeInstruction}\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not disable APT repository authentication',
+    });
+  });
+
+  it('requires every APT index refresh to fail on any unavailable snapshot source', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      readFileSync(dockerfilePath, 'utf8').replace(
+        'apt-get -o APT::Update::Error-Mode=any update',
+        'apt-get update',
+      ),
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'every apt-get update must fail on any unavailable snapshot source',
+    });
+  });
+
+  it('rejects an additive mutable source even when the approved source lines remain', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN printf '%s\\n' 'deb https://deb.debian.org/debian bookworm main' >> /etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects approved source text that appears only in comments', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(dockerfilePath, [
+      `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
+      `# deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main`,
+      `# deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main`,
+      'RUN : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'), 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects approved source text in a continued shell comment', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(dockerfilePath, [
+      `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
+      'RUN \\',
+      `  # deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main \\`,
+      `  # deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main \\`,
+      '  : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'), 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects approved source text in a non-RUN Dockerfile instruction', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(dockerfilePath, [
+      `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
+      `LABEL source_one="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main"`,
+      `LABEL source_two="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main"`,
+      'RUN : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'), 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects a source descriptor reintroduced after clearing inherited descriptors', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN printf '%s\\n' 'deb https://deb.debian.org/debian bookworm main' > /etc/apt/sources.list.d/extra.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile does not fully clear inherited APT source descriptors',
+    });
+  });
+
+  it('rejects a later COPY that replaces the approved APT source file', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}COPY replacement.list /etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a later shell copy that replaces the approved APT source file', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN cp /tmp/replacement.list /etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a relative descriptor replacement after changing into /etc', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN cd /etc && cp /tmp/replacement.list apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a relative descriptor replacement from Dockerfile root', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN cp /tmp/replacement.list etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a relative ADD destination that can replace an APT descriptor', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ADD replacement.list etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a later ADD that can repopulate a cleared APT source directory', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ADD replacement.list /etc/apt/sources.list.d/replacement.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a working directory that makes relative APT source replacement possible', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}WORKDIR /etc/apt\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects environment and build-argument indirection to the APT descriptor root', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ENV APT_ROOT /etc\nARG APT_FALLBACK=/etc\nRUN cp /tmp/replacement.list "$APT_ROOT/apt/sources.list" && cp /tmp/replacement.list "$APT_FALLBACK/apt/sources.list"\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a root-prefix build argument composed into an APT descriptor path', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ARG ROOT=/\nRUN cp /tmp/replacement.list "\${ROOT}etc/apt/sources.list"\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
+  it('rejects split-token variables composed into an APT descriptor path', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ARG ROOT=/\nARG ETC=etc\nARG APT=apt\nRUN cp /tmp/replacement.list "\${ROOT}\${ETC}/\${APT}/sources.list"\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
+  it('rejects backtick command substitution in an active Dockerfile instruction', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN printf '%s\\n' \`unreviewed-command\` > /tmp/build-marker\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
+  it('rejects a variable-driven overwrite appended to the approved bootstrap', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    const dockerfile = readFileSync(dockerfilePath, 'utf8')
+      .replace(
+        "RUN printf '%s\\n' \\",
+        'ARG ROOT=/\\nARG APT_TARGET="\\${ROOT}etc/apt/sources.list"\\nRUN printf \'%s\\n\' \\\\',
+      )
+      .replace(
+        '&& rm -rf /etc/apt/sources.list.d/*',
+        '&& rm -rf /etc/apt/sources.list.d/* && cp /tmp/replacement.list "$APT_TARGET"',
+      );
+    writeFileSync(dockerfilePath, dockerfile, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
+  it('rejects a package snapshot whose immutable identifier is unavailable', () => {
+    const dir = makeFixture({
+      aptSnapshot: 'not-a-snapshot',
+      aptSource: 'unavailable',
+    });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: path.join(dir, 'docker/container-inputs.json'),
+      reason: 'APT snapshot must be a UTC timestamp in YYYYMMDDTHHMMSSZ form',
+    });
+  });
+
+  it('fails closed when requested snapshot release metadata cannot be retrieved', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({});
+    const binDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-curl-'));
+    const curlPath = path.join(binDir, 'curl');
+    writeFileSync(curlPath, '#!/bin/sh\nexit 22\n', 'utf8');
+    chmodSync(curlPath, 0o755);
+
+    run(['--verify-container-snapshot'], dir, { PATH: binDir });
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('APT snapshot release metadata is unavailable'),
+    );
+  });
+
+  it('requests direct snapshot metadata over HTTPS without following redirects or unbounded responses', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({});
+    const binDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-curl-'));
+    const capture = path.join(binDir, 'curl-args');
+    const curlPath = path.join(binDir, 'curl');
+    writeFileSync(curlPath, `#!${process.execPath}
+const args = process.argv.slice(2);
+const fs = require('node:fs');
+fs.appendFileSync(process.env.CURL_CAPTURE, 'CALL\\n' + args.join('\\n') + '\\n');
+if (args[args.indexOf('--header') + 1] !== 'X-Download-Directly: 1') {
+  process.stderr.write('curl: (47) Maximum (0) redirects followed\\n');
+  process.exit(47);
+}
+process.stdout.write('Origin: Debian\\nCodename: bookworm\\n');
+`, 'utf8');
+    chmodSync(curlPath, 0o755);
+
+    run(['--verify-container-snapshot'], dir, { PATH: binDir, CURL_CAPTURE: capture });
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).not.toHaveBeenCalled();
+    const calls = readFileSync(capture, 'utf8').split('CALL\n').slice(1);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      const args = call.trimEnd().split('\n');
+      expect(args[0]).toBe('--disable');
+      for (const [option, value] of [
+        ['--proto', '=https'], ['--proto-redir', '=https'],
+        ['--header', 'X-Download-Directly: 1'],
+        ['--max-redirs', '0'], ['--max-filesize', '1048576'], ['--max-time', '30'],
+      ]) {
+        expect(args.filter((arg) => arg === option)).toHaveLength(1);
+        expect(args[args.indexOf(option!) + 1]).toBe(value);
+      }
+      expect(args.at(-1)).toMatch(/^https:\/\/snapshot\.debian\.org\//);
+    }
+  });
+
+  it('refuses an oversized response even when curl does not enforce its size option', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({});
+    const binDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-curl-'));
+    const curlPath = path.join(binDir, 'curl');
+    writeFileSync(curlPath, `#!${process.execPath}\nprocess.stdout.write(Buffer.alloc(2 * 1024 * 1024, 65));\n`, 'utf8');
+    chmodSync(curlPath, 0o755);
+
+    run(['--verify-container-snapshot'], dir, { PATH: binDir });
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('APT snapshot release metadata is unavailable'),
+    );
   });
 
   it('flags a volta.node pinned to a non-canonical version', () => {
@@ -263,5 +975,18 @@ describe('sub-package engines align with root (#1082)', () => {
     expect(root).toBeTruthy();
     expect(enginesNode('console/package.json')).toBe(root);
     expect(enginesNode('tools/whatsoup_guard/package.json')).toBe(root);
+  });
+});
+
+it('refuses a policy fallback redirected to another GitHub repository', () => {
+  const root = makeFixture({});
+  const policyPath = path.join(root, 'docker/container-inputs.json');
+  const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
+  policy.sourceRepository = 'https://github.com/contributor/WhatSoup.git';
+  policy.builder.provenanceIdPrefix = 'https://github.com/contributor/WhatSoup/actions/runs/';
+  writeFileSync(policyPath, JSON.stringify(policy));
+  expect(findNodePinDrift({ cwd: root }).missing).toContainEqual({
+    source: 'docker/container-inputs.json', filePath: policyPath,
+    reason: 'invalid container input policy shape',
   });
 });

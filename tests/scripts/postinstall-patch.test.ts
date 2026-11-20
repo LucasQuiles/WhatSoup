@@ -136,7 +136,10 @@ describe('required dependency patch installation', () => {
 
   it('stages the patch entry point and Git before the Docker production install', () => {
     const dockerfile = readFileSync(path.join(repoRoot, 'docker/Dockerfile'), 'utf8');
-    const deps = dockerfile.split(/^FROM /m)[1]!;
+    const deps = dockerfile
+      .split(/(?=^FROM\s)/m)
+      .find((stage) => /^FROM\s+\S+\s+AS\s+deps\b/im.test(stage)) ?? '';
+    expect(deps).not.toBe('');
     const install = deps.indexOf('RUN npm ci --omit=dev');
     expect(install).toBeGreaterThan(0);
     const beforeInstall = deps.slice(0, install).replace(/\\\n/g, ' ');
