@@ -621,8 +621,16 @@ export async function buildHostUnitPlan(
   const unionLabels = new Set([...installedLabels, ...(inventory ?? []).map((entry) => entry.label)]);
   for (const label of unionLabels) {
     const retiredScript = RETIRED_JOBS.get(label);
-    if (retiredScript !== undefined) {
-      check(`retired:${label}`, false, `retired from the standard; boot the job out if it is loaded, then remove ${path.join(launchAgentsDir, `${label}.plist`)} and ${path.join(os.homedir(), retiredScript)}`);
+    // A configured instance owns its name: it is checked as an instance below, never as the retired job.
+    if (retiredScript !== undefined && !existsSync(path.join(configRoot(), label.slice('com.whatsoup.'.length), 'config.json'))) {
+      const canonicalPlist = path.join(launchAgentsDir, `${label}.plist`);
+      const isLoaded = inventory?.some((entry) => entry.label === label) === true;
+      // launchd may have loaded the job from another plist; that file is the one that can load it again.
+      const loadedFrom = isLoaded ? (await loadedJobDefinition(host, domain, label))?.path ?? null : null;
+      const present = (file: string): boolean => { try { lstatSync(file); return true; } catch { return false; } };
+      const remove = [...(loadedFrom !== null && loadedFrom !== canonicalPlist ? [loadedFrom] : []), ...[canonicalPlist, path.join(os.homedir(), retiredScript)].filter(present)];
+      const bootOut = !isLoaded ? '' : loadedFrom === null ? 'boot the job out, then ' : `boot the job out (loaded from ${loadedFrom}), then `;
+      check(`retired:${label}`, false, `retired from the standard; ${bootOut}remove ${remove.length > 0 ? remove.join(' and ') : canonicalPlist}`);
       continue;
     }
     // Each closed host auxiliary obtains its own exact loaded definition below:
