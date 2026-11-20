@@ -466,6 +466,37 @@ describe('release:activate-host group transaction', () => {
     ]);
   });
 
+  it.each([['present', true], ['gone', false]] as const)('names the plist a retired job was loaded from, the canonical plist when %s, and the script', async (_state, canonicalPresent) => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const script = path.join(world.home, '.local', 'bin', 'ms365-token-backup'); writeFileSync(script, '#!/bin/sh\n');
+    const elsewhere = path.join(world.root, 'elsewhere', `${label}.plist`); mkdirSync(path.dirname(elsewhere), { recursive: true });
+    writeFileSync(elsewhere, plist(label, [script], world.home));
+    const canonical = world.addJob(label, plist(label, [script], world.home));
+    if (!canonicalPresent) unlinkSync(canonical);
+    const fake = world.host.exec;
+    const loaded = `gui/501/${label} = {\n\tpath = ${elsewhere}\n\ttype = LaunchAgent\n\tprogram = ${script}\n\tstate = running\n\tpid = 4242\n\targuments = {\n\t\t${script}\n\t}\n}\n`;
+    world.host.exec = (file, args, options) => (file === '/bin/launchctl' && args[0] === 'print' && args[1] === `gui/501/${label}` ? Promise.resolve({ code: 0, stdout: loaded, stderr: '' }) : fake(file, args, options));
+    const plan = await planTwoMemberWorld(world);
+    const rows = (plan.document.preconditions as Array<{ id: string; ok: boolean; detail: string }>).filter((row) => row.id.endsWith(`:${label}`));
+    expect(rows.map((row) => [row.id, row.ok])).toEqual([[`retired:${label}`, false]]);
+    expect(rows[0]!.detail).toContain(`boot the job out (loaded from ${elsewhere})`);
+    expect(rows[0]!.detail).toContain(script);
+    expect(rows[0]!.detail.includes(canonical)).toBe(canonicalPresent);
+  });
+
+  it('checks a configured instance that owns the retired name as an instance, never as the retired job', async () => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const config = path.join(world.home, '.config', 'whatsoup', 'instances', 'ms365-token-backup'); mkdirSync(config, { recursive: true });
+    writeFileSync(path.join(config, 'config.json'), JSON.stringify({ healthPort: 19003 }));
+    writeFileSync(path.join(world.launchAgents, `${label}.plist`), plist(label, [world.link, 'ms365-token-backup'], world.oldRelease));
+    const plan = await planTwoMemberWorld(world);
+    const ids = (plan.document.preconditions as Array<{ id: string }>).map((row) => row.id).filter((id) => id.endsWith(`:${label}`));
+    expect(ids).not.toContain(`retired:${label}`);
+    expect(ids).toContain(`loaded:${label}`);
+  });
+
   it('refuses an external-label installed consumer of a member old release before any mutation', async () => {
     const world = twoMemberWorld();
     writeFileSync(path.join(world.launchAgents, 'com.bot-errors.health.plist'), plist('com.bot-errors.health', ['/bin/bash', `${world.oldRelease}/deploy/scripts/health-reader.sh`], world.oldRelease));
