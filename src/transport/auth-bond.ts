@@ -1349,7 +1349,7 @@ export class AuthBondGuard {
       rmSync(tmp, { recursive: true, force: true });
       mkdirSync(tmp, { recursive: true, mode: 0o700 });
       const copiedAuthDir = join(tmp, 'auth');
-      await this.captureSteps(run, 'copy', copyPrivateTreeSteps(this.authDir, copiedAuthDir));
+      await this.captureSteps(run, 'copy', copyPrivateTreeSteps(this.authDir, copiedAuthDir, { skipVanished: true }));
       const copiedAuthError = await this.captureSteps(
         run,
         'validate',
@@ -1752,6 +1752,7 @@ export class AuthBondGuard {
       } else {
         forceEnsurePrivateDirectorySync(dirname(this.authDir), 'auth parent directory');
       }
+      // Strict: a backup entry that vanishes mid-copy throws, and the catch below rolls back.
       copyPrivateTree(source, tmp);
       const copiedAuthError = this.validateAuthTreeAgainstBackupManifest(tmp, latestBackupPath!, latest, 'copied');
       if (copiedAuthError) throw new Error(copiedAuthError);

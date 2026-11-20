@@ -412,15 +412,24 @@ export function inspectAuthTree(authDir: string): AuthTreeObservation | null {
  * The same pre-order, readdir-order traversal and the same fs calls per entry
  * as the recursive copy it replaces, kept on an explicit stack so it can yield.
  *
- * An entry that vanishes between its listing and its lstat or copy (a consumed
- * pre-key Baileys unlinks, a creds saver's temp file renamed away) is skipped,
- * as removeTreeSteps skips one. Skipping cannot publish a partial tree: the
- * caller validates the copy against the full pre-copy digest, so the copy fails
- * that check with `copied auth tree hash mismatch`, and a change with the same
- * identity defers. Restore validates its copy against the backup manifest the
- * same way.
+ * Strict by default: an entry that vanishes between its listing and its lstat,
+ * readdir or copy throws, as the recursive copy did. Restore copies this way.
+ * Its validation compares the whole tree only when the backup manifest records
+ * a treeHash, so a skipped backup entry could install a shorter tree; the
+ * throw makes restore roll back instead.
+ *
+ * With `skipVanished`, the capture's copy skips such an entry (a consumed
+ * pre-key Baileys unlinks, a creds saver's temp file renamed away), as
+ * removeTreeSteps skips one. Skipping cannot publish a partial tree: the
+ * capture validates its copy against the full pre-copy digest, so the copy
+ * fails that check with `copied auth tree hash mismatch`, and a change with
+ * the same identity defers.
  */
-export function* copyPrivateTreeSteps(src: string, dst: string): AuthTreeSteps<void> {
+export function* copyPrivateTreeSteps(
+  src: string,
+  dst: string,
+  { skipVanished }: { readonly skipVanished: boolean } = { skipVanished: false },
+): AuthTreeSteps<void> {
   const stack: Array<readonly [string, string]> = [[src, dst]];
   while (stack.length > 0) {
     yield WRITE_ENTRY_UNITS;
@@ -429,7 +438,7 @@ export function* copyPrivateTreeSteps(src: string, dst: string): AuthTreeSteps<v
     try {
       st = lstatSync(from);
     } catch (err) {
-      if (isVanishedEntry(err)) continue;
+      if (skipVanished && isVanishedEntry(err)) continue;
       throw err;
     }
     if (st.isDirectory()) {
@@ -439,7 +448,7 @@ export function* copyPrivateTreeSteps(src: string, dst: string): AuthTreeSteps<v
       try {
         entries = readdirSync(from).filter(entry => entry !== '.DS_Store');
       } catch (err) {
-        if (isVanishedEntry(err)) continue;
+        if (skipVanished && isVanishedEntry(err)) continue;
         throw err;
       }
       for (let i = entries.length - 1; i >= 0; i -= 1) {
@@ -453,13 +462,14 @@ export function* copyPrivateTreeSteps(src: string, dst: string): AuthTreeSteps<v
     try {
       copyFileSync(from, to);
     } catch (err) {
-      if (isVanishedEntry(err)) continue;
+      if (skipVanished && isVanishedEntry(err)) continue;
       throw err;
     }
     chmodSync(to, 0o600);
   }
 }
 
+/** Restore's copy, drained in one turn. Strict: a backup entry that vanishes mid-copy throws. */
 export function copyPrivateTree(src: string, dst: string): void {
   drainSync(copyPrivateTreeSteps(src, dst));
 }
