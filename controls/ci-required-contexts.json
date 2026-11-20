@@ -13,6 +13,12 @@
       "source": "github-actions",
       "workflow": "Quality",
       "description": "Compatibility quality suite on Node 25.x."
+    },
+    {
+      "name": "gitleaks",
+      "source": "github-actions",
+      "workflow": "Quality",
+      "description": "Secret scan of the change range with the pinned gitleaks release; the log shows a finding count only."
     }
   ],
   "failurePolicy": {
