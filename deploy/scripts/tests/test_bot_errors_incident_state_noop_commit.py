@@ -32,14 +32,23 @@ import pytest
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
 _SCRIPT = _SCRIPTS / "bot-errors-dispatcher.py"
+_TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS))
 sys.path.insert(0, str(_SCRIPTS / "lib"))
+sys.path.insert(0, str(_TESTS_DIR))
 
 from lib import controller_state as cs  # noqa: E402
+from support import dispatcher_fixtures  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_noop_commit", _SCRIPT)
 disp = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
 spec.loader.exec_module(disp)  # type: ignore[union-attr]
+
+
+@pytest.fixture(autouse=True)
+def _test_incident_authority(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    for key, value in dispatcher_fixtures.incident_authority_test_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
 
 
 class CountingOps(cs._RealFileOps):
@@ -380,7 +389,11 @@ def quiet_held_incident(adopted, monkeypatch):
     }.items():
         monkeypatch.setattr(disp, name, value)
     sends = []
-    monkeypatch.setattr(disp, "send_whatsapp", sends.append)
+    monkeypatch.setattr(
+        disp,
+        "send_whatsapp",
+        lambda text, *_args, **_kwargs: sends.append(text),
+    )
     key = "host-a|bot-errors-health|daily-health-fail:instance-x"
     with _dispatcher_session(adopted) as session:
         loaded = session.load()
