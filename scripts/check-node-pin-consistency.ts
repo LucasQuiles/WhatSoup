@@ -591,8 +591,9 @@ function verifyContainerSnapshotAvailability(
         '1048576',
         '--max-time',
         '30',
-        // Transient failures retry twice; no retry starts after 60 s, so one request ends within about
-        // 30 + 5 + 30 s. Every failure, including an exhausted retry, still fails the check.
+        // Transient failures retry twice and no retry starts after 60 s, but a retry that starts just
+        // before 60 s may run its full 30 s, so the parent timeout below is the bound for one request.
+        // Every failure, including an exhausted retry or that timeout, still fails the check.
         '--retry',
         '2',
         '--retry-delay',

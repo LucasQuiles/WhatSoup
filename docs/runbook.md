@@ -3786,10 +3786,11 @@ Snapshot availability probes disable curl configuration, require HTTPS without r
 and request `X-Download-Directly: 1` so Debian serves the pinned Release file without its
 normal redirect to the content-addressed file URL. Probes limit each response to 1 MiB
 with an independent parent-process output limit. Each curl attempt has a 30-second deadline.
-A transient failure (timeout, refused connection, HTTP 408, 429 or 5xx) is retried at most twice,
-5 seconds apart, and no retry starts after 60 seconds, so one request ends within about 65 seconds;
-the parent stops it after 75. The two requests run one after the other, so the probe step takes at
-most about 2.5 minutes. Both APT stages set `Acquire::Retries=3`; their retries stay inside the
+A transient failure (curl's transient set: a timeout or HTTP 408, 429, 500, 502, 503 or 504, plus
+a refused connection) is retried at most twice, 5 seconds apart, and no retry starts after
+60 seconds. A retry that starts just before 60 seconds can still run its full 30 seconds, so the
+parent's 75-second limit, not curl, bounds one request. The two requests run one after the other,
+so the probe step takes at most about 2.5 minutes. Both APT stages set `Acquire::Retries=3`; their retries stay inside the
 container build step's 10-minute bound. An exhausted retry fails the check like any other failure.
 
 The authority job has a 100-minute deadline: 45 minutes for coverage, 10 for the container,
