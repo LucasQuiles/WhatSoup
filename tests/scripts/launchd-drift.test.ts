@@ -827,6 +827,34 @@ describe('retired surfaces', () => {
     expect(result.stdout).not.toContain('all managed launchd surfaces match');
   });
 
+  it('never opens a retired plist in the maintenance or collector scans', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`), 'not a plist; runs bot_errors_j1_collector\n');
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`retired: ${RETIRED_STEM} plist is installed`);
+    expect(result.stdout).toContain('ok: harness-maintenance');
+    expect(result.stdout).not.toContain('unmanaged collector job');
+  });
+
+  it('checks a retired name that a configured instance owns as that instance', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const config = join(f.home, '.config/whatsoup/instances', RETIRED_STEM);
+    mkdirSync(config, { recursive: true });
+    writeFileSync(join(config, 'config.json'), '{}\n');
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`), plistXml(`com.whatsoup.${RETIRED_STEM}`, '/usr/local/bin/node', true));
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}-watchdog.plist`), subst(WATCHDOG_TEMPLATE, f.repo, f.home, RETIRED_STEM));
+    writeFileSync(join(f.bin, `${RETIRED_STEM}-watchdog`), '#!/usr/bin/env bash\necho ok\n');
+    chmodSync(join(f.bin, `${RETIRED_STEM}-watchdog`), 0o755);
+    const result = run(f, [], { XDG_CONFIG_HOME: join(f.home, '.config') });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`ok: ${RETIRED_STEM} plist structural`);
+    expect(result.stdout + result.stderr).not.toContain('retired:');
+    expect(result.stdout + result.stderr).not.toContain(FAKE_SECRET);
+  });
+
   it('says nothing about a retired job the host does not have', () => {
     const f = makeFixture();
     installAllOk(f);
