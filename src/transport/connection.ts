@@ -654,6 +654,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private churnHeldUntilMonotonicMs: number | null = null;
   private lastDisconnectDiagnostic: unknown | null = null;
   private loggedOutAlertEmitted = false;
+  /**
+   * The close handler decided this connection is logged out (its exit branch),
+   * whether or not the alert enqueue then succeeded. The capture block reads
+   * this, so a refused or throwing enqueue cannot let a capture publish after
+   * a terminal logout. Reset at open, with loggedOutAlertEmitted.
+   */
+  private terminalLogoutDecided = false;
   private unclassified401ReconnectSpent = false;
   // Process-local by design: a restart begins with no decision and a fresh
   // bounded retry. Persisting it would let a stale park outlive a relink.
@@ -691,7 +698,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     stateRoot: config.stateRoot,
     instanceName: config.botName,
     autoRestore: config.authBondAutoRestore,
-    captureBlockReason: () => this.loggedOutAlertEmitted
+    captureBlockReason: () => (this.loggedOutAlertEmitted || this.terminalLogoutDecided)
       ? 'loggedOut/device-bond-lost state active; refusing to snapshot possibly poisoned credentials'
       : null,
     // Resolved when an event fires: `log` is declared below this field.
@@ -2461,6 +2468,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.lastStatusCode = null;
       this.lastDisconnectReason = null;
       this.loggedOutAlertEmitted = false;
+      this.terminalLogoutDecided = false;
       this.unclassified401ReconnectSpent = false;
       this.lastDisconnectDecision = null;
       this.lastReconnectReset = null;
@@ -2581,6 +2589,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }, 'WhatsApp connection closed');
 
       if (action.type === 'exit') {
+        // Before the alert send: the capture block must hold even if the
+        // enqueue returns false or throws.
+        this.terminalLogoutDecided = true;
         this.setConnectionState('disconnected');
         this.emitDeviceBondLostAlert(statusCode, reason, lastDisconnect, conflictType);
         this.persistConnectionRuntimeState('disconnect_exit_logged_out');
@@ -2809,8 +2820,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // flight and a read that did not finish — so the reason is carried in
       // `error` rather than asserted by this line.
       this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred');
-      // Owed, not dropped: a settled snapshot asks again.
-      this.scheduleSettledAuthBondSnapshot('auth-bond-capture-deferred');
+      // Owed, not dropped: a settled snapshot asks again. Its schedule record
+      // is built from this run's result snapshot, which carries the current
+      // backup half, instead of a new synchronous walk.
+      this.scheduleSettledAuthBondSnapshot('auth-bond-capture-deferred', result.snapshot);
     } else {
       this.lastAuthSnapshotFailedAt = Date.now();
       this.authSnapshotFailureCount += 1;
@@ -2940,7 +2953,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     ].some(eventName => events[eventName] !== undefined);
   }
 
-  private scheduleSettledAuthBondSnapshot(reason: string): void {
+  /**
+   * `resultSnapshot` is passed only by the deferred re-arm, whose run has just
+   * read the tree; every other caller pays a synchronous inspect() for the
+   * schedule record, as on main.
+   */
+  private scheduleSettledAuthBondSnapshot(reason: string, resultSnapshot?: AuthBondSnapshot): void {
     // Deliberately does NOT invalidate the auth-bond tree cache. Five of this
     // method's seven call sites are 'outbound-send-settled', which fires per
     // send and does not change key material.
@@ -2960,7 +2978,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (this.connectionState !== 'connected' || !this.sock) return;
 
     this.recordCredentialLifecycle('auth_snapshot_scheduled', {
-      authBond: this.authBond.inspect(),
+      authBond: resultSnapshot ?? this.authBond.inspect(),
       note: reason,
     });
 

@@ -48,7 +48,9 @@ export type { AuthBondFileSnapshot } from './auth-bond-files.ts';
  * of corruption") and must not be collapsed into it: 'invalid' de-links the
  * message scheduler (src/core/scheduler.ts:478-479) and would hold scheduled
  * sends on an instance whose credentials are fine. inspect() walks live and
- * never returns 'unknown'.
+ * never returns 'unknown'. The one other source is a capture's last-resort
+ * failure result (unreadCaptureResult), which reads nothing and so has no
+ * evidence either.
  */
 export type AuthBondStatus = 'present' | 'missing' | 'invalid' | 'unknown';
 
@@ -329,6 +331,10 @@ interface CaptureRun {
   slices: number;
   maxSliceMs: number;
   sliceStartedAtMs: number;
+  /** Units spent in the current slice; the run's one budget (AUTH_TREE_SLICE_UNITS). */
+  sliceUnits: number;
+  /** The latest attempt ended in an incomplete-read deferral. Reset at each attempt's start. */
+  incompleteRead: boolean;
   readonly phaseMs: AuthBondCapturePhaseMs;
   fileCount: number | null;
   totalBytes: number | null;
@@ -388,6 +394,25 @@ const DEFAULT_KEEP_BACKUPS = 96;
 const DEFAULT_MAX_HISTORY_FILES = 100_000;
 const DEFAULT_CAPTURE_ATTEMPTS = 3;
 const DEFAULT_CAPTURE_RETRY_DELAY_MS = 75;
+/**
+ * Consecutive runs that may end deferred on an incomplete read; the next such
+ * run fails and pages.
+ *
+ * An incomplete read (an entry vanished between the walk's listing and its
+ * read) defers, because a sliced capture lets routine Baileys unlinks and creds
+ * saves land inside its walk. Deferring without limit would hide a tree that
+ * never reads completely, which main paged at once. Counted in runs, not
+ * attempts; any run that ends otherwise resets the count. Each deferred run
+ * re-arms the settled snapshot, whose 5-minute floor spaces the runs, so a
+ * persistent fault pages about half an hour after the first incomplete read.
+ */
+const INCOMPLETE_READ_DEFERRED_RUNS = 6;
+const INCOMPLETE_READ_DEFERRAL =
+  'auth bond auth tree read was incomplete; capture deferred until a complete read';
+const INCOMPLETE_READ_BOUND_FAILURE = [
+  `auth bond auth tree read was incomplete in ${INCOMPLETE_READ_DEFERRED_RUNS + 1} consecutive runs;`,
+  'an entry kept vanishing between its listing and its read',
+].join(' ');
 /**
  * How long inspectCached() may serve a tree walk before starting another.
  *
@@ -526,7 +551,7 @@ export interface AuthTreeObservation {
 }
 
 /**
- * Entries processed between yields.
+ * Units one slice may hold between two yields.
  *
  * The tree walks exist in exactly one implementation each, written as
  * generators, because two of the properties they carry are load-bearing and
@@ -535,13 +560,28 @@ export interface AuthTreeObservation {
  * baseline) and the `complete: false` fail-closed rule. Driving the same
  * generator two ways makes divergence impossible rather than merely tested for.
  *
+ * Each generator yields the units of its next entry BEFORE doing that entry,
+ * and the driver decides whether the entry still fits in the current slice. The
+ * generators keep no counter of their own, so a driver that runs several of
+ * them (a capture run does) holds one budget across all of them, and a phase
+ * boundary never restarts the count.
+ *
  * 64 keeps a slice at roughly a millisecond for Baileys key files, so a
  * yielding drive of the 17,680-file `personal` tree never holds the loop for
- * anything close to the 250 ms starvation threshold.
+ * anything close to the 250 ms starvation threshold. A slice holds 64 walk
+ * entries, 16 copy or delete entries, or a mix of the two.
  */
-const AUTH_TREE_YIELD_EVERY = 64;
+const AUTH_TREE_SLICE_UNITS = 64;
+/** One walk entry: an lstat, plus a readdir for a folder or a read in the digest pass. */
+const WALK_ENTRY_UNITS = 1;
+/**
+ * One copy or delete entry. These write: at an estimated 100 to 250 µs per
+ * copied file, four walk entries' worth keeps a slice at a few milliseconds.
+ */
+const WRITE_ENTRY_UNITS = 4;
 
-type AuthTreeSteps<T> = Generator<void, T, void>;
+/** Yields the units of each next entry; see AUTH_TREE_SLICE_UNITS. */
+type AuthTreeSteps<T> = Generator<number, T, void>;
 
 /** Run a walk to completion inline. Behaviour identical to the pre-generator code. */
 function drainSync<T>(steps: AuthTreeSteps<T>): T {
@@ -560,10 +600,16 @@ function drainSync<T>(steps: AuthTreeSteps<T>): T {
  * refresh without paying for any of it.
  */
 async function drainYielding<T>(steps: AuthTreeSteps<T>): Promise<T> {
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  let units = 0;
   for (;;) {
-    await new Promise<void>((resolve) => { setImmediate(resolve); });
     const step = steps.next();
     if (step.done) return step.value;
+    if (units + step.value > AUTH_TREE_SLICE_UNITS) {
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      units = 0;
+    }
+    units += step.value;
   }
 }
 
@@ -578,9 +624,8 @@ function* walkAuthFilesSteps(root: string): AuthTreeSteps<{ paths: string[]; com
   const out: string[] = [];
   const stack = [root];
   let complete = true;
-  let sinceYield = 0;
   while (stack.length > 0) {
-    if (++sinceYield >= AUTH_TREE_YIELD_EVERY) { sinceYield = 0; yield; }
+    yield WALK_ENTRY_UNITS;
     const current = stack.pop()!;
     let st;
     try {
@@ -641,15 +686,22 @@ function walkAuthFiles(root: string): { paths: string[]; complete: boolean } {
  * capture path skips on a missing treeHash), whereas the pre-fix throw escaped
  * inspect() on a `void`-ed async path and shut the instance down.
  */
-function* inspectAuthTreeSteps(authDir: string): AuthTreeSteps<AuthTreeObservation | null> {
+function* inspectAuthTreeSteps(
+  authDir: string,
+  read?: { incomplete: boolean },
+): AuthTreeSteps<AuthTreeObservation | null> {
   if (!existsSync(authDir)) return null;
   const { paths, complete } = yield* walkAuthFilesSteps(authDir);
-  if (!complete) return null;
+  if (!complete) {
+    // `read` tells a capture that an entry vanished, which it defers, from a
+    // root that was absent, which it does not.
+    if (read) read.incomplete = true;
+    return null;
+  }
   const hasher = createHash('sha256');
   let totalBytes = 0;
-  let sinceYield = 0;
   for (const path of paths) {
-    if (++sinceYield >= AUTH_TREE_YIELD_EVERY) { sinceYield = 0; yield; }
+    yield WALK_ENTRY_UNITS;
     const rel = relative(authDir, path);
     // stat and read together: a file that survived the stat can still be
     // renamed away before the read, so both halves need the same allowance.
@@ -659,7 +711,10 @@ function* inspectAuthTreeSteps(authDir: string): AuthTreeSteps<AuthTreeObservati
       st = lstatSync(path);
       contents = readFileSync(path);
     } catch (err) {
-      if (isVanishedEntry(err)) return null;
+      if (isVanishedEntry(err)) {
+        if (read) read.incomplete = true;
+        return null;
+      }
       throw err;
     }
     totalBytes += st.size;
@@ -683,30 +738,41 @@ function inspectAuthTree(authDir: string): AuthTreeObservation | null {
 }
 
 /**
- * Copy and delete operations between yields.
- *
- * Lower than AUTH_TREE_YIELD_EVERY because these write: at an estimated 100 to
- * 250 µs per copied file, 16 keeps a slice at a few milliseconds.
- */
-const AUTH_TREE_WRITE_YIELD_EVERY = 16;
-
-/**
  * Copy the auth tree, as slices.
  *
  * The same pre-order, readdir-order traversal and the same fs calls per entry
  * as the recursive copy it replaces, kept on an explicit stack so it can yield.
+ *
+ * An entry that vanishes between its listing and its lstat or copy (a consumed
+ * pre-key Baileys unlinks, a creds saver's temp file renamed away) is skipped,
+ * as removeTreeSteps skips one. Skipping cannot publish a partial tree: the
+ * caller validates the copy against the full pre-copy digest, so the copy fails
+ * that check with `copied auth tree hash mismatch`, and a change with the same
+ * identity defers. Restore validates its copy against the backup manifest the
+ * same way.
  */
 function* copyPrivateTreeSteps(src: string, dst: string): AuthTreeSteps<void> {
   const stack: Array<readonly [string, string]> = [[src, dst]];
-  let sinceYield = 0;
   while (stack.length > 0) {
-    if (++sinceYield >= AUTH_TREE_WRITE_YIELD_EVERY) { sinceYield = 0; yield; }
+    yield WRITE_ENTRY_UNITS;
     const [from, to] = stack.pop()!;
-    const st = lstatSync(from);
+    let st;
+    try {
+      st = lstatSync(from);
+    } catch (err) {
+      if (isVanishedEntry(err)) continue;
+      throw err;
+    }
     if (st.isDirectory()) {
       mkdirSync(to, { recursive: true, mode: 0o700 });
       chmodSync(to, 0o700);
-      const entries = readdirSync(from).filter(entry => entry !== '.DS_Store');
+      let entries: string[];
+      try {
+        entries = readdirSync(from).filter(entry => entry !== '.DS_Store');
+      } catch (err) {
+        if (isVanishedEntry(err)) continue;
+        throw err;
+      }
       for (let i = entries.length - 1; i >= 0; i -= 1) {
         stack.push([join(from, entries[i]), join(to, entries[i])]);
       }
@@ -715,7 +781,12 @@ function* copyPrivateTreeSteps(src: string, dst: string): AuthTreeSteps<void> {
     if (st.isSymbolicLink()) {
       throw privateWriteError(`refusing to copy auth tree containing symlink: ${from}`, 'ELOOP');
     }
-    copyFileSync(from, to);
+    try {
+      copyFileSync(from, to);
+    } catch (err) {
+      if (isVanishedEntry(err)) continue;
+      throw err;
+    }
     chmodSync(to, 0o600);
   }
 }
@@ -730,9 +801,9 @@ function copyPrivateTree(src: string, dst: string): void {
  */
 function* removeTreeSteps(root: string): AuthTreeSteps<void> {
   const pending: Array<{ path: string; expanded: boolean }> = [{ path: root, expanded: false }];
-  let sinceYield = 0;
   while (pending.length > 0) {
-    if (++sinceYield >= AUTH_TREE_WRITE_YIELD_EVERY) { sinceYield = 0; yield; }
+    // Each step is priced as a delete entry, a folder's expansion included.
+    yield WRITE_ENTRY_UNITS;
     const top = pending[pending.length - 1];
     if (!top.expanded) {
       let st;
@@ -764,9 +835,8 @@ function* hardenPrivateTreeSteps(root: string): AuthTreeSteps<string[]> {
   if (!existsSync(root)) return [];
   const issues: string[] = [];
   const stack = [root];
-  let sinceYield = 0;
   while (stack.length > 0) {
-    if (++sinceYield >= AUTH_TREE_YIELD_EVERY) { sinceYield = 0; yield; }
+    yield WALK_ENTRY_UNITS;
     const current = stack.pop()!;
     let st;
     try {
@@ -1029,6 +1099,15 @@ export class AuthBondGuard {
   /** Set by shutdownCaptures(); every later request is refused. */
   private capturesShutDown = false;
   private consecutiveCaptureDeferrals = 0;
+  /** Runs in a row that ended deferred on an incomplete read; see INCOMPLETE_READ_DEFERRED_RUNS. */
+  private consecutiveIncompleteReadRuns = 0;
+  /**
+   * Live capture snapshots whose tree read lost an entry between the walk's
+   * listing and its read. Such a snapshot is 'present' with no tree hash, and
+   * so is one whose auth root was absent at the walk; only the first is an
+   * incomplete read that defers. The second fails as before.
+   */
+  private readonly incompleteTreeReads = new WeakSet<AuthBondSnapshot>();
   /** The last settled run's result snapshot, carried by refused and aborted results. */
   private lastCaptureRunSnapshot: AuthBondSnapshot | null = null;
 
@@ -1498,8 +1577,11 @@ export class AuthBondGuard {
   private *liveSnapshotSteps(): AuthTreeSteps<AuthBondSnapshot> {
     const hardenIssues = yield* hardenPrivateTreeSteps(this.authDir);
     const head = this.snapshotHead(hardenIssues);
-    const tree = head.status === 'present' ? yield* inspectAuthTreeSteps(this.authDir) : null;
-    return this.snapshotTail(head, tree);
+    const read = { incomplete: false };
+    const tree = head.status === 'present' ? yield* inspectAuthTreeSteps(this.authDir, read) : null;
+    const snapshot = this.snapshotTail(head, tree);
+    if (read.incomplete) this.incompleteTreeReads.add(snapshot);
+    return snapshot;
   }
 
   /**
@@ -1755,6 +1837,8 @@ export class AuthBondGuard {
       slices: 0,
       maxSliceMs: 0,
       sliceStartedAtMs: startedAtMs,
+      sliceUnits: 0,
+      incompleteRead: false,
       phaseMs: { inspect: 0, sweep: 0, copy: 0, validate: 0, publish: 0, prune: 0 },
       fileCount: null,
       totalBytes: null,
@@ -1771,18 +1855,31 @@ export class AuthBondGuard {
     try {
       result = await this.runCaptureAttempts(run);
     } catch (err) {
-      // Never rejects: an abort becomes an aborted result, and any other throw
-      // (a walk, cleanup, captureYield or captureSleep) a failed one.
-      result = err instanceof CaptureAbortedError
-        ? this.abortedCaptureResult(run, err.abortCause)
-        : this.thrownCaptureResult(run, err);
+      result = this.caughtCaptureResult(run, err);
     }
     this.finishCaptureRun(run, result);
+  }
+
+  /**
+   * Never rejects: an abort becomes an aborted result, and any other throw (a
+   * walk, cleanup, captureYield or captureSleep) a failed one. If building that
+   * result throws as well, the run still settles, with a result that reads
+   * nothing from disk.
+   */
+  private caughtCaptureResult(run: CaptureRun, err: unknown): AuthBondCaptureResult {
+    try {
+      return err instanceof CaptureAbortedError
+        ? this.abortedCaptureResult(run, err.abortCause)
+        : this.thrownCaptureResult(run, err);
+    } catch (resultErr) {
+      return this.unreadCaptureResult(run, err, resultErr);
+    }
   }
 
   private async runCaptureAttempts(run: CaptureRun): Promise<AuthBondCaptureResult> {
     for (let attempt = 1; ; attempt += 1) {
       run.attempts = attempt;
+      run.incompleteRead = false;
       // Every attempt, the first included, starts after a yield, so no capture
       // work runs on the caller's turn. The retry delay is an awaited
       // captureSleep; a delay of 0 is only this yield.
@@ -1790,42 +1887,62 @@ export class AuthBondGuard {
       const result = await this.captureAttempt(run);
       if (result.ok || !result.deferred || attempt >= this.captureAttempts) return result;
       if (this.captureRetryDelayMs > 0) {
+        // The sleep is not slice time. Close the attempt's last slice before
+        // it; raceCaptureWake starts the next slice when the sleep ends.
+        this.closeCaptureSlice(run);
         await this.raceCaptureWake(run, this.captureSleep(this.captureRetryDelayMs));
       }
     }
   }
 
   private finishCaptureRun(run: CaptureRun, result: AuthBondCaptureResult): void {
-    const outcome = captureOutcome(result);
-    if (outcome === 'deferred') this.consecutiveCaptureDeferrals += 1;
-    else if (outcome === 'captured' || outcome === 'unchanged') this.consecutiveCaptureDeferrals = 0;
-    this.lastCaptureRunSnapshot = result.snapshot;
-    this.activeCapture = null;
-    const nowMs = this.monotonicNow();
-    const { phaseMs } = run;
-    this.emitCaptureEvent({
-      kind: 'finished',
-      run: run.run,
-      reason: run.reason,
-      outcome,
-      elapsedMs: wholeMs(nowMs - run.startedAtMs),
-      attempts: run.attempts,
-      slices: run.slices,
-      maxSliceMs: wholeMs(Math.max(run.maxSliceMs, nowMs - run.sliceStartedAtMs)),
-      phaseMs: {
-        inspect: wholeMs(phaseMs.inspect),
-        sweep: wholeMs(phaseMs.sweep),
-        copy: wholeMs(phaseMs.copy),
-        validate: wholeMs(phaseMs.validate),
-        publish: wholeMs(phaseMs.publish),
-        prune: wholeMs(phaseMs.prune),
-      },
-      fileCount: run.fileCount,
-      totalBytes: run.totalBytes,
-      error: result.error,
-      consecutiveDeferrals: this.consecutiveCaptureDeferrals,
-    });
-    run.settle(result);
+    let nowMs = run.sliceStartedAtMs;
+    try {
+      nowMs = this.monotonicNow();
+      const outcome = captureOutcome(result);
+      if (outcome === 'deferred') this.consecutiveCaptureDeferrals += 1;
+      else if (outcome === 'captured' || outcome === 'unchanged') this.consecutiveCaptureDeferrals = 0;
+      // Runs, not attempts: only the run's final attempt sets the flag, and any
+      // other ending, the bound's own failure included, starts the count over.
+      this.consecutiveIncompleteReadRuns = outcome === 'deferred' && run.incompleteRead
+        ? this.consecutiveIncompleteReadRuns + 1
+        : 0;
+      this.lastCaptureRunSnapshot = result.snapshot;
+      const { phaseMs } = run;
+      this.emitCaptureEvent({
+        kind: 'finished',
+        run: run.run,
+        reason: run.reason,
+        outcome,
+        elapsedMs: wholeMs(nowMs - run.startedAtMs),
+        attempts: run.attempts,
+        slices: run.slices,
+        maxSliceMs: wholeMs(Math.max(run.maxSliceMs, nowMs - run.sliceStartedAtMs)),
+        phaseMs: {
+          inspect: wholeMs(phaseMs.inspect),
+          sweep: wholeMs(phaseMs.sweep),
+          copy: wholeMs(phaseMs.copy),
+          validate: wholeMs(phaseMs.validate),
+          publish: wholeMs(phaseMs.publish),
+          prune: wholeMs(phaseMs.prune),
+        },
+        fileCount: run.fileCount,
+        totalBytes: run.totalBytes,
+        error: result.error,
+        consecutiveDeferrals: this.consecutiveCaptureDeferrals,
+      });
+    } finally {
+      // Whatever the bookkeeping above did: a run that never settles strands
+      // every caller and makes shutdownCaptures() wait forever, and so would a
+      // trailing run that never starts.
+      this.activeCapture = null;
+      run.settle(result);
+      this.startTrailingCapture(nowMs);
+    }
+  }
+
+  /** Start the folded requests' run once the active run has settled, or refuse it after shutdown. */
+  private startTrailingCapture(nowMs: number): void {
     const trailing = this.trailingCapture;
     if (trailing === null) return;
     this.trailingCapture = null;
@@ -1850,18 +1967,35 @@ export class AuthBondGuard {
     }
   }
 
-  /** Hand the loop back once: one slice, and a throw if an abort woke the run. */
+  /**
+   * Hand the loop back once: one slice, and a throw if an abort woke the run.
+   * captureYield is called here and nowhere else, once per boundary, in the
+   * boundary's own synchronous turn.
+   */
   private async captureSliceBoundary(run: CaptureRun): Promise<void> {
-    run.maxSliceMs = Math.max(run.maxSliceMs, this.monotonicNow() - run.sliceStartedAtMs);
+    this.closeCaptureSlice(run);
     this.throwIfCaptureWoken(run);
     run.slices += 1;
+    run.sliceUnits = 0;
     await this.raceCaptureWake(run, this.captureYield());
-    run.sliceStartedAtMs = this.monotonicNow();
   }
 
-  /** Every await in a run goes through here, so an abort ends it on a microtask. */
+  /** Charge the synchronous work since the slice started to maxSliceMs. */
+  private closeCaptureSlice(run: CaptureRun): void {
+    run.maxSliceMs = Math.max(run.maxSliceMs, this.monotonicNow() - run.sliceStartedAtMs);
+  }
+
+  /**
+   * Every await in a run goes through here, so an abort ends it on a microtask.
+   * The next slice starts when the await ends, however it ends: time parked in
+   * a yield, a sleep or a wake is not slice time.
+   */
   private async raceCaptureWake(run: CaptureRun, work: Promise<void>): Promise<void> {
-    await Promise.race([work, run.wake]);
+    try {
+      await Promise.race([work, run.wake]);
+    } finally {
+      run.sliceStartedAtMs = this.monotonicNow();
+    }
     this.throwIfCaptureWoken(run);
   }
 
@@ -1869,7 +2003,16 @@ export class AuthBondGuard {
     if (run.woken) throw new CaptureAbortedError(run.abortCause ?? 'shutdown');
   }
 
-  /** Drive one tree operation as slices, charging its wall time, yields included, to one phase. */
+  /**
+   * Drive one tree operation as slices, charging its wall time, yields included,
+   * to one phase.
+   *
+   * The run's one yield decision. Every generator a run drives (the walks, the
+   * sweep, the copy, the validation, the cleanup and the prune) comes through
+   * here and yields the units of each next entry before doing it. The budget is
+   * the run's, not this call's, so neither a phase boundary nor the next orphan
+   * or history entry restarts the count; only a boundary does.
+   */
   private async captureSteps<T>(
     run: CaptureRun,
     phase: keyof AuthBondCapturePhaseMs,
@@ -1880,7 +2023,8 @@ export class AuthBondGuard {
       for (;;) {
         const step = steps.next();
         if (step.done) return step.value;
-        await this.captureSliceBoundary(run);
+        if (run.sliceUnits + step.value > AUTH_TREE_SLICE_UNITS) await this.captureSliceBoundary(run);
+        run.sliceUnits += step.value;
       }
     } finally {
       run.phaseMs[phase] += this.monotonicNow() - startedAtMs;
@@ -1917,9 +2061,13 @@ export class AuthBondGuard {
   }
 
   private abortedCaptureResult(run: CaptureRun, cause: CaptureAbortCause): AuthBondCaptureResult {
+    return this.abortedCaptureResultWith(this.snapshotWithoutWalk(run), cause);
+  }
+
+  private abortedCaptureResultWith(snapshot: AuthBondSnapshot, cause: CaptureAbortCause): AuthBondCaptureResult {
     return {
       ok: false,
-      snapshot: this.snapshotWithoutWalk(run),
+      snapshot,
       captured: false,
       deferred: false,
       aborted: true,
@@ -1938,6 +2086,47 @@ export class AuthBondGuard {
     return {
       ok: false,
       snapshot: this.withCurrentBackup(this.snapshotWithoutWalk(run)),
+      captured: false,
+      deferred: false,
+      path: null,
+      error: this.lastCaptureError,
+    };
+  }
+
+  /**
+   * The last-resort result, when building the aborted or failed one threw too.
+   *
+   * A latest.json whose backupPath is truthy but not a string passes the
+   * manifest's object check and then throws on every read of the backup half,
+   * the read that builds the failure result included. This result reads nothing
+   * from disk, so it cannot throw that way: its snapshot carries no tree data
+   * and status 'unknown' (no current evidence), and its backup half comes from
+   * the guard's own fields without reading latest.json. An abort stays an abort
+   * and leaves the guard's health fields alone; anything else is recorded as a
+   * failure, as thrownCaptureResult records one.
+   */
+  private unreadCaptureResult(run: CaptureRun, err: unknown, resultErr: unknown): AuthBondCaptureResult {
+    const unread: AuthBondFileSnapshot = {
+      path: this.authDir, exists: false, mode: null, size: null, mtime: null, sha256: null, error: null,
+    };
+    const snapshotFor = (): AuthBondSnapshot => ({
+      status: 'unknown',
+      authDir: unread,
+      creds: { ...unread, path: join(this.authDir, 'creds.json') },
+      meHash: null,
+      treeHash: null,
+      fileCount: null,
+      totalBytes: null,
+      backup: this.backupHalf(null, null),
+      issues: ['auth_bond_capture_result_unread'],
+    });
+    if (err instanceof CaptureAbortedError) return this.abortedCaptureResultWith(snapshotFor(), err.abortCause);
+    this.lastCaptureAt = this.now().toISOString();
+    this.lastCaptureReason = run.reason;
+    this.lastCaptureError = `${errorMessage(err)}; failure result unreadable: ${errorMessage(resultErr)}`;
+    return {
+      ok: false,
+      snapshot: snapshotFor(),
       captured: false,
       deferred: false,
       path: null,
@@ -1996,6 +2185,12 @@ export class AuthBondGuard {
       if (hasTransientAuthReadIssue(snapshot.issues)) {
         return this.deferTransientCapture(reason, snapshot, await this.liveCaptureSnapshot(run));
       }
+      if (this.incompleteTreeReads.has(snapshot)) {
+        // 'present' with no tree hash because an entry vanished between the
+        // walk's listing and its read (#2285), which a sliced walk leaves room
+        // for. A root absent at the walk is not this case and still fails below.
+        return this.incompleteReadCaptureResult(run, await this.liveCaptureSnapshot(run));
+      }
       const freshAgeMs = this.freshInvalidCredentialAgeMs(snapshot);
       if (freshAgeMs !== null && freshAgeMs < this.freshInvalidGraceMs) {
         return this.deferFreshInvalidCapture(
@@ -2020,7 +2215,8 @@ export class AuthBondGuard {
     }
 
     let tmp: string | null = null;
-    let publishedTarget: string | null = null;
+    /** Set while the copy sits in history/ under a name latest.json does not give yet. */
+    let published: { readonly target: string; readonly staging: string } | null = null;
     try {
       forceEnsurePrivateDirectorySync(this.root, 'auth-bond backup root directory');
       forceEnsurePrivateDirectorySync(this.historyRoot, 'auth-bond backup history directory');
@@ -2084,7 +2280,7 @@ export class AuthBondGuard {
       };
       writePrivateJson(join(tmp, 'manifest.json'), manifest);
       renameSync(tmp, target);
-      publishedTarget = target;
+      published = { target, staging: tmp };
       tmp = null;
 
       writePrivateJson(this.latestManifestPath, {
@@ -2093,7 +2289,7 @@ export class AuthBondGuard {
         reason,
         treeHash: snapshot.treeHash,
       });
-      publishedTarget = null;
+      published = null;
 
       this.lastCaptureAt = createdAt.toISOString();
       this.lastCaptureReason = reason;
@@ -2128,13 +2324,26 @@ export class AuthBondGuard {
         }
         throw err;
       }
+      if (published) {
+        // Renamed into history/, but latest.json does not name it. One rename
+        // takes it back to its staging name before any of it is removed, so
+        // history/ never holds a half-removed entry; the removal below then
+        // runs in slices. If the process dies first, the staging name carries
+        // this PID, and another process's sweep removes it.
+        renameSync(published.target, published.staging);
+        tmp = published.staging;
+        published = null;
+      }
       if (tmp) await this.captureSteps(run, 'sweep', removeTreeSteps(tmp));
-      // Inline on purpose: a history entry is never left half removed.
-      if (publishedTarget) rmSync(publishedTarget, { recursive: true, force: true });
       const freshSnapshot = await this.liveCaptureSnapshot(run);
       const captureError = errorMessage(err);
       if (this.isValidSameIdentityTreeChangeDuringCopy(captureError, snapshot, freshSnapshot)) {
         return this.deferValidSameIdentityTreeChangeCapture(reason, freshSnapshot);
+      }
+      if (this.incompleteTreeReads.has(freshSnapshot)) {
+        // The fresh read lost an entry too, so whether the tree changed with
+        // the same identity cannot be told. An incomplete read defers.
+        return this.incompleteReadCaptureResult(run, await this.liveCaptureSnapshot(run));
       }
       const freshAgeMs = this.freshInvalidCredentialAgeMs(freshSnapshot);
       if (freshAgeMs !== null && freshAgeMs < this.freshInvalidGraceMs) {
@@ -2190,11 +2399,54 @@ export class AuthBondGuard {
     this.lastCaptureDeferredAgeMs = null;
     return {
       ok: false,
-      snapshot,
+      // The backup half re-read after the deferral fields above changed, as
+      // every other deferral does, so a record built from this result is current.
+      snapshot: this.withCurrentBackup(snapshot),
       captured: false,
       deferred: true,
       path: null,
       error: 'auth bond auth tree changed during capture with the same identity',
+    };
+  }
+
+  /**
+   * A 'present' read that lost an entry between the walk's listing and its
+   * read, so it has no tree hash and describes no tree state.
+   *
+   * Deferred like a transient read: no alert, no latch, and not written to
+   * `lastCaptureError`; the deferral fields record it, and connection.ts
+   * re-arms the settled snapshot. The bound: once INCOMPLETE_READ_DEFERRED_RUNS
+   * runs in a row have ended this way, the next run that would end this way
+   * fails instead, and connection.ts pages it as main paged an incomplete read.
+   * Only a run's final attempt can fail on the bound, so a retry that reads the
+   * tree completely still captures.
+   */
+  private incompleteReadCaptureResult(run: CaptureRun, resultSnapshot: AuthBondSnapshot): AuthBondCaptureResult {
+    const finalAttempt = run.attempts >= this.captureAttempts;
+    if (finalAttempt && this.consecutiveIncompleteReadRuns >= INCOMPLETE_READ_DEFERRED_RUNS) {
+      this.lastCaptureAt = this.now().toISOString();
+      this.lastCaptureReason = run.reason;
+      this.lastCaptureError = INCOMPLETE_READ_BOUND_FAILURE;
+      return {
+        ok: false,
+        snapshot: this.withCurrentBackup(resultSnapshot),
+        captured: false,
+        deferred: false,
+        path: null,
+        error: this.lastCaptureError,
+      };
+    }
+    run.incompleteRead = true;
+    this.lastCaptureDeferredAt = this.now().toISOString();
+    this.lastCaptureDeferredReason = run.reason;
+    this.lastCaptureDeferredAgeMs = null;
+    return {
+      ok: false,
+      snapshot: this.withCurrentBackup(resultSnapshot),
+      captured: false,
+      deferred: true,
+      path: null,
+      error: INCOMPLETE_READ_DEFERRAL,
     };
   }
 
@@ -2451,6 +2703,11 @@ export class AuthBondGuard {
   private backupSnapshot(): AuthBondBackupSnapshot {
     const latest = readLatestManifest(this.latestManifestPath);
     const latestPath = latest?.backupPath && this.backupPathProblem(latest.backupPath) === null ? latest.backupPath : null;
+    return this.backupHalf(latestPath, latest);
+  }
+
+  /** The backup half from a latest.json already read, or from none. Reads nothing itself. */
+  private backupHalf(latestPath: string | null, latest: LatestManifest | null): AuthBondBackupSnapshot {
     return {
       root: this.root,
       latest: latestPath,
@@ -2557,18 +2814,20 @@ export class AuthBondGuard {
       ? Math.max(2, Math.floor(this.maxHistoryFiles / snapshotFileCount))
       : this.keepBackups;
     const retainedBackups = Math.min(this.keepBackups, fileBound);
-    const entries = readdirSync(this.historyRoot)
-      .filter(name => !isHistoryStagingDirName(name))
-      .map(name => join(this.historyRoot, name))
-      .filter(path => {
-        try {
-          return lstatSync(path).isDirectory();
-        } catch {
-          return false;
-        }
-      })
-      .sort()
-      .reverse();
+    // One readdirSync and one sort: the named unsliced chunks. Each entry's
+    // lstat is a walk entry, in the same order as before.
+    const names = readdirSync(this.historyRoot).filter(name => !isHistoryStagingDirName(name));
+    const entries: string[] = [];
+    for (const name of names) {
+      yield WALK_ENTRY_UNITS;
+      const path = join(this.historyRoot, name);
+      try {
+        if (lstatSync(path).isDirectory()) entries.push(path);
+      } catch {
+        // Gone or unreadable: not a backup to prune.
+      }
+    }
+    entries.sort().reverse();
     for (const stale of entries.slice(retainedBackups)) {
       yield* removeTreeSteps(stale);
     }
