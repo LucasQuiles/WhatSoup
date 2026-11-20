@@ -822,9 +822,12 @@ export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): 
   return receipt;
 }
 
-export function verifyContainerBuildReceipt(receipt: ContainerBuildReceipt, input: ContainerBuildReceiptInput): void {
+/** Recomputes the receipt from the evidence and returns that receipt once the stored one equals it. */
+export function verifyContainerBuildReceipt(receipt: ContainerBuildReceipt, input: ContainerBuildReceiptInput): ContainerBuildReceipt {
   if (input.verifiedSbomOutputPath || !input.sbomPath) throw new Error('receipt verification requires an existing SBOM');
-  if (stableJson(receipt) !== stableJson(createContainerBuildReceipt(input))) throw new Error('container build receipt does not match the verified build inputs');
+  const verified = createContainerBuildReceipt(input);
+  if (stableJson(receipt) !== stableJson(verified)) throw new Error('container build receipt does not match the verified build inputs');
+  return verified;
 }
 
 export interface ParsedArgs {
@@ -885,16 +888,22 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     sourceRevision: args.sourceRevision, sourceRepository: args.sourceRepository, sourceRef: args.sourceRef, builder: args.builder, buildxVersion: args.buildxVersion,
     buildkitVersion: args.buildkitVersion, provenanceBuilderId: args.provenanceBuilderId,
   };
-  const receipt = createContainerBuildReceipt(input);
+  // Every output below comes from the receipt that passed comparison with the stored file.
+  let published: ContainerBuildReceipt;
   if (args.outputPath) {
-    writeFileSync(args.outputPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
-    verifyContainerBuildReceipt(parseJson<ContainerBuildReceipt>(args.outputPath, 'container build receipt'),
+    // Creation, then an independent readback of the written receipt and exported SBOM.
+    const created = createContainerBuildReceipt(input);
+    writeFileSync(args.outputPath, `${JSON.stringify(created, null, 2)}\n`, 'utf8');
+    published = verifyContainerBuildReceipt(parseJson<ContainerBuildReceipt>(args.outputPath, 'container build receipt'),
       args.verifiedSbomOutputPath ? { ...input, sbomPath: args.verifiedSbomOutputPath, verifiedSbomOutputPath: undefined } : input);
   } else if (args.receiptPath) {
-    verifyContainerBuildReceipt(parseJson<ContainerBuildReceipt>(args.receiptPath, 'container build receipt'), input);
+    // A stored receipt needs one pass: the comparison itself recomputes the receipt from the evidence.
+    published = verifyContainerBuildReceipt(parseJson<ContainerBuildReceipt>(args.receiptPath, 'container build receipt'), input);
+  } else {
+    throw new Error('provide exactly one of --output or --receipt');
   }
-  if (args.githubOutputPath) appendFileSync(args.githubOutputPath, `image_digest=${receipt.imageDigest}\nexternal_sbom_sha256=${receipt.sbomSha256}\n`, 'utf8');
-  return receipt;
+  if (args.githubOutputPath) appendFileSync(args.githubOutputPath, `image_digest=${published.imageDigest}\nexternal_sbom_sha256=${published.sbomSha256}\n`, 'utf8');
+  return published;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

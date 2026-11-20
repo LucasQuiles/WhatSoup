@@ -3771,7 +3771,9 @@ A layer may expand to at most 4 GiB; memory use stays constant. It caps the OCI 
 extracted bytes at 2 GiB, each extracted entry at 96 MiB, each descriptor list at 128, and all
 extraction attempts at 256. A shared 120-second monotonic deadline bounds archive traversal
 and hashing; each tar process also has a 30-second cap within the remaining budget. The
-workflow gives each receipt step five minutes for creation and independent readback. Exceeding
+workflow gives each receipt step five minutes. Creating a receipt runs two verification passes
+(creation and an independent readback of the written file); checking a stored receipt runs one,
+and the image digest it publishes comes from the receipt that passed that comparison. Exceeding
 a limit fails qualification; raise a bound only with reviewed workload evidence.
 
 Snapshot availability probes disable curl configuration, require HTTPS without redirects,
