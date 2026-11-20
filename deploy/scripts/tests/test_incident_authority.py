@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -65,8 +67,16 @@ class _Connection:
 
 
 @pytest.fixture
-def credential(tmp_path: Path) -> Path:
-    path = tmp_path / "incident-authority.credential"
+def private_credential_root() -> Iterator[Path]:
+    with TemporaryDirectory(prefix="whatsoup-incident-authority-", dir=Path.home()) as directory:
+        root = Path(directory)
+        root.chmod(0o700)
+        yield root
+
+
+@pytest.fixture
+def credential(private_credential_root: Path) -> Path:
+    path = private_credential_root / "incident-authority.credential"
     path.write_text("narrow-secret\n", encoding="utf-8")
     path.chmod(0o600)
     return path
@@ -191,34 +201,43 @@ def test_rejects_redirect_without_forwarding_credential(credential: Path):
     assert len(connection.requests) == 1
 
 
-def test_credential_contract_rejects_symlink_fifo_public_mode_and_oversize(tmp_path: Path):
-    real = tmp_path / "real"
+def test_credential_contract_rejects_symlink_fifo_public_mode_and_oversize(
+    private_credential_root: Path,
+):
+    real = private_credential_root / "real"
     real.write_text("secret\n")
     real.chmod(0o600)
-    symlink = tmp_path / "link"
+    symlink = private_credential_root / "link"
     symlink.symlink_to(real)
-    public = tmp_path / "public"
+    public = private_credential_root / "public"
     public.write_text("secret\n")
     public.chmod(0o644)
-    fifo = tmp_path / "fifo"
+    fifo = private_credential_root / "fifo"
     os.mkfifo(fifo, 0o600)
-    huge = tmp_path / "huge"
+    huge = private_credential_root / "huge"
     huge.write_text("x" * 5000)
     huge.chmod(0o600)
-    public_parent = tmp_path / "public-parent"
+    public_parent = private_credential_root / "public-parent"
     public_parent.mkdir(mode=0o700)
     parent_credential = public_parent / "credential"
     parent_credential.write_text("secret\n")
     parent_credential.chmod(0o600)
     public_parent.chmod(0o777)
 
-    for path in (symlink, public, fifo, huge, parent_credential):
+    cases = (
+        (symlink, "authority_credential_unreadable"),
+        (public, "authority_credential_not_private"),
+        (fifo, "authority_credential_not_regular"),
+        (huge, "authority_credential_oversized"),
+        (parent_credential, "authority_credential_parent_not_private"),
+    )
+    for path, expected_error in cases:
         client = IncidentAuthorityClient(
             "http://127.0.0.1:1/api/signals",
             path,
             expected_producer_id="bot-errors-dispatcher",
         )
-        with pytest.raises(AuthorityProtocolError):
+        with pytest.raises(AuthorityProtocolError, match=rf"^{expected_error}$"):
             client.accept(CLAIM)
 
 

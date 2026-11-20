@@ -64,6 +64,11 @@ _ENV_KEYS = [
     "BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY",
     "BOT_ERRORS_INCIDENT_COOLDOWN_SECONDS",
     "BOT_ERRORS_EMAIL_FALLBACK",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
 ]
 
 
@@ -82,6 +87,10 @@ def _clean_env():
 
 def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+    os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+    os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+        state_dir / "test-incident-authority.jsonl"
+    )
     for k, v in (extra_env or {}).items():
         os.environ[k] = v
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -1056,7 +1065,7 @@ def test_one_format_event_call_feeds_both_delivered_surfaces(tmp_path):
          patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
          patch.object(mod, "EMAIL_FALLBACK", str(fallback)), \
          patch.object(mod, "email_fallback",
-                      side_effect=lambda subject, body: mailed.append((subject, body)) or True):
+                      side_effect=lambda subject, body, **_kwargs: mailed.append((subject, body)) or True):
         ok, detail = mod.process_one(path, paths)
 
     assert (ok, detail) == (True, "email_delivered"), (ok, detail)

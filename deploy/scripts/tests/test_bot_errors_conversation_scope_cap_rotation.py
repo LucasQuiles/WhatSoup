@@ -45,6 +45,11 @@ _ENV_KEYS = [
     "BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS",
     "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES",
     "BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
 ]
 
 
@@ -64,6 +69,10 @@ def _clean_env():
 def _load(state_dir: Path, cap: int):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
     os.environ["BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS"] = str(cap)
+    os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+    os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+        state_dir / "test-incident-authority.jsonl"
+    )
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)
     spec = importlib.util.spec_from_file_location(
         f"bot_errors_dispatcher_cap_{state_dir.name}", _SCRIPT

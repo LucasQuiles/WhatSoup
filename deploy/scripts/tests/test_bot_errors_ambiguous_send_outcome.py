@@ -130,7 +130,15 @@ CONNECT_FAILURES = (MISSING_SOCKET, STALE_SOCKET_FILE)
 TRANSPORT_TIMEOUT = 0.2
 SERVER_HANG_SECONDS = 2.0
 
-_ENV_KEYS = ["BOT_ERRORS_STATE_DIR", "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES"]
+_ENV_KEYS = [
+    "BOT_ERRORS_STATE_DIR",
+    "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -182,7 +190,25 @@ def _event(event_id: str, status: str, **delivery: object) -> dict:
     }
 
 
-def _open_incident(mod, paths, event: dict) -> None:
+def _grant_test_incident_authority(mod, paths, event: dict) -> None:
+    """Bind the production dry-authority receipt to one send-path fixture."""
+    claimed_event = mod.producer_claim(event)
+    with patch.dict(
+        os.environ,
+        {
+            "BOT_ERRORS_TEST_MODE": "1",
+            "BOT_ERRORS_DRY_AUTHORITY_CAPTURE": str(
+                paths["root"] / "test-incident-authority.jsonl"
+            ),
+        },
+    ):
+        mod.accept_incident_authority(event, claimed_event)
+    assert mod.has_incident_authority(event, claimed_event), (
+        "the send-path fixture must carry a receipt bound to its producer claim"
+    )
+
+
+def _open_incident(mod, paths, event: dict, *, authorize: bool = True) -> None:
     """An open incident with no conversation recorded: the send is due."""
     key = mod.incident_key(event)
     now = int(time.time())
@@ -192,6 +218,8 @@ def _open_incident(mod, paths, event: dict) -> None:
         "lastSentAt": {key: now - 60},
         "conversationScopes": {},
     })
+    if authorize:
+        _grant_test_incident_authority(mod, paths, event)
 
 
 def _seed_processing(paths, event: dict) -> Path:
@@ -625,6 +653,60 @@ def _assert_requeued_not_held(mod, paths, error, expect_sends: int) -> None:
     assert _held_signals(paths) == [], (
         f"a non-ambiguous failure must not emit a hold signal: {error!r}"
     )
+
+
+def test_absent_incident_authority_never_reaches_transport(tmp_path):
+    mod = _load(tmp_path / "authority-absent")
+    paths = mod.setup_dirs()
+    event = _event("evt-2424-authority-absent", QUEUED_STATUS)
+    _open_incident(mod, paths, event, authorize=False)
+    queued = _seed_outbox(paths, event)
+    calls: list = []
+
+    with patch.object(
+        mod, "send_whatsapp", side_effect=lambda *args, **_kwargs: calls.append(args)
+    ):
+        result = mod.process_one(queued, paths)
+
+    assert result == (False, "incident_authority_unavailable")
+    assert calls == [], "an absent authority must fail before transport"
+    requeued = list(paths["outbox"].glob("*.json"))
+    assert len(requeued) == 1, f"the unavailable event must remain retryable: {requeued!r}"
+    delivery = json.loads(requeued[0].read_text()).get("delivery") or {}
+    assert delivery.get("incidentAuthorityStatus") == "unavailable"
+    assert delivery.get("incidentAuthorityAttempts") == 1
+
+
+def test_refused_incident_authority_never_reaches_transport(tmp_path):
+    mod = _load(tmp_path / "authority-refused")
+    paths = mod.setup_dirs()
+    event = _event("evt-2424-authority-refused", QUEUED_STATUS)
+    _open_incident(mod, paths, event, authorize=False)
+    queued = _seed_outbox(paths, event)
+    credential = paths["root"] / "refused-authority.credential"
+    credential.write_text("narrow-secret\n")
+    credential.chmod(0o600)
+    calls: list = []
+
+    with patch.dict(
+        os.environ,
+        {
+            "BOT_ERRORS_INCIDENT_AUTHORITY_URL": "http://example.com/api/signals",
+            "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(credential),
+        },
+    ):
+        with patch.object(
+            mod, "send_whatsapp", side_effect=lambda *args, **_kwargs: calls.append(args)
+        ):
+            result = mod.process_one(queued, paths)
+
+    assert result == (False, "incident_authority_rejected")
+    assert calls == [], "a refused authority must fail before transport"
+    rejected = list(paths["quarantine"].glob("*authority-rejected*"))
+    assert len(rejected) == 1, f"the refused event must be quarantined: {rejected!r}"
+    delivery = json.loads(rejected[0].read_text()).get("delivery") or {}
+    assert delivery.get("incidentAuthorityStatus") == "invalid"
+    assert delivery.get("incidentAuthorityError") == "protocol_invalid"
 
 
 def test_a_proven_rejection_keeps_the_bounded_retry_path(tmp_path):
