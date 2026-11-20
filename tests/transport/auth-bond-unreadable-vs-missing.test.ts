@@ -246,7 +246,7 @@ describe('auth bond: unreadable is not missing (#2292 L3)', () => {
       })) as unknown as FsModule['readFileSync'],
     }));
 
-    const result = guardFor(root, authDir, mod).capture('unreadable-copy');
+    const result = await guardFor(root, authDir, mod).capture('unreadable-copy');
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('unreadable');

@@ -1310,6 +1310,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
     const initialLatest = readLatestAuthBond();
 
     writeFileSync(join(testAuthDir, 'sender-key-test.json'), JSON.stringify({ keyData: 'rotated' }));
@@ -1347,6 +1348,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
 
     writeFileSync(join(testAuthDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
@@ -1389,6 +1391,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
     const initialLatest = readLatestAuthBond();
 
     writeFileSync(join(testAuthDir, 'sender-key-after-logout.json'), JSON.stringify({ keyData: 'do-not-capture' }));
@@ -1437,6 +1440,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.connect();
     await vi.advanceTimersByTimeAsync(100);
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(manager.getConnectionState()).toMatchObject({
       state: 'connected',
@@ -1665,11 +1669,14 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
     clearAlertSourceMock.mockClear();
 
     (manager as any).localAuthAlertEmitted = true;
 
-    (manager as any).captureAuthBondSnapshot('connection-open');
+    const reCapture = (manager as any).captureAuthBondSnapshot('connection-open');
+    await vi.advanceTimersByTimeAsync(0);
+    await reCapture;
     expect(clearAlertSourceMock).not.toHaveBeenCalled();
 
     await manager.sendMessage('15550100001@s.whatsapp.net', 'proof send');
@@ -1828,6 +1835,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
     const initialLatest = readLatestAuthBond();
 
     writeFileSync(join(testAuthDir, 'sender-key-creds.json'), JSON.stringify({ keyData: 'a' }));
@@ -1860,10 +1868,13 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
     emitAlertMock.mockClear();
 
     writeFileSync(join(testAuthDir, 'creds.json'), '');
-    (manager as any).captureAuthBondSnapshot('creds-update');
+    const deferredRun = (manager as any).captureAuthBondSnapshot('creds-update');
+    await vi.advanceTimersByTimeAsync(1_000);
+    await deferredRun;
 
     expect(emitAlertMock).not.toHaveBeenCalledWith(
       'WhatSoup',
@@ -2328,5 +2339,159 @@ describe('#2394 connection_exhausted recovery authority', () => {
       expect(exhaustedClearCalls()).toHaveLength(0);
       await manager.shutdown();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C8 — the auth-bond capture no longer holds the event loop
+// ---------------------------------------------------------------------------
+
+describe('ConnectionManager — C8 auth-bond capture off the event loop', () => {
+  const latestAuthBondPath = join(testStateRoot, 'auth-bond-backups', 'WhatSoup', 'latest.json');
+
+  function lifecycleEvents(manager: ConnectionManager): string[] {
+    return manager.getConnectionState().credentialLifecycle.recentEvents.map(event => event.event);
+  }
+
+  it('C1: connection open returns before the auth-bond capture finishes', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+
+    expect(lifecycleEvents(manager)).toContain('connection_open');
+    expect(lifecycleEvents(manager)).not.toContain('auth_snapshot_captured');
+    expect(existsSync(latestAuthBondPath)).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(lifecycleEvents(manager)).toContain('auth_snapshot_captured');
+    expect(readLatestAuthBond().reason).toBe('connection-open');
+    const log = (manager as any).log;
+    expect(log.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'auth_bond_capture_started', reason: 'connection-open', run: 1 }),
+      'auth bond capture started',
+    );
+    expect(log.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'auth_bond_capture_finished',
+        reason: 'connection-open',
+        outcome: 'captured',
+        elapsedMs: expect.any(Number),
+        maxSliceMs: expect.any(Number),
+        consecutiveDeferrals: 0,
+      }),
+      'auth bond capture finished',
+    );
+
+    await manager.shutdown();
+  });
+
+  it('C2: a logout during the open capture publishes nothing and pages no local auth-bond failure', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    // The open handler clears this flag before it starts the capture, so
+    // setting it here is a logout that lands while the capture is open.
+    (manager as any).loggedOutAlertEmitted = true;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(existsSync(latestAuthBondPath)).toBe(false);
+    expect(lifecycleEvents(manager)).not.toContain('auth_snapshot_captured');
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'auth_snapshot_skipped', note: expect.stringContaining('capture-blocked:') }),
+    ]));
+    expect(emitAlertMock).not.toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      expect.any(Object),
+    );
+    expect((manager as any).authSnapshotFailureCount).toBe(0);
+
+    await manager.shutdown();
+  });
+
+  it('C3: a settled snapshot refused by the 5-minute floor is captured once the floor passes', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
+
+    writeFileSync(join(testAuthDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
+    await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const firstSettled = readLatestAuthBond();
+    expect(firstSettled.reason).toBe('baileys-key-material-settled');
+
+    writeFileSync(join(testAuthDir, 'sender-key-c.json'), JSON.stringify({ keyData: 'c' }));
+    await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
+    await vi.advanceTimersByTimeAsync(60_000);
+    // Inside the floor the request is refused for now, recorded as before.
+    expect(readLatestAuthBond()).toEqual(firstSettled);
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'auth_snapshot_skipped', note: 'settled-snapshot-min-interval' }),
+    ]));
+
+    // The floor ends five minutes after the first settled attempt.
+    await vi.advanceTimersByTimeAsync(240_000);
+    const rearmed = readLatestAuthBond();
+    expect(rearmed.backupPath).not.toBe(firstSettled.backupPath);
+    expect(rearmed.reason).toBe('baileys-key-material-settled');
+    expect(existsSync(join(rearmed.backupPath, 'auth', 'sender-key-c.json'))).toBe(true);
+
+    await manager.shutdown();
+  });
+
+  it('C4: a capture that ends deferred re-arms a settled snapshot', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
+    const openLatest = readLatestAuthBond();
+
+    // A credential write still in flight defers the capture.
+    writeFileSync(join(testAuthDir, 'creds.json'), '');
+    const deferredRun = (manager as any).captureAuthBondSnapshot('creds-update');
+    await vi.advanceTimersByTimeAsync(1_000);
+    await deferredRun;
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'auth_snapshot_skipped',
+        note: expect.stringContaining('credential write still in flight'),
+      }),
+    ]));
+
+    // The write settles; the owed capture runs with no new trigger.
+    writeValidTestAuth();
+    writeFileSync(join(testAuthDir, 'sender-key-after-deferral.json'), JSON.stringify({ keyData: 'after' }));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    const rearmed = readLatestAuthBond();
+    expect(rearmed.backupPath).not.toBe(openLatest.backupPath);
+    expect(rearmed.reason).toBe('auth-bond-capture-deferred');
+
+    await manager.shutdown();
   });
 });

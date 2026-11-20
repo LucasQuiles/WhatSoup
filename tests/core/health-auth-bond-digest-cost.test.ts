@@ -1707,7 +1707,7 @@ describe('review finding — a persistently unreadable credential is named, not 
 
     // Seeded with the statically imported guard, which holds the REAL fs, so
     // the backup exists on disk before the failing reader is installed.
-    const seeded = new AuthBondGuard({
+    const seeded = await new AuthBondGuard({
       authDir: fx.authDir,
       stateRoot: fx.stateRoot,
       instanceName: 'p42-r7-read-persistent-backup',

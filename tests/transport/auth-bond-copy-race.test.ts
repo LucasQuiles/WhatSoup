@@ -54,7 +54,7 @@ describe('AuthBondGuard snapshot copy races', () => {
       }) as FsModule['copyFileSync'],
     }));
 
-    const result = new AuthBondGuard({
+    const result = await new AuthBondGuard({
       authDir,
       stateRoot,
       instanceName: 'valid-copy-race-bot',
@@ -94,7 +94,7 @@ describe('AuthBondGuard snapshot copy races', () => {
       }) as FsModule['copyFileSync'],
     }));
 
-    const result = new AuthBondGuard({
+    const result = await new AuthBondGuard({
       authDir,
       stateRoot,
       instanceName: 'same-identity-creds-copy-race-bot',
@@ -140,14 +140,14 @@ describe('AuthBondGuard snapshot copy races', () => {
       captureRetryDelayMs: 0,
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const initial = guard.capture('connection-open');
+    const initial = await guard.capture('connection-open');
     expect(initial).toMatchObject({ ok: true, captured: true });
     const latestPath = join(stateRoot, 'auth-bond-backups', 'churning-copy-race-bot', 'latest.json');
     const latestBefore = actualFs.readFileSync(latestPath, 'utf8');
 
     actualFs.writeFileSync(keyPath, JSON.stringify({ keyData: 'new-source-key' }));
     shouldChurn = true;
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(mutationCount).toBe(2);
     expect(result).toMatchObject({ ok: false, captured: false, deferred: true, path: null });
@@ -183,14 +183,14 @@ describe('AuthBondGuard snapshot copy races', () => {
       captureRetryDelayMs: 0,
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const initial = guard.capture('connection-open');
+    const initial = await guard.capture('connection-open');
     expect(initial).toMatchObject({ ok: true, captured: true });
     const latestPath = join(stateRoot, 'auth-bond-backups', 'stable-corrupt-copy-bot', 'latest.json');
     const latestBefore = actualFs.readFileSync(latestPath, 'utf8');
 
     actualFs.writeFileSync(keyPath, JSON.stringify({ keyData: 'new-source-key' }));
     corruptCopiedKey = true;
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(corruptCopyCount).toBe(1);
     expect(result).toMatchObject({ ok: false, captured: false, deferred: false, path: null });
@@ -232,14 +232,14 @@ describe('AuthBondGuard snapshot copy races', () => {
       captureRetryDelayMs: 0,
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const initial = guard.capture('connection-open');
+    const initial = await guard.capture('connection-open');
     expect(initial).toMatchObject({ ok: true, captured: true });
     const latestPath = join(stateRoot, 'auth-bond-backups', 'corrupt-creds-source-key-change-bot', 'latest.json');
     const latestBefore = actualFs.readFileSync(latestPath, 'utf8');
 
     actualFs.writeFileSync(keyPath, JSON.stringify({ keyData: 'source-key-before-copy' }));
     corruptCopiedCreds = true;
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(corruptionCount).toBe(1);
     expect(result).toMatchObject({ ok: false, captured: false, deferred: false, path: null });
@@ -270,7 +270,7 @@ describe('AuthBondGuard snapshot copy races', () => {
       }) as FsModule['copyFileSync'],
     }));
 
-    const result = new AuthBondGuard({
+    const result = await new AuthBondGuard({
       authDir,
       stateRoot,
       instanceName: 'identity-copy-race-bot',

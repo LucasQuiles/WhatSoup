@@ -98,6 +98,9 @@ vi.mock('../../src/transport/auth-bond.ts', () => ({
       warmTreeCache: vi.fn(async () => {}),
       invalidateTreeCache: vi.fn(),
       inspectCached: vi.fn(() => mockAuth.snapshot),
+      // C8: ConnectionManager.shutdown() settles in-flight captures through
+      // this member once the capture hands the event loop back.
+      shutdownCaptures: vi.fn(async () => {}),
     };
   }),
 }));
@@ -637,6 +640,8 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     const { emit } = await connectRegistered();
 
     emit({ 'connection.update': { connection: 'open' } });
+    // The capture result is handled after the open handler returns.
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
 
     expect(latestCriticalAsset().failure.code).toBe('WA_AUTH_BOND_SNAPSHOT_CAPTURE_FAILED');
     expect(latestCriticalAsset().failure.recoverability).toBe('manual_repair_required');
@@ -842,6 +847,7 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     try {
       const { manager, emit } = await connectRegistered();
       emit(openEvent());
+      await vi.advanceTimersByTimeAsync(0);
       const scheduledBefore = lifecycleEventCount(manager, 'auth_snapshot_scheduled');
       const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
       (manager as any).loggedOutAlertEmitted = true;
@@ -862,6 +868,7 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     try {
       const { manager, emit } = await connectRegistered();
       emit(openEvent());
+      await vi.advanceTimersByTimeAsync(0);
       const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
 
       (manager as any).scheduleSettledAuthBondSnapshot('key-material-settled');
@@ -883,6 +890,7 @@ describe('ConnectionManager auth-bond edge coverage', () => {
     try {
       const { manager, emit } = await connectRegistered();
       emit(openEvent());
+      await vi.advanceTimersByTimeAsync(0);
       const capturedBefore = lifecycleEventCount(manager, 'auth_snapshot_captured');
 
       (manager as any).scheduleSettledAuthBondSnapshot('key-material-settled');
