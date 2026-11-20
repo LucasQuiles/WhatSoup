@@ -444,6 +444,16 @@ describe('ConfigStep — real React handler wiring', () => {
       expect(select.options[select.selectedIndex]?.textContent).toMatch(/default/i)
     })
 
+    it('describes the default and minimal choices in the helper text', () => {
+      renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+
+      const select = screen.getByLabelText('Tool update verbosity')
+      const helper = document.getElementById(select.getAttribute('aria-describedby') ?? '')
+      expect(helper?.textContent).toMatch(/default/i)
+      expect(helper?.textContent).toMatch(/minimal/i)
+    })
+
     it('writes minimal when the operator selects it', () => {
       const { onChange } = renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
       fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
