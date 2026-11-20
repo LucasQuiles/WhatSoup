@@ -529,14 +529,16 @@ describe('node-pin consistency check', () => {
     });
   });
 
-  it('rejects approved source text in a continued shell comment', () => {
+  it('rejects approved source text in comment lines inside a continued RUN', () => {
     const dir = makeFixture({});
     const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    // Quoted like the real printf lines and with no backslash on the last comment, so a checker that read
+    // these comment lines would find exactly the approved definitions; only skipping comments rejects them.
     writeFileSync(dockerfilePath, [
       `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
       'RUN \\',
-      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main \\`,
-      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main \\`,
+      `  # 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main' \\`,
+      `  # 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main'`,
       '  : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
       'FROM base AS deps',
       'FROM base AS runtime',
@@ -550,6 +552,43 @@ describe('node-pin consistency check', () => {
       filePath: dockerfilePath,
       reason: 'APT source definitions must exactly match docker/container-inputs.json',
     });
+  });
+
+  it('rejects approved source text in a shell comment on a RUN line', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    // The shell ignores everything after RUN #, so these definitions never reach APT.
+    writeFileSync(dockerfilePath, [
+      `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
+      `RUN # 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main' 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main'`,
+      'RUN : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'), 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('accepts approved sources when a Dockerfile comment line splits the continued RUN', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    const approved = readFileSync(dockerfilePath, 'utf8');
+    // Docker drops comment lines inside a continuation, and the instruction goes on after them.
+    const split = approved.replace(
+      "  'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/",
+      "  # Security updates come from the same snapshot.\n  'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/",
+    );
+    expect(split).not.toBe(approved);
+    writeFileSync(dockerfilePath, split, 'utf8');
+
+    expect(findNodePinDrift({ cwd: dir }).missing).toEqual([]);
   });
 
   it('rejects approved source text in a non-RUN Dockerfile instruction', () => {
