@@ -24,21 +24,26 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
   clearAlertSourceChecked: vi.fn(() => true),
 }));
 
-// The scheduler tests capture the deps the production scheduler hands to the
-// probe adapters and stop the real probe there; every other test calls the real factory.
+// A probe the production scheduler builds runs replacement adapters (`capture`),
+// or the real adapters over the scheduler's own deps with only the child
+// operations stubbed (`childOps`). Every other test calls the real factory.
 const adapterSeam = vi.hoisted(() => ({
   capture: false,
-  calls: [] as Array<{ deps: Record<string, unknown> }>,
   /** What a captured scheduler probe runs instead of the real adapters. */
   adapters: {} as Record<string, unknown>,
+  /** Child-operation stubs merged over the scheduler's deps for the real adapters. */
+  childOps: null as Record<string, unknown> | null,
 }));
 vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts')>();
+  type Deps = Parameters<typeof actual.createPrimaryModelProbeAdapters>[1];
   return {
     ...actual,
     createPrimaryModelProbeAdapters: (...args: Parameters<typeof actual.createPrimaryModelProbeAdapters>) => {
+      if (adapterSeam.childOps) {
+        return actual.createPrimaryModelProbeAdapters(args[0], { ...args[1], ...adapterSeam.childOps } as Deps);
+      }
       if (!adapterSeam.capture) return actual.createPrimaryModelProbeAdapters(...args);
-      adapterSeam.calls.push({ deps: (args[1] ?? {}) as Record<string, unknown> });
       return adapterSeam.adapters;
     },
   };
@@ -50,10 +55,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from '../../../src/config.ts';
 import { Database } from '../../../src/core/database.ts';
+import { providerMcpProxyScriptPath } from '../../../src/core/provider-mcp-config.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../../src/lib/emit-alert.ts';
 import { createChildLogger } from '../../../src/logger.ts';
 import { deferred } from '../../helpers/deferred.ts';
 import {
+  readProviderCanaryAdmission,
   resolveProviderBinaryIdentity,
   type ProviderAdmission,
 } from '../../../src/runtimes/agent/provider-canary-proof.ts';
@@ -64,6 +71,7 @@ import {
   type PrimaryModelProbeAdapterDeps,
 } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import {
+  CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG,
   DEFERRED_REFRESH_IN_FLIGHT,
   probePrimaryModelUsability,
   type PrimaryModelUsabilityResult,
@@ -73,8 +81,11 @@ import { makeRuntimeState, type RuntimeState } from './lib/runtime-terminal-coor
 
 const MODEL = 'configured-primary';
 const TARGET = { provider: 'claude-cli', model: MODEL };
-const LAUNCHER = 'provider-cli';
+// The launcher name production resolves for claude-cli, and the name the canary gate looks for.
+const LAUNCHER = 'claude';
 const STRICT_HELP = '  --strict-mcp-config  Only use MCP servers from --mcp-config';
+// A CLI that loads MCP servers but cannot restrict them to the given ones.
+const NON_STRICT_HELP = '  --mcp-config <configs...>  Load MCP servers from JSON files or strings';
 const UNUSABLE = 'primary_model_unusable';
 const REFUSED_EVENT = 'primary_model_probe_context_refused';
 const RESTART_REQUIRED = 'context-binary-changed-restart-required';
@@ -119,12 +130,14 @@ type UsabilityState = RuntimeState & {
   };
   recordTurnCapabilitySuccess(isUserTurnResult: boolean): void;
 };
-/** Private runtime fields the scheduler tests set directly. */
+/** Private runtime fields and methods the scheduler tests use directly. */
 type SchedulerState = UsabilityState & {
   agentProvider: string;
   model: string | undefined;
   sessionScope: string;
   sandboxPerChat: boolean;
+  periodicUsabilityProbeBackoff: number;
+  capturePrimaryProbeServiceContext(): void;
 };
 
 interface Install {
@@ -182,7 +195,9 @@ function pointAtCopy(cli: Install, from: string, to: string): void {
 
 /**
  * A real runtime set up as a per-chat claude instance. With `canaryStore`, its
- * state root is a fresh folder, holding an empty canary store when true.
+ * state root is a fresh folder, holding an empty canary store when true. The
+ * store is private, as the receipt reader requires, so a required canary
+ * refuses on the missing receipt.
  */
 function schedulerRuntime(options: { canaryStore?: boolean } = {}): { state: SchedulerState; recordSpy: unknown } {
   const { state } = makeRuntimeState<SchedulerState>(db);
@@ -192,23 +207,64 @@ function schedulerRuntime(options: { canaryStore?: boolean } = {}): { state: Sch
   if (options.canaryStore !== undefined) {
     const root = mkdtempSync(join(tmpdir(), 'primary-probe-state-'));
     roots.push(root);
-    if (options.canaryStore) mkdirSync(join(root, 'provider-canaries'));
+    if (options.canaryStore) mkdirSync(join(root, 'provider-canaries'), { mode: 0o700 });
     mutableConfig.stateRoot = root;
   }
   return { state, recordSpy: vi.spyOn(state.fallback, 'recordPrimaryModelUsability') };
 }
 
-/** Run the production scheduler once, take the deps it hands the probe adapters, and let its inert probe settle. */
-async function scheduledProbeDeps(state: SchedulerState, recordSpy: unknown): Promise<RebindDeps & Record<string, unknown>> {
-  adapterSeam.capture = true;
-  state.fallback.schedulePrimaryModelUsabilityProbe('manual');
-  adapterSeam.capture = false;
-  await vi.waitFor(() => expect(recordSpy).toHaveBeenCalledWith(expect.anything(), 'manual'));
-  const deps = (adapterSeam.calls.at(-1)?.deps ?? {}) as RebindDeps & Record<string, unknown>;
-  expect(typeof deps.rebindServiceContext).toBe('function');
-  expect(typeof deps.providerCanaryAdmission).toBe('function');
-  expect(deps.serviceContext).toBe(state.primaryProbeServiceContext);
-  return deps;
+/** Stubs for the probe's child operations only: help, the model child, the refresh-ahead child and credential-store detection. */
+function childOps(over: { help?: string; refresh?: () => Promise<unknown> } = {}) {
+  const help = vi.fn(async () => ({ status: 'ok' as const, output: over.help ?? STRICT_HELP }));
+  const modelProbe = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+  const refresh = vi.fn(over.refresh ?? (async () => undefined));
+  const deps: Record<string, unknown> = {
+    probeClaudeCliHelp: help,
+    probeBinaryCommand: modelProbe,
+    refreshClaudeLoginAhead: refresh,
+    ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' as const }),
+  };
+  return { help, modelProbe, refresh, deps };
+}
+
+/**
+ * A claude primary serving the first install label from PATH, with the model
+ * configured and the service context the runtime captures at start.
+ */
+function serveInstall(state: SchedulerState, labels: string[]): Install {
+  const cli = install(labels);
+  vi.stubEnv('PATH', cli.binDir);
+  state.model = MODEL;
+  state.capturePrimaryProbeServiceContext();
+  // The runtime resolved the install through the real launcher name.
+  expect(state.primaryProbeServiceContext).toMatchObject({
+    provider: 'claude-cli', binaryState: 'resolved', binarySha256: sha256Of(cli.version(labels[0]!)),
+  });
+  return cli;
+}
+
+/**
+ * Run one probe the production scheduler builds: the real adapters over its own
+ * deps, with only `child` stubbed. Returns the result its recorder received.
+ */
+async function settleScheduledProbe(
+  state: SchedulerState,
+  recordSpy: unknown,
+  trigger: 'startup' | 'manual',
+  child: ReturnType<typeof childOps> = childOps(),
+): Promise<PrimaryModelUsabilityResult> {
+  const spy = recordSpy as { mock: { calls: unknown[][] } };
+  const before = spy.mock.calls.length;
+  adapterSeam.childOps = child.deps;
+  try {
+    state.fallback.schedulePrimaryModelUsabilityProbe(trigger);
+  } finally {
+    adapterSeam.childOps = null;
+  }
+  await vi.waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(before), { timeout: 5_000 });
+  const [recorded, recordedTrigger] = spy.mock.calls[before]!;
+  expect(recordedTrigger).toBe(trigger);
+  return recorded as PrimaryModelUsabilityResult;
 }
 
 function sha256Of(path: string): string {
@@ -296,8 +352,8 @@ describe('primary probe service context after an in-place CLI update', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     adapterSeam.capture = false;
-    adapterSeam.calls.length = 0;
     adapterSeam.adapters = {};
+    adapterSeam.childOps = null;
     mutableConfig.stateRoot = savedStateRoot;
     db.close();
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -591,6 +647,8 @@ describe('primary probe service context after an in-place CLI update', () => {
 
     expect(result).toMatchObject({ status: 'usable' });
     expect(probe.refresh).toHaveBeenCalledTimes(1);
+    // Refresh-ahead runs the resolved file the rebind adopts, not the launcher name.
+    expect(probe.refresh).toHaveBeenCalledWith(cli.version('1.0.1'), expect.any(Object));
     expect(order).toEqual(['refresh', 'model']);
     expect(probe.rebind).toHaveBeenCalledTimes(1);
   });
@@ -697,49 +755,132 @@ describe('primary probe service context after an in-place CLI update', () => {
     expect(clears(UNUSABLE)).toBe(2);
   });
 
-  it('wiring: the production scheduler hands the probe a rebind that adopts into the runtime when no canary is required', async () => {
-    const cli = install(['1.0.0', '1.0.1']);
-    vi.stubEnv('PATH', cli.binDir);
-    const expected = capture(cli.binDir);
+  it.each([
+    ['unsupported-provider', (state: SchedulerState) => {
+      state.agentProvider = 'codex-cli';
+      state.model = MODEL;
+      return childOps();
+    }],
+    ['model-not-configured', (state: SchedulerState) => {
+      state.agentProvider = 'gemini-cli';
+      state.model = undefined;
+      return childOps();
+    }],
+    [CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG, (state: SchedulerState) => {
+      serveInstall(state, ['1.0.0']);
+      return childOps({ help: NON_STRICT_HELP });
+    }],
+  ])('startup: a startup probe settled with the non-alerting %s releases the hold, so a turn success records usable, clears the alert and resets the backoff', async (reason, setUp) => {
     const { state, recordSpy } = schedulerRuntime({ canaryStore: false });
-    state.primaryProbeServiceContext = expected;
-    const deps = await scheduledProbeDeps(state, recordSpy);
+    const child = setUp(state);
+
+    // A restarted process: the last one may have left primary_model_unusable open.
+    const recorded = await settleScheduledProbe(state, recordSpy, 'startup', child);
+
+    expect(recorded).toMatchObject({ status: 'unknown', reason });
+    expect(raises(UNUSABLE)).toBe(0);
+    expect(clears(UNUSABLE)).toBe(0);
+    // An inconclusive result backs the periodic probe off.
+    expect(state.periodicUsabilityProbeBackoff).toBe(1);
+
+    state.recordTurnCapabilitySuccess(true);
+
+    expect(state.primaryModelUsability).toMatchObject({ status: 'usable', reason: 'turn-success' });
+    // This process holds no flag for the inherited alert, so the clear is unconditional (#2394).
+    expect(clears(UNUSABLE)).toBe(1);
+    expect(state.periodicUsabilityProbeBackoff).toBe(0);
+  });
+
+  it('startup: a startup probe deferred behind a running refresh keeps the hold until the next probe result', async () => {
+    const { state, recordSpy } = schedulerRuntime({ canaryStore: false });
+    serveInstall(state, ['1.0.0']);
+
+    const recorded = await settleScheduledProbe(state, recordSpy, 'startup', childOps({
+      refresh: async () => ({ outcome: 'still-running' }),
+    }));
+
+    expect(recorded).toMatchObject({ status: 'unknown', reason: DEFERRED_REFRESH_IN_FLIGHT });
+    state.recordTurnCapabilitySuccess(true);
+    expect(state.primaryModelUsability).toMatchObject({ status: 'unknown', reason: DEFERRED_REFRESH_IN_FLIGHT });
+    expect(clears(UNUSABLE)).toBe(0);
+    expect(state.periodicUsabilityProbeBackoff).toBe(1);
+
+    // The next probe result settles the hold.
+    await expect(settleScheduledProbe(state, recordSpy, 'manual')).resolves.toMatchObject({ status: 'usable' });
+    expect(clears(UNUSABLE)).toBe(1);
+    state.recordTurnCapabilitySuccess(true);
+    expect(state.primaryModelUsability).toMatchObject({ status: 'usable', reason: 'turn-success' });
+    expect(clears(UNUSABLE)).toBe(2);
+  });
+
+  it('startup: a service-context hold survives a non-alerting probe result that is not a deferral', async () => {
+    const { state, recordSpy } = schedulerRuntime({ canaryStore: false });
+    const cli = install(['1.0.0']);
+    vi.stubEnv('PATH', cli.binDir);
+    state.model = MODEL;
+
+    // No service context is captured yet, so the startup probe refuses on it.
+    await expect(settleScheduledProbe(state, recordSpy, 'startup'))
+      .resolves.toMatchObject({ status: 'unknown', reason: 'context-missing-service' });
+    expect(raises(UNUSABLE)).toBe(1);
+
+    // Once it is captured, the next probe is inconclusive without deferring: the CLI lacks strict MCP.
+    state.capturePrimaryProbeServiceContext();
+    await expect(settleScheduledProbe(state, recordSpy, 'manual', childOps({ help: NON_STRICT_HELP })))
+      .resolves.toMatchObject({ status: 'unknown', reason: CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG });
+    state.recordTurnCapabilitySuccess(true);
+    expect(state.primaryModelUsability).toMatchObject({ status: 'unknown', reason: CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG });
+    expect(clears(UNUSABLE)).toBe(0);
+
+    // A usable probe result releases it. A scheduled probe would reuse the cached help verdict, so record one.
+    state.fallback.recordPrimaryModelUsability(USABLE, 'manual');
+    state.recordTurnCapabilitySuccess(true);
+    expect(state.primaryModelUsability).toMatchObject({ status: 'usable', reason: 'turn-success' });
+    expect(clears(UNUSABLE)).toBe(2);
+  });
+
+  it('wiring: the production scheduler hands the probe a rebind that adopts into the runtime when no canary is required', async () => {
+    const { state, recordSpy } = schedulerRuntime({ canaryStore: false });
+    const cli = serveInstall(state, ['1.0.0', '1.0.1']);
+    const expected = state.primaryProbeServiceContext;
     cli.point('1.0.1');
-    const probe = harness({ expected });
+    const child = childOps();
 
-    const result = await probePrimaryModelUsability(TARGET, createPrimaryModelProbeAdapters(undefined, {
-      ...probe.deps,
-      serviceContext: deps.serviceContext as PrimaryProbeServiceContext,
-      rebindServiceContext: deps.rebindServiceContext,
-      providerCanaryAdmission: deps.providerCanaryAdmission,
-    } as PrimaryModelProbeAdapterDeps));
+    const recorded = await settleScheduledProbe(state, recordSpy, 'manual', child);
 
-    expect(result).toMatchObject({ status: 'usable' });
+    expect(recorded).toMatchObject({ status: 'usable', provider: 'claude-cli', model: MODEL });
     expect(state.primaryProbeServiceContext).not.toBe(expected);
     expect(state.primaryProbeServiceContext).toMatchObject({ binarySha256: sha256Of(cli.version('1.0.1')) });
+    expect(child.modelProbe).toHaveBeenCalledExactlyOnceWith(
+      cli.version('1.0.1'), expect.any(Array), expect.any(Object), expect.any(Object),
+    );
+    // Last, so a failure here shows the adoption above held: refresh-ahead runs the resolved file.
+    expect(child.refresh).toHaveBeenCalledExactlyOnceWith(cli.version('1.0.1'), expect.any(Object));
   });
 
   it('wiring: the production scheduler declines the rebind when a required canary does not admit the new binary', async () => {
-    const cli = install(['1.0.0', '1.0.1']);
-    vi.stubEnv('PATH', cli.binDir);
-    const expected = capture(cli.binDir);
     // An empty canary store in a per-chat runtime: the canary is required and holds no receipt.
     const { state, recordSpy } = schedulerRuntime({ canaryStore: true });
-    state.primaryProbeServiceContext = expected;
-    const deps = await scheduledProbeDeps(state, recordSpy);
+    const cli = serveInstall(state, ['1.0.0', '1.0.1']);
+    const expected = state.primaryProbeServiceContext;
     cli.point('1.0.1');
-    const probe = harness({ expected });
+    const child = childOps();
 
-    const result = await probePrimaryModelUsability(TARGET, createPrimaryModelProbeAdapters(undefined, {
-      ...probe.deps,
-      serviceContext: deps.serviceContext as PrimaryProbeServiceContext,
-      rebindServiceContext: deps.rebindServiceContext,
-      providerCanaryAdmission: deps.providerCanaryAdmission,
-    } as PrimaryModelProbeAdapterDeps));
+    const recorded = await settleScheduledProbe(state, recordSpy, 'manual', child);
 
-    expect(result).toMatchObject({ status: 'unknown', reason: RESTART_REQUIRED });
+    expect(recorded).toMatchObject({ status: 'unknown', provider: 'claude-cli', model: MODEL, reason: RESTART_REQUIRED });
     expect(state.primaryProbeServiceContext).toBe(expected);
-    expect(probe.modelProbe).not.toHaveBeenCalled();
+    expect(child.modelProbe).not.toHaveBeenCalled();
+    // The gate finds the launcher it looks for and collects its evidence, which
+    // alone sets the digest, so the missing receipt declines, not the lookup.
+    expect(readProviderCanaryAdmission({
+      providerId: 'claude-cli',
+      binary: LAUNCHER,
+      proxyScriptPath: providerMcpProxyScriptPath(),
+      stateRoot: mutableConfig.stateRoot,
+      sessionScope: 'per_chat',
+      sandboxPerChat: false,
+    })).toMatchObject({ required: true, allowed: false, binarySha256: sha256Of(cli.version('1.0.1')) });
   });
 
   it('p3: a held turn success does not log that it refreshed stale usability', () => {
