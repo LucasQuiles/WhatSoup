@@ -25,7 +25,10 @@ import {
 } from './providers/primary-model-usability-adapters.ts';
 import type { ProviderExecutionGate } from './provider-execution-gate.ts';
 import { getProviderBinary } from './session.ts';
-import { resolveProviderBinaryIdentity } from './provider-canary-proof.ts';
+import { resolveProviderBinaryIdentity, type ProviderAdmission } from './provider-canary-proof.ts';
+import { providerCanaryAdmissionGate } from './session-mcp-wiring.ts';
+import { requiresPerChatActorSocket } from './providers/index.ts';
+import { providerMcpProxyScriptPath } from '../../core/provider-mcp-config.ts';
 
 // #3017 AXIS A: periodic primary-readiness probe. The freshness window
 // (MODEL_USABILITY_FRESHNESS_MS in runtime.ts = 30min) only matters if
@@ -211,6 +214,53 @@ export function buildPrimaryProbeAdapterDeps(
     ...(requireServiceContext ? { requireServiceContext } : {}),
     ...(currentServiceContext ? { currentServiceContext } : {}),
     ...(probeTrigger ? { probeTrigger } : {}),
+  };
+}
+
+/** What the session canary gate grants when no canary is required. */
+const CANARY_NOT_REQUIRED: ProviderAdmission = {
+  allowed: true,
+  required: false,
+  resolvedPath: '',
+  binarySha256: '',
+  proxyScriptSha256: '',
+};
+
+/**
+ * Deps that let a scheduled primary probe adopt an in-place CLI update. The
+ * canary gate is the one a new primary session must pass, so a rebind never
+ * adopts a binary that new sessions would refuse. It is built only when a
+ * rebind is attempted, so scheduling a probe cannot throw; a gate that throws
+ * declines the rebind. The rebind is a compare-and-set on the stored context:
+ * a newer capture or rebind wins.
+ */
+export function buildPrimaryProbeRebindDeps(input: {
+  provider: string;
+  sessionScope: string;
+  sandboxPerChat: boolean;
+  stateRoot: string;
+  stored: () => PrimaryProbeServiceContext | null;
+  adopt: (next: PrimaryProbeServiceContext) => void;
+}): Pick<PrimaryModelProbeAdapterDeps, 'rebindServiceContext' | 'providerCanaryAdmission'> {
+  return {
+    rebindServiceContext: (previous, next) => {
+      if (input.stored() !== previous) return false;
+      input.adopt(next);
+      return true;
+    },
+    providerCanaryAdmission: async () => {
+      const gate = providerCanaryAdmissionGate(
+        requiresPerChatActorSocket(input.provider, input.sessionScope, input.sandboxPerChat),
+        {
+          providerId: input.provider,
+          proxyScriptPath: providerMcpProxyScriptPath(),
+          stateRoot: input.stateRoot,
+          sessionScope: input.sessionScope,
+          sandboxPerChat: input.sandboxPerChat,
+        },
+      );
+      return gate ? gate() : CANARY_NOT_REQUIRED;
+    },
   };
 }
 

@@ -19,7 +19,9 @@
  * rule code. Never the matched text, a term id or a term value. Every message
  * this module produces names a term only by its index in the `terms` array.
  *
- * No npm packages: Node built-ins and dependency-free repository modules only, so every guard and hook can import it.
+ * No npm packages: it imports Node built-ins and two repository modules (src/lib/type-guards.ts and
+ * repo-hygiene-policy.ts) whose own imports reach no npm package either, so every guard, hook and
+ * the hosted boundary check can load it without node_modules.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';

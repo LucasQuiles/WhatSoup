@@ -1,0 +1,205 @@
+name: Private boundary
+
+# The hosted `boundary (private)` check: the pull request candidate against the private term
+# list, which only this job holds (environment secret WHATSOUP_PRIVATE_TERMS_JSON, the base64 of
+# the minified term file).
+#
+# - workflow_run runs this file from the default branch; no file of the candidate is checked out,
+#   executed, sourced, imported, installed or used as configuration. The scanner is the exact
+#   files of scripts/boundary-private-scan.ts and its import closure, read from the default-branch
+#   commit, and one pinned action.
+# - The candidate is data: the Quality run's head and the tip of the pull request's base branch,
+#   bound through the API and fetched into a separate bare git directory.
+# - The log gives the bound pull request number, commit ids and counts by mode and rule code; the
+#   check run gives the counts. Neither gives a matched text. The whole-tree baseline check
+#   (guard:repo:tree) stays local and does not run here.
+# - Only pull_request runs of Quality are bound. Before this check is required with a merge
+#   queue, it needs a merge_group binding, or the queue waits for a check that never comes.
+
+on:
+  workflow_run:
+    workflows: [Quality]
+    types: [completed]
+
+permissions: {}
+
+# Runs for one head publish in order: a later run waits for the running one (a newer pending run
+# replaces an older pending one), and each run reads the pull request again before it publishes.
+concurrency:
+  group: boundary-private-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    if: >-
+      github.repository == 'LucasQuiles/WhatSoup' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.status == 'completed' &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: private-scanner-trusted
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      checks: write
+    steps:
+      - name: Create the owned scratch folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          scratch="$RUNNER_TEMP/boundary-private"
+          test ! -e "$scratch"
+          mkdir -m 700 -- "$scratch" "$scratch/trusted"
+
+      # workflow_run supplies the default-branch revision; no candidate checkout is used.
+      - name: Read exact trusted scanner files
+        shell: bash
+        env:
+          TRUSTED_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TRUSTED_FILES: |
+            scripts/boundary-private-scan.ts
+            scripts/lib/ci-control/exact-range-provenance.ts
+            scripts/lib/ci-control/git-blob-input.ts
+            scripts/lib/ci-control/git-input-core.ts
+            scripts/lib/ci-control/git-input.ts
+            scripts/lib/ci-control/input-limits.ts
+            scripts/lib/ci-control/trusted-git.ts
+            scripts/lib/cli-args.ts
+            scripts/lib/guard-core.ts
+            scripts/lib/private-terms.ts
+            scripts/lib/repo-hygiene-boundary.ts
+            scripts/lib/repo-hygiene-policy.ts
+            scripts/lib/verification/boundary-run/contracts.ts
+            scripts/lib/verification/boundary-run/model.ts
+            scripts/lib/verification/boundary-run/schema.ts
+            scripts/lib/verification/boundary-run/shared.ts
+            scripts/lib/verification/boundary-run/worktree.ts
+            scripts/repo-hygiene-guard.ts
+            src/lib/git-env.ts
+            src/lib/type-guards.ts
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          curl_version="$(curl --version | awk 'NR == 1 { print $2; exit }')"
+          [[ "$curl_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          IFS=. read -r curl_major curl_minor _curl_patch <<< "$curl_version"
+          if ! (( curl_major > 8 || (curl_major == 8 && curl_minor >= 4) )); then
+            echo "boundary (private): curl 8.4.0 or newer is required for bounded trusted-file downloads"
+            exit 2
+          fi
+          trusted="$RUNNER_TEMP/boundary-private/trusted"
+          count=0
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            [[ "$file" =~ ^(scripts|src)/[A-Za-z0-9/._-]+\.ts$ ]]
+            [[ "$file" != *..* ]]
+            mkdir -p -- "$trusted/$(dirname -- "$file")"
+            status="$(curl --silent --fail --proto '=https' --connect-timeout 5 --max-time 30 \
+              --max-filesize 1048576 --header 'Accept: application/vnd.github.raw+json' \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --output "$trusted/$file" --write-out '%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/$file?ref=$TRUSTED_SHA")"
+            test "$status" = 200
+            test -s "$trusted/$file"
+            count=$((count + 1))
+          done <<< "$TRUSTED_FILES"
+          test "$count" -gt 0
+          printf '{"type":"module"}\n' > "$trusted/package.json"
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '24.x'
+
+      - name: Bind the candidate to the Quality run
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}
+          QUALITY_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/boundary-private"
+          env -i PATH="$PATH" HOME="$scratch" LANG=C LC_ALL=C \
+            GITHUB_TOKEN="$GITHUB_TOKEN" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_API_URL="$GITHUB_API_URL" \
+            QUALITY_RUN_ID="$QUALITY_RUN_ID" QUALITY_HEAD_SHA="$QUALITY_HEAD_SHA" \
+            node "$scratch/trusted/scripts/boundary-private-scan.ts" bind --out "$scratch"
+
+      - name: Fetch the candidate commits as data
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/boundary-private"
+          env -i PATH="$PATH" HOME="$scratch" LANG=C LC_ALL=C \
+            node "$scratch/trusted/scripts/boundary-private-scan.ts" fetch --out "$scratch" \
+            --remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+
+      # The secret is the base64 of the minified term file on one line, so log masking matches it
+      # exactly. The step decodes it into the term file and prints neither form.
+      - name: Write the private term file
+        shell: bash
+        env:
+          WHATSOUP_PRIVATE_TERMS_JSON: ${{ secrets.WHATSOUP_PRIVATE_TERMS_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WHATSOUP_PRIVATE_TERMS_JSON:-}" ]; then
+            echo "boundary (private): the private term secret is missing or empty; the check fails closed"
+            exit 1
+          fi
+          umask 077
+          terms_file="$RUNNER_TEMP/private-terms.json"
+          test ! -e "$terms_file"
+          if ! printf '%s' "$WHATSOUP_PRIVATE_TERMS_JSON" | base64 -d > "$terms_file" 2> /dev/null || [ ! -s "$terms_file" ]; then
+            rm -f -- "$terms_file"
+            echo "boundary (private): the private term secret is not the base64 of a non-empty term file; the check fails closed"
+            exit 1
+          fi
+          chmod 600 "$terms_file"
+          test -n "$(find "$terms_file" -maxdepth 0 -type f -perm 600)"
+
+      - name: Scan the candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/boundary-private"
+          env -i PATH="$PATH" HOME="$scratch" LANG=C LC_ALL=C \
+            WHATSOUP_PRIVATE_TERMS_FILE="$RUNNER_TEMP/private-terms.json" WHATSOUP_REQUIRE_PRIVATE_TERMS=1 \
+            node "$scratch/trusted/scripts/boundary-private-scan.ts" scan --out "$scratch"
+
+      - name: Remove the private term file
+        id: remove-terms
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f -- "$RUNNER_TEMP/private-terms.json"
+          test ! -e "$RUNNER_TEMP/private-terms.json"
+
+      # Success only for a passing scan result, after the removal step succeeded, for a pull request
+      # that still matches its binding. With Node, the trusted scanner and a well-formed head id in
+      # place, an earlier refusal or fault publishes failure; a run that ends before it creates the
+      # check run publishes nothing.
+      - name: Publish the boundary (private) check run
+        if: always()
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}
+          QUALITY_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TERMS_REMOVAL: ${{ steps.remove-terms.outcome }}
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/boundary-private"
+          if [ ! -f "$scratch/trusted/scripts/boundary-private-scan.ts" ] || ! command -v node > /dev/null; then
+            echo "boundary (private): the trusted scanner is not in place; no check run can be published"
+            exit 2
+          fi
+          env -i PATH="$PATH" HOME="$scratch" LANG=C LC_ALL=C \
+            GITHUB_TOKEN="$GITHUB_TOKEN" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_API_URL="$GITHUB_API_URL" \
+            QUALITY_RUN_ID="$QUALITY_RUN_ID" QUALITY_HEAD_SHA="$QUALITY_HEAD_SHA" TERMS_REMOVAL="$TERMS_REMOVAL" \
+            node "$scratch/trusted/scripts/boundary-private-scan.ts" publish --out "$scratch"

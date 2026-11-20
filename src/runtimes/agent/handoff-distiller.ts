@@ -25,6 +25,38 @@ import {
 } from './handoff-distill-gate.ts';
 import type { HandoffArtifact } from './handoff-prelude.ts';
 import { errorMessage } from '../../lib/error-message.ts';
+import { shortHash } from '../../lib/short-hash.ts';
+import { createChildLogger } from '../../logger.ts';
+
+const log = createChildLogger('handoff-distiller');
+
+/** Sink for the one warn line per failed distill (a pino logger in production). */
+export interface HandoffDistillLog {
+  warn: (obj: Record<string, unknown>, msg: string) => void;
+}
+
+/** Where a failed run stopped; it names the warn line's reason class. */
+type DistillPhase = 'distill' | 'accounting' | 'persist';
+type DistillFailureClass = 'provider' | 'provider-usage' | 'timeout' | 'accounting' | 'persist';
+
+/**
+ * The fixed reason code each failure class logs. Never exception text: no
+ * sanitizer reliably removes every path, opaque value or digest it can carry.
+ */
+const DISTILL_FAILURE_REASON_CODES: Readonly<Record<DistillFailureClass, string>> = {
+  provider: 'provider-error',
+  'provider-usage': 'provider-usage-rejected',
+  timeout: 'provider-timeout',
+  accounting: 'token-accounting-error',
+  persist: 'persist-error',
+};
+
+function distillFailureClass(err: unknown, phase: DistillPhase): DistillFailureClass {
+  if (phase !== 'distill') return phase;
+  if (err instanceof HandoffDistillUsageError) return 'provider-usage';
+  const name = err instanceof Error ? err.name : '';
+  return name === 'AbortError' || name === 'TimeoutError' ? 'timeout' : 'provider';
+}
 
 /** Result of the injected LLM distill call. */
 export interface DistillOutcome {
@@ -62,6 +94,8 @@ export interface RunHandoffDistillDeps {
   persist: (artifact: HandoffArtifact) => void;
   /** Optional degradation signal (alert outbox) on distill failure. */
   onDegraded?: (reason: string) => void;
+  /** Sink for the failure warn line; defaults to the module logger. */
+  log?: HandoffDistillLog;
 }
 
 export interface RunHandoffDistillResult {
@@ -98,8 +132,10 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
     reservedTokens = tokens;
     chargedTokens = decision.nextState.tokensThisWindow + tokens;
   };
+  let phase: DistillPhase = 'distill';
   try {
     const outcome = await deps.distill(reserveTokens);
+    phase = 'accounting';
     if (reservedTokens === undefined) throw new Error('handoff token reservation missing');
     const nextState = recordDistillSuccess(decision.nextState, outcome.tokensUsed, deps.now, deps.config);
     chargedTokens = nextState.tokensThisWindow;
@@ -108,6 +144,7 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
       chargedTokens = Math.max(chargedTokens, deps.config.maxTokensPerWindow);
       throw new Error('handoff reported token usage exceeds reservation');
     }
+    phase = 'persist';
     deps.persist({
       conversationKey: deps.conversationKey,
       summary: outcome.summary,
@@ -133,6 +170,15 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
       tokensThisWindow: chargedTokens ?? decision.nextState.tokensThisWindow };
     const nextState = recordDistillFailure(failureState, deps.now, deps.config);
     const reason = errorMessage(err);
+    // One line per failed run: hashed key, reason class and that class's fixed reason code.
+    const sink: HandoffDistillLog = deps.log ?? log;
+    const reasonClass = distillFailureClass(err, phase);
+    sink.warn({
+      event: 'handoff_distill_failed',
+      conversationKeyHash: shortHash(deps.conversationKey),
+      reasonClass,
+      reason: DISTILL_FAILURE_REASON_CODES[reasonClass],
+    }, 'handoff distill failed');
     deps.onDegraded?.(`handoff distill failed: ${reason.slice(0, 160)}`);
     return { ran: false, denied: null, failed: true, nextState };
   }

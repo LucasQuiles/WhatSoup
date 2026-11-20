@@ -1,9 +1,11 @@
 /**
  * Public-boundary scanning for the repository hygiene guard (one check, several inputs).
  *
- * Shared by scripts/repo-hygiene-guard.ts (its --tree, --text and --refs modes and the term
- * rules every other mode adds), scripts/pre-push-guard.ts (pushed ref names) and
- * scripts/pr-metadata-guard.ts (PR title and body). It holds:
+ * Shared by scripts/repo-hygiene-guard.ts (its --tree, --text and --refs modes, and the term
+ * rules that every mode except --release-hygiene adds; that mode loads and validates the term
+ * file but applies its own, wider rule set), scripts/pre-push-guard.ts (pushed ref names),
+ * scripts/pr-metadata-guard.ts (PR title and body) and scripts/boundary-private-scan.ts (the
+ * hosted checks). It holds:
  *
  * - the single finding formatter: it accepts only a location and a rule code and prints a
  *   static message chosen by code, with every private match in the location masked, so no
@@ -372,6 +374,24 @@ export function scanRefNames(input: string, termRules: readonly PrivateTermRule[
     }
   }
   return hits;
+}
+
+/**
+ * Rule codes in one path name: the fallback rules, then the term rules. The tree scan counts them
+ * for every tracked path name, and the hosted candidate check for every added or renamed one.
+ */
+export function pathNameCodes(
+  filePath: string,
+  termRules: readonly PrivateTermRule[],
+): Array<{ readonly origin: CountOrigin; readonly code: string }> {
+  const codes: Array<{ readonly origin: CountOrigin; readonly code: string }> = [];
+  for (const pattern of fallbackPrivatePatterns) {
+    if (findDisallowedMatch(filePath, pattern, filePath) !== null) codes.push({ origin: 'fallback', code: pattern.code });
+  }
+  for (const rule of termRules) {
+    if (findDisallowedMatch(filePath, rule, filePath) !== null) codes.push({ origin: 'term', code: rule.code });
+  }
+  return codes;
 }
 
 // ---------------------------------------------------------------------------
@@ -745,12 +765,7 @@ export function scanHeadTree(cwd: string, termRules: readonly PrivateTermRule[])
   const splitHits = new Map<string, Map<CountKey, Set<number>>>();
   let textFileCount = 0;
   for (const entry of entries) {
-    for (const pattern of fallbackPrivatePatterns) {
-      if (findDisallowedMatch(entry.path, pattern, entry.path) !== null) addHit(hits, entry.path, `fallback:${pattern.code}`, 0);
-    }
-    for (const rule of termRules) {
-      if (findDisallowedMatch(entry.path, rule, entry.path) !== null) addHit(hits, entry.path, `term:${rule.code}`, 0);
-    }
+    for (const { origin, code } of pathNameCodes(entry.path, termRules)) addHit(hits, entry.path, `${origin}:${code}`, 0);
     if (entry.type !== 'blob') continue;
     const bytes = blobs.get(entry.oid);
     if (bytes === undefined) throw new TreeScanInconclusive('a tracked blob could not be read');

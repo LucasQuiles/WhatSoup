@@ -13,6 +13,7 @@ import * as repoHygieneGuardModule from '../../scripts/repo-hygiene-guard.ts';
 import {
   createRepoHygieneExactRangeArtifact,
   currentRepoHygienePolicyDigest,
+  GuardInputError,
   isAllowedPatternMatch,
   isTrackedSensitiveArtifact,
   parseArgs,
@@ -394,26 +395,56 @@ Co-Authored-By: Person <person@example.com>
   });
 
   it('parses git author logs for commit-author scanning', () => {
+    const first = 'a'.repeat(40);
+    const second = 'b'.repeat(40);
     const commits = parseCommitAuthorLog(
-      'abc123\x00WhatSoup Test\x00whatsoup-test.invalid\x00docs: one\x1e\n'
-      + 'def456\x00Lucas Quiles\x00180208450+LucasQuiles@users.noreply.github.com\x00fix: two\x00fix: two\n\nBody.\x1e\n',
+      `${first}\x00User A\x00user-a@example.invalid\x00docs: one\x00docs: one\n\x00User A\x00user-a@example.invalid\x001763400000\x1e\n`
+      + `${second}\x00User B\x00user-b@example.invalid\x00fix: two\x00fix: two\n\nBody.\n\x00Bot A\x00bot-a@example.invalid\x001763400001\x1e\n`,
     );
 
     expect(commits).toEqual([
       {
-        sha: 'abc123',
-        name: 'WhatSoup Test',
-        email: 'whatsoup-test.invalid',
+        sha: first,
+        name: 'User A',
+        email: 'user-a@example.invalid',
         subject: 'docs: one',
+        message: 'docs: one\n',
+        committerName: 'User A',
+        committerEmail: 'user-a@example.invalid',
+        committerTime: 1763400000,
       },
       {
-        sha: 'def456',
-        name: 'Lucas Quiles',
-        email: '180208450+LucasQuiles@users.noreply.github.com',
+        sha: second,
+        name: 'User B',
+        email: 'user-b@example.invalid',
         subject: 'fix: two',
-        message: 'fix: two\n\nBody.',
+        message: 'fix: two\n\nBody.\n',
+        committerName: 'Bot A',
+        committerEmail: 'bot-a@example.invalid',
+        committerTime: 1763400001,
       },
     ]);
+  });
+
+  it('refuses a commit-author log with a malformed record instead of dropping its fields', () => {
+    const sha = 'c'.repeat(40);
+    const tail = '\x00User A\x00user-a@example.invalid\x001763400000\x1e\n';
+    const record = (subject: string, message: string, end: string = tail): string =>
+      `${sha}\x00User A\x00user-a@example.invalid\x00${subject}\x00${message}${end}`;
+    expect(parseCommitAuthorLog('')).toEqual([]);
+    expect(parseCommitAuthorLog(record('fix', 'fix\n'))).toHaveLength(1);
+    for (const [label, log] of [
+      // A record separator at the end of a message cuts the record before the committer fields.
+      ['a subject and message that end in 0x1E', record('fix\x1e', 'fix\x1e\n')],
+      ['a message body that ends in 0x1E', record('fix', 'fix\n\nbody\x1e')],
+      ['a record without the committer fields', `${sha}\x00User A\x00user-a@example.invalid\x00fix\x1e\n`],
+      ['a record with an extra field', record('fix', 'fix\n\x00extra')],
+      ['a malformed committer time', record('fix', 'fix\n', '\x00User A\x00user-a@example.invalid\x00soon\x1e\n')],
+      ['a short commit id', record('fix', 'fix\n').replace(sha, 'abc123')],
+      ['an empty record between two records', `${record('fix', 'fix\n')}\x1e\n${record('fix', 'fix\n')}`],
+    ] as const) {
+      expect(() => parseCommitAuthorLog(log), label).toThrow(GuardInputError);
+    }
   });
 
   // Regression tests for the origin/main exclusion in readCommitAuthors.
