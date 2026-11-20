@@ -3742,6 +3742,17 @@ runnable manifest digest; checks the source repository, Dockerfile path, source 
 builder invocation, selected-platform base-image and SBOM-generator dependencies. It extracts the verified embedded SPDX
 predicate for attestation, so the attested SBOM is bound to the runnable manifest and to the policy-controlled scanner.
 
+The version 4 receipt also records the SHA-256 digest of the verified OCI image configuration.
+After receipt verification, CI performs a separate cached export from the same exact source,
+pinned builder, platform and Dockerfile into the job-local Docker image store. This runtime copy
+disables attestations because classic Docker stores cannot import them; the original OCI archive
+and its provenance and SBOM remain unchanged. CI requires the loaded image ID to equal the
+receipt's configuration digest, then imports the transcription provider chain by that immutable
+image ID with networking and image pulls disabled. A missing receipt, different source, failed
+export or identity mismatch fails the check before runtime execution. The runtime export has a
+five-minute limit within the existing 100-minute job deadline. The image is temporary CI job
+state, not a registry publication or deployment acceptance.
+
 The verifier caps each JSON input at 32 MiB before parsing, including the archive root index,
 nested index, image config, manifests, and attestation statements. Descriptor sizes and
 bounded extraction enforce that cap before decoding archive JSON. Binary image layers keep

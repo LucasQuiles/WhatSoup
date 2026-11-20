@@ -44,7 +44,7 @@ export interface ContainerBuildReceiptInput {
 }
 
 export interface ContainerBuildReceipt {
-  schemaVersion: 3;
+  schemaVersion: 4;
   sourceRevision: string;
   sourceRepository: string;
   platform: 'linux/amd64';
@@ -64,6 +64,7 @@ export interface ContainerBuildReceipt {
   outputDigest: string;
   imageIndexDigest: string;
   imageDigest: string;
+  imageConfigDigest: string;
   imageManifestSize: number;
   imageArchiveSha256: string;
   metadataSha256: string;
@@ -124,6 +125,7 @@ interface OciVerificationResult {
   outputDigest: string;
   imageIndexDigest: string;
   imageDigest: string;
+  imageConfigDigest: string;
   imageManifestSize: number;
   slsaStatementSha256: string;
   spdxStatementSha256: string;
@@ -639,6 +641,7 @@ function verifyArchive(imagePath: string, expectedOutputDigest: string,
     outputDigest: expectedOutputDigest,
     imageIndexDigest,
     imageDigest,
+    imageConfigDigest: descriptorDigest(manifest.config as OciDescriptor, 'runnable image config descriptor'),
     imageManifestSize: descriptorSize(runnable, 'runnable image descriptor'),
     slsaStatementSha256,
     spdxStatementSha256,
@@ -716,7 +719,7 @@ export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): 
   const budget = new VerificationBudget();
   const { metadata, metadataBytes, runtimeBytes, buildkitImageId, policy, sourceRepository, oci, sbomBytes } = assertInput(input, budget);
   const receipt: ContainerBuildReceipt = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     sourceRevision: input.sourceRevision,
     sourceRepository,
     platform: PLATFORM,
@@ -736,6 +739,7 @@ export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): 
     outputDigest: metadata['containerimage.digest'] as string,
     imageIndexDigest: oci.imageIndexDigest,
     imageDigest: oci.imageDigest,
+    imageConfigDigest: oci.imageConfigDigest,
     imageManifestSize: oci.imageManifestSize,
     imageArchiveSha256: sha256File(input.imagePath, EVIDENCE_FILE_MAX_BYTES, () => { budget.remainingTime(); }),
     metadataSha256: sha256(metadataBytes),

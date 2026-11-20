@@ -28,15 +28,16 @@ it('allows bounded slow container, coverage and browser work to finish within th
     return found!;
   };
   const build = step('Build Docker deployment image')['timeout-minutes']!;
+  const runtime = step('Load verified deployment image and runtime providers')['timeout-minutes']!;
   const coverage = Number(step('Test suite + coverage thresholds').env?.WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS) / 60_000;
   const system = step('Install Playwright system deps')['timeout-minutes']!;
   const download = step('Install Playwright chromium')['timeout-minutes']!;
   const otherStepsAllowance = 15;
-  const slowSuccessfulRun = build + coverage + system + download + otherStepsAllowance;
-  expect([build, coverage, system, download].every((value) => Number.isFinite(value) && value > 0)).toBe(true);
+  const slowSuccessfulRun = build + runtime + coverage + system + download + otherStepsAllowance;
+  expect([build, runtime, coverage, system, download].every((value) => Number.isFinite(value) && value > 0)).toBe(true);
   expect(job['timeout-minutes']).toBe(100);
-  expect(slowSuccessfulRun).toBe(92);
-  expect(job['timeout-minutes'] - slowSuccessfulRun).toBe(8);
+  expect(slowSuccessfulRun).toBe(97);
+  expect(job['timeout-minutes'] - slowSuccessfulRun).toBe(3);
   expect(slowSuccessfulRun).toBeGreaterThan(60);
 });
 
@@ -448,7 +449,11 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('scripts/verify-buildx-runtime.ts');
     expect(qualityWorkflow).not.toContain("buildx inspect whatsoup-ci-builder --format");
     expect(qualityWorkflow).not.toContain('docker/setup-buildx-action@');
-    expect(qualityWorkflow).not.toContain('--load');
+    const workflow = parse(qualityWorkflow) as { jobs: { quality: { steps: { name: string; run?: string }[] } } };
+    const attestedBuild = workflow.jobs.quality.steps.find((step) => step.name === 'Build Docker deployment image');
+    expect(attestedBuild?.run).toContain('--output type=oci');
+    expect(attestedBuild?.run).not.toContain('--load');
+    expect(attestedBuild?.run).not.toContain('--provenance=false');
     expect(qualityWorkflow).not.toContain('docker image save whatsoup-ci');
     expect(qualityWorkflow).toContain('--metadata-file');
     expect(qualityWorkflow).toContain('"${source_repository}#${SOURCE_REVISION}"');
@@ -487,7 +492,7 @@ describe('container build evidence CI contract', () => {
       'moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea',
     );
     expect(receipt.buildkitVersion).toBe('v0.33.1');
-    expect(receipt.schemaVersion).toBe(3);
+    expect(receipt.schemaVersion).toBe(4);
     expect(receipt.platform).toBe('linux/amd64');
     expect(receipt.baseImageResolvedDigest).toBe(`sha256:${BASE_IMAGE_DIGEST}`);
     expect(receipt.sbomGeneratorResolvedDigest).toBe(`sha256:${SBOM_GENERATOR_DIGEST}`);
@@ -500,6 +505,17 @@ describe('container build evidence CI contract', () => {
     expect(receipt.sbomFormat).toBe('SPDX');
     expect(receipt.provenance).toBe('in-toto/slsa-v1');
     expect(() => verifyContainerBuildReceipt(receipt, input)).not.toThrow();
+  });
+
+  it('binds the runtime image identity to the verified OCI configuration bytes', () => {
+    const input = makeReceiptInput();
+    const receipt = createContainerBuildReceipt(input);
+    const config = JSON.stringify({ architecture: 'amd64', os: 'linux', rootfs: { type: 'layers', diff_ids: [] } });
+
+    expect(receipt.imageConfigDigest).toBe(`sha256:${sha256(config)}`);
+    expect(() => verifyContainerBuildReceipt({
+      ...receipt, imageConfigDigest: `sha256:${'f'.repeat(64)}`,
+    }, input)).toThrow('container build receipt does not match the verified build inputs');
   });
 
   it('binds a reviewed fork pull-request repository to its matching SLSA config source', () => {

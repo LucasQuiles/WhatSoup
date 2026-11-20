@@ -204,6 +204,48 @@ jobs:
             --provenance-builder-id "$provenance_builder_id" \
             --receipt "$container_dir/container-build-receipt.json"
 
+      - name: Load verified deployment image and runtime providers
+        timeout-minutes: 5
+        env:
+          SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          expected_image_id="$(node -e '
+            const fs = require("node:fs");
+            const receipt = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-container/container-build-receipt.json", "utf8"));
+            const policy = require("./docker/container-inputs.json");
+            if (receipt.schemaVersion !== 4 || !/^sha256:[a-f0-9]{64}$/.test(receipt.imageConfigDigest)
+                || receipt.sourceRevision !== process.env.SOURCE_REVISION
+                || !/^[a-f0-9]{40}$/.test(receipt.sourceRevision)
+                || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(receipt.sourceRepository)
+                || receipt.platform !== policy.platform
+                || receipt.builder !== policy.builder.name + "|" + policy.builder.driver) {
+              throw new Error("runtime export requires the verified receipt for this source and builder");
+            }
+            process.stdout.write(receipt.imageConfigDigest);
+          ')"
+          builder_name="$(node -e 'process.stdout.write(require("./docker/container-inputs.json").builder.name)')"
+          platform="$(node -e 'process.stdout.write(require("./docker/container-inputs.json").platform)')"
+          source_repository="$(node -e 'const fs = require("node:fs"); const receipt = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-container/container-build-receipt.json", "utf8")); process.stdout.write(receipt.sourceRepository)')"
+          # The OCI export retains attestations. A separate cached runtime copy
+          # also works with classic Docker stores that cannot import attestations.
+          docker buildx build \
+            --builder "$builder_name" \
+            --file docker/Dockerfile \
+            --platform "$platform" \
+            --tag whatsoup-ci \
+            --provenance=false --sbom=false \
+            --load \
+            "${source_repository}#${SOURCE_REVISION}"
+          loaded_image_id="$(docker image inspect --format '{{.Id}}' whatsoup-ci)"
+          if [ "$loaded_image_id" != "$expected_image_id" ]; then
+            echo '::error::loaded runtime image differs from verified OCI configuration' >&2
+            exit 1
+          fi
+          docker run --rm --network none --pull=never --entrypoint node "$expected_image_id" \
+            --experimental-strip-types --input-type=module \
+            --eval "const { transcribeAudio } = await import('./src/runtimes/chat/providers/transcription/chain.ts'); if (typeof transcribeAudio !== 'function') throw new Error('transcription entrypoint missing');"
+
       - name: Upload container build evidence
         if: ${{ always() && steps.build-container.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
