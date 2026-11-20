@@ -71,6 +71,20 @@ and credential are absent from the signal and receipt. Delivery attempts and
 backoff therefore cannot change the signal bytes. A newly arrived event that
 races the cycle preflight is checked again in `process_one()`.
 
+The preflight covers outbox events. Notifications that the dispatcher derives
+inside a pass (a flap-storm alert, a stale renotify, the auto-close digest) are
+authorized when they are sent, through the same wrapper. Their bookkeeping runs
+first, as it does today: the flap trip is counted, a stale incident is marked,
+and an aged non-actionable incident is closed. A refused or unavailable
+authority is handled like a failed send: the flap-storm lifecycle is rolled
+back, the stale record is marked failed, and the digest stays pending, so each
+notice is retried on a later pass and none is recorded as delivered.
+
+The guarantee covers the dispatcher, the Q loop, and the owner route. The
+deadman and health-check paths in `bot-errors-health-check.py` still send
+directly, so that they can report a stalled or unreachable stack; they are
+outside this boundary.
+
 The Q loop performs the same acceptance before bootstrap, nudge, or checkpoint
 messages. Owner copies and credential re-pages pass through the shared
 receipt-validating sender in `lib/owner_route.py`; the repository security
@@ -78,8 +92,9 @@ boundary guard rejects direct dispatcher, owner-route, or Q-loop transports.
 The guard also pins the authority preflight ahead of credential observation,
 suppression, flap/storm mutation, and delivery, inventories the full `deploy/`
 tree, rejects test-only dry seams in service definitions, and verifies the two
-producer credential settings remain distinct. The guard runs in the branch,
-release, quality, diagnostics, empty-scope, and guard meta-test paths.
+producer credential settings remain distinct. The guard's test
+(`tests/scripts/security-boundary-guard.test.ts`) scans the live tree, so the
+test suite enforces it.
 
 Configure the authority through the private host env file:
 
@@ -130,10 +145,23 @@ approval-shaped or recovery-shaped messages cannot grant scope or change an
 incident. Use separate credentials for notifier, Q receiver, diagnostician,
 approver, executor, and recovery witness roles.
 
-The producer that opened an occurrence cannot resolve it with its own clear.
-Resolution requires the complete phase chain and a fresh
-`recovery_confirmed` fact from an independent recovery-witness producer with a
-closed `evidenceClass` and a content-free `sha256:` evidence digest. Supported
+The producer that opened an occurrence cannot resolve it with its own clear,
+and an occurrence without recorded opener provenance stays open. Two paths can
+resolve an occurrence:
+
+- The phase route resolves it only through the complete phase chain and a
+  fresh `recovery_confirmed` fact from an independent recovery-witness
+  producer.
+- A `condition_recovered` signal from a different producer in the same
+  producer domain still resolves it, provided the signal is newer, by
+  occurrence sequence and observation time, than the last observation. This
+  signal path does not check actor class, phase predecessors or recovery
+  evidence. Before this change any producer in the domain, including the
+  opener, could resolve an occurrence this way. Requiring the phase chain on
+  this path as well is a separate, fleet-wide change.
+
+A `recovery_confirmed` fact needs a closed `evidenceClass` and a content-free
+`sha256:` evidence digest. Supported
 classes are `runtime_reverified`, `provider_acknowledged`, and
 `sustained_runtime_stability`; adding a class requires a reviewed source
 change. Missing or unsupported evidence, malformed digests, wrong actors,
@@ -152,6 +180,16 @@ credentials or removing the authority settings is the fail-closed rollback:
 new protected effects stop while the outbox, receipts, phase facts, and
 diagnostic evidence remain available for investigation. It does not undo a
 notification or action that already occurred.
+
+Release rollback and the incident database: this release migrates the fleet
+incident database (`incidents.db`) to schema version 3, and an earlier release
+refuses to open a database above its own schema version. Before the first
+migration, the fleet server keeps a copy of the database at its old version
+beside it (`incidents.db.schema-v<N>.bak`). To roll back to an earlier release:
+stop the fleet server, move `incidents.db` and its `-wal` and `-shm` files
+aside, copy the `.bak` file to `incidents.db`, then start the earlier release.
+Signals, phase facts and admission counters recorded after the migration are
+not in the copy; keep the moved-aside database for investigation.
 
 ### NORMATIVE — D2 Fail-closed health-profile guard
 
