@@ -787,7 +787,7 @@ describe('AddLineWizard — reset-on-open (C-B3W4-3)', () => {
 })
 
 describe('AddLineWizard — tool update defaults', () => {
-  it('uses minimal tool updates for a new form', async () => {
+  it('shows the default tool update choice for a new form', async () => {
     render(<AddLineWizard open={true} onClose={vi.fn()} />)
 
     await advanceToConfigStep()
@@ -795,7 +795,7 @@ describe('AddLineWizard — tool update defaults', () => {
       fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
     })
 
-    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('minimal')
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('')
   })
 
   it('creates a default line without storing a tool update mode', async () => {
@@ -811,7 +811,29 @@ describe('AddLineWizard — tool update defaults', () => {
     expect(mockUpdateConfig.mock.calls[0]?.[1]).not.toHaveProperty('toolUpdateMode')
   })
 
-  it('resets a reopened form to minimal tool updates', async () => {
+  it('stores minimal when the operator picks Minimal', async () => {
+    render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'minimal' } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /create line/i })).toBeDefined())
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1))
+    expect(mockUpdateConfig.mock.calls[0]?.[1]).toMatchObject({ toolUpdateMode: 'minimal' })
+  })
+
+  it('resets a reopened form to the default tool update choice', async () => {
     const { rerender } = render(<AddLineWizard open={true} onClose={vi.fn()} />)
 
     await advanceToConfigStep()
@@ -832,7 +854,7 @@ describe('AddLineWizard — tool update defaults', () => {
       fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
     })
 
-    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('minimal')
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('')
   })
 })
 

@@ -434,11 +434,40 @@ describe('ConfigStep — real React handler wiring', () => {
   })
 
   describe('tool update verbosity', () => {
-    it('uses minimal updates when the form has no configured mode', () => {
+    it('shows the default as its own choice when the form has no configured mode', () => {
       renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
       fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
 
-      expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('minimal')
+      const select = screen.getByLabelText('Tool update verbosity') as HTMLSelectElement
+      expect(select.value).toBe('')
+      expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'full', 'minimal'])
+      expect(select.options[select.selectedIndex]?.textContent).toMatch(/default/i)
+    })
+
+    it('writes minimal when the operator selects it', () => {
+      const { onChange } = renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+      onChange.mockClear()
+
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'minimal' } })
+
+      expect(onChange).toHaveBeenCalledWith({ toolUpdateMode: 'minimal' })
+    })
+
+    it('clears the mode when the operator returns to the default', () => {
+      const { onChange } = renderConfigStep({
+        initialData: { type: 'passive', name: 'watcher', toolUpdateMode: 'full' },
+      })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+      onChange.mockClear()
+
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: '' } })
+
+      const patch = onChange.mock.calls
+        .map(([arg]) => arg as Record<string, unknown>)
+        .find((arg) => Object.hasOwn(arg, 'toolUpdateMode'))
+      expect(patch).toBeDefined()
+      expect(patch?.toolUpdateMode).toBeUndefined()
     })
 
     it('writes full updates only when the operator selects them', () => {

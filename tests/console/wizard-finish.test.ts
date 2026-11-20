@@ -27,8 +27,14 @@ describe('buildFinishPatch', () => {
     expect(credentials).toEqual([]);
   });
 
-  it('stores the tool update mode only when it differs from the minimal default', () => {
-    expect(buildFinishPatch({ name: 'w', toolUpdateMode: 'minimal' }).patch).not.toHaveProperty('toolUpdateMode');
+  it('stores the tool update mode the operator selects, minimal included', () => {
+    expect(buildFinishPatch({ name: 'w', toolUpdateMode: 'minimal' }).patch).toMatchObject({ toolUpdateMode: 'minimal' });
     expect(buildFinishPatch({ name: 'w', toolUpdateMode: 'full' }).patch).toMatchObject({ toolUpdateMode: 'full' });
+  });
+
+  it('stores no tool update mode when the operator keeps the default', () => {
+    expect(buildFinishPatch({ name: 'w' }).patch).not.toHaveProperty('toolUpdateMode');
+    // The default choice clears the form field to undefined; the PATCH must not carry the key.
+    expect(buildFinishPatch({ name: 'w', toolUpdateMode: undefined }).patch).not.toHaveProperty('toolUpdateMode');
   });
 });
