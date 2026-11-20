@@ -323,8 +323,8 @@ and not fixed yet:
   time it cannot represent can stop a send before it is made.
 - The macOS installer prefers a value exported in its shell over the env file
   and copies it into the dispatcher plist; it installs no Q-loop service.
-- The test matrix compares message content only for the queued alert; the
-  other paths are checked as sent, not as sent unchanged.
+- The test matrix compares message content only for the queued alert; for the
+  other paths it counts the sends without comparing their text.
 
 ### Upgrading a host to this release
 
