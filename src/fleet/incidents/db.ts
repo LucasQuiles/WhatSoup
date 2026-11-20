@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, existsSync, linkSync, lstatSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { forceEnsurePrivateDirectorySync } from '../../lib/private-fs.ts';
@@ -43,18 +44,94 @@ function applyMigrations(db: DatabaseSync, fromVersion: number): void {
   }
 }
 
+export interface IncidentDbOpenHooks {
+  /** Test seam: runs on the temporary pre-migration copy before it is verified. */
+  afterPreMigrationCopy?: (tmpPath: string) => void;
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    // intentional: lstat failing means nothing is at the path, which is the answer
+    return false;
+  }
+}
+
+// A copy counts only if it is a regular file (never a symlink), opens
+// read-only, passes quick_check and carries exactly the old schema version.
+function isValidPreMigrationCopy(copyPath: string, version: number): boolean {
+  try {
+    if (!lstatSync(copyPath).isFile()) return false;
+  } catch {
+    // intentional: an unreadable path is not a usable copy, and the caller fails closed
+    return false;
+  }
+  let copy: DatabaseSync | undefined;
+  try {
+    copy = new DatabaseSync(copyPath, { readOnly: true });
+    const check = copy.prepare('PRAGMA quick_check').get() as { quick_check?: string } | undefined;
+    if (check?.quick_check !== 'ok') return false;
+    const row = copy.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
+      | { value?: unknown }
+      | undefined;
+    return row?.value === String(version);
+  } catch {
+    // intentional: a copy that cannot be opened or read is invalid, and the caller fails closed
+    return false;
+  } finally {
+    copy?.close();
+  }
+}
+
+// A WAL-mode source can yield a WAL-mode copy; settle it into one
+// self-contained file so the read-only check and a later restore need no
+// sidecar files (same approach as scripts/lib/sqlite-consistent-backup.ts).
+function settleCopy(path: string): void {
+  const copy = new DatabaseSync(path);
+  try {
+    copy.exec('PRAGMA journal_mode = DELETE');
+  } finally {
+    copy.close();
+  }
+}
+
 // An earlier release refuses a database above its own schema version, so a
-// migration first leaves a copy that release can open. The first copy taken at
-// a version is the rollback point and is never overwritten.
-function keepPreMigrationCopy(db: DatabaseSync, dbPath: string, fromVersion: number): void {
+// migration first leaves a copy that release can open. The copy is written
+// under a temporary name, verified, and then linked into place, which never
+// replaces anything already at the destination. An existing destination is
+// kept only if it passes the same verification; otherwise the open fails
+// closed and names the file to inspect.
+function keepPreMigrationCopy(
+  db: DatabaseSync,
+  dbPath: string,
+  fromVersion: number,
+  hooks: IncidentDbOpenHooks,
+): void {
   if (fromVersion >= INCIDENT_SCHEMA_VERSION) return;
   const copyPath = `${dbPath}.schema-v${fromVersion}.bak`;
-  if (existsSync(copyPath)) return;
+  if (pathEntryExists(copyPath)) {
+    if (isValidPreMigrationCopy(copyPath, fromVersion)) return;
+    throw new IncidentStoreCorruptError(
+      `pre-migration copy ${copyPath} is not a valid schema v${fromVersion} database; inspect or move it`,
+    );
+  }
+  const tmpPath = `${copyPath}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    db.prepare('VACUUM INTO ?').run(copyPath);
-    chmodSync(copyPath, 0o600);
+    db.prepare('VACUUM INTO ?').run(tmpPath);
+    settleCopy(tmpPath);
+    chmodSync(tmpPath, 0o600);
+    hooks.afterPreMigrationCopy?.(tmpPath);
+    if (!isValidPreMigrationCopy(tmpPath, fromVersion)) {
+      throw new Error('pre-migration copy failed verification');
+    }
+    linkSync(tmpPath, copyPath);
   } catch {
-    throw new IncidentStoreCorruptError('pre-migration copy failed');
+    throw new IncidentStoreCorruptError(`pre-migration copy failed: ${copyPath}`);
+  } finally {
+    rmSync(tmpPath, { force: true });
+    rmSync(`${tmpPath}-journal`, { force: true });
   }
 }
 
@@ -76,7 +153,7 @@ function readExistingVersion(db: DatabaseSync): number {
   return value;
 }
 
-export function openIncidentDb(dbPath: string): DatabaseSync {
+export function openIncidentDb(dbPath: string, hooks: IncidentDbOpenHooks = {}): DatabaseSync {
   forceEnsurePrivateDirectorySync(dirname(dbPath), 'incident store directory');
   const fresh = isFreshTarget(dbPath);
 
@@ -98,7 +175,7 @@ export function openIncidentDb(dbPath: string): DatabaseSync {
       applyMigrations(db, 0);
     } else {
       const fromVersion = readExistingVersion(db);
-      keepPreMigrationCopy(db, dbPath, fromVersion);
+      keepPreMigrationCopy(db, dbPath, fromVersion, hooks);
       applyMigrations(db, fromVersion);
     }
   } catch (err) {
