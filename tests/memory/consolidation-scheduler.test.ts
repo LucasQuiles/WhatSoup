@@ -460,7 +460,7 @@ describe('MemoryConsolidationScheduler', () => {
         senderJid: 'sender',
       },
     }, {
-      // Two promotions need two source sets: one set is one lineage (#2569 A0).
+      // Two promotions need two source sets: one set is one lineage (#2569).
       id: 'record-2',
       score: 0.9,
       record: {
@@ -540,7 +540,7 @@ describe('MemoryConsolidationScheduler', () => {
         senderJid: 'sender',
       },
     }, {
-      // Two promotions need two source sets: one set is one lineage (#2569 A0).
+      // Two promotions need two source sets: one set is one lineage (#2569).
       id: 'record-2',
       score: 0.9,
       record: {

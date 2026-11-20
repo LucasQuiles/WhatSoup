@@ -337,8 +337,8 @@ export async function runConsolidation(
         continue;
       }
 
-      // Every promotion's lineage is derived before the first write (#2569
-      // A0). Identity is the canonical source set, never claim wording, and a
+      // Every promotion's lineage is derived before the first write (#2569).
+      // Identity is the canonical source set, never claim wording, and a
       // source id outside this cluster fails the cluster closed with nothing
       // written. consolidateCluster has already validated the output; this is
       // the write site's own guard, so a dry run reports only what a live run

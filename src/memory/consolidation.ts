@@ -78,7 +78,7 @@ function outputMatchesCluster(
   result: ConsolidationResult,
   clusterRecordIds: ReadonlySet<string>,
 ): boolean {
-  // Promotion identity is the canonical source set (#2569 A0): two promotions
+  // Promotion identity is the canonical source set (#2569): two promotions
   // citing one set would resolve to one remote record, and the second write
   // would silently replace the first. A source also cannot be both promoted
   // and discarded. Either fails the whole cluster closed, before any write.

@@ -1918,8 +1918,8 @@ query, top-100, with a provider-side filter excluding the `consolidated`
 confidence qualifier while retaining records without that field), scopes them by chat+sender, clusters them
 (`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
 upserts promoted claims back to the remote store with `confidenceQualifier: 'consolidated'`.
-Before slice A0 those ids were `durable:<shortHash(scope + claim)>` (§10.2 now owns the
-identity rule).
+Before source-set identity those ids were `durable:<shortHash(scope + claim)>` (§10.2 now
+owns the identity rule).
 
 Three defects were proven against this shape (#2569):
 
@@ -1932,8 +1932,8 @@ Three defects were proven against this shape (#2569):
    first could merge two unrelated topics into one cluster.
 3. **Wording-keyed promotion identity.** The durable id hashed scope + claim text:
    identical wording silently overwrote, while a wording variation for the same
-   sources minted a new durable record with no supersession link. Fixed by slice A0
-   (§10.2); records written before it keep their old ids (legacy, §10.3).
+   sources minted a new durable record with no supersession link. Fixed by source-set
+   identity (§10.2); records written before it keep their old ids (legacy, §10.3).
 
 ### 10.2 Landed guards (this slice)
 
@@ -1957,7 +1957,7 @@ run's `skipped` counter (which therefore accrues both exclusion reasons; the log
 `consolidatedExcluded` and `unscopedSkipped` keep the reasons distinct and content-free).
 A consolidation run can no longer consume its own prior output.
 
-**Lineage identity (slice A0).** A promotion's id is
+**Source-set identity (lineage policy 1).** A promotion's id is
 `durable:l<policy>:<hash>`, where the hash covers the lineage policy version, the
 chat+sender scope and the canonical (code-unit ascending) set of source record ids
 (`consolidationLineage`, `src/memory/consolidation-lineage.ts`). Claim wording never
@@ -1994,7 +1994,7 @@ designed contract mirrors the fact-export queue machinery (§9):
   (`pending_write`) → re-drive the same idempotent upsert while its sources stay
   un-leasable; written-but-undispositioned sources → complete the disposition. The
   promote-once guarantee lives in this replay, not in the happy path.
-- **Promotion identity.** Landed in slice A0 (§10.2): scope + the canonical
+- **Promotion identity.** Landed as source-set identity (§10.2): scope + the canonical
   source set + the lineage policy version, never claim wording. Because the policy
   version is an identity input, a policy bump mints a new lineage; the ledger records
   the prior lineage as superseded rather than leaving an unlinked sibling. A
@@ -2003,8 +2003,9 @@ designed contract mirrors the fact-export queue machinery (§9):
   stable `conflict` code — collision policy is an owner decision.
 - **Legacy classification.** Existing `durable:*` records and unattributed sources get
   an explicit migration disposition (`legacy_unclassified`) and never become
-  recursively eligible by default. Pre-A0 promotion ids match `durable:<16 hex>` and
-  A0 ids are `durable:l<policy>:<32 hex>`, so the class is decidable from the id alone.
+  recursively eligible by default. Legacy claim-hash promotion ids match
+  `durable:<16 hex>` and source-set ids are `durable:l<policy>:<32 hex>`, so the class is
+  decidable from the id alone.
 - **Confidentiality.** As §9: raw identities, memory text, claims, evidence, model
   output, and exceptions never cross into logs, health, alerts, or the redacted
   operator reader; only opaque ids, states, counts, and stable failure codes do.

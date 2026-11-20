@@ -73,7 +73,7 @@ function promote(claim: string, sourceRecordIds: string[]) {
   return { claim, promotionReason: 'SYNTH-2569 repeat', confidence: 0.9, sourceRecordIds };
 }
 
-describe('consolidationLineage (#2569 A0)', () => {
+describe('consolidationLineage (#2569 source-set identity)', () => {
   it('is a pure function of scope, the canonical source set and the policy version', () => {
     const hash = expectedLineageHash(CHAT, SENDER, ['rec-a', 'rec-b']);
     const forward = consolidationLineage(scope, ['rec-a', 'rec-b'], cluster);
@@ -115,7 +115,7 @@ describe('consolidationLineage (#2569 A0)', () => {
   });
 });
 
-describe('runConsolidation lineage identity (#2569 A0)', () => {
+describe('runConsolidation lineage identity (#2569 source-set identity)', () => {
   it('gives a wording variant of the same source set the same durable id', async () => {
     const ids: string[] = [];
     for (const output of [
@@ -186,7 +186,7 @@ describe('runConsolidation lineage identity (#2569 A0)', () => {
   });
 
   // Pin, not a new failure: consolidateCluster already rejects a foreign id on
-  // f81a1984 (outputMatchesCluster). A0 must keep that true at the write site.
+  // f81a1984 (outputMatchesCluster). Source-set identity must keep that true at the write site.
   it('writes nothing when the model cites a source outside the cluster', async () => {
     const pinecone = makePinecone(['rec-a']);
     const report = await runConsolidation(

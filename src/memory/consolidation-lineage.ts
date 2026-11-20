@@ -1,7 +1,7 @@
 import { shortHash } from '../lib/short-hash.ts';
 
 /**
- * Promotion lineage identity for memory consolidation (#2569 slice A0).
+ * Promotion lineage identity for memory consolidation (#2569 source-set identity).
  *
  * A promotion's identity is its scope, the canonical set of source record ids
  * it was derived from, and the lineage policy version. Model wording never
@@ -17,7 +17,7 @@ const LINEAGE_HASH_HEX_LENGTH = 32;
 export interface ConsolidationLineage {
   /** Opaque lineage id, `l<policy>:<hex>`. */
   lineageId: string;
-  /** Remote record id: `durable:<lineageId>`. Pre-A0 ids were `durable:<16 hex>`. */
+  /** Remote record id: `durable:<lineageId>`. Legacy claim-hash ids were `durable:<16 hex>`. */
   recordId: string;
   /** Validated source ids in canonical order. */
   sourceRecordIds: string[];
