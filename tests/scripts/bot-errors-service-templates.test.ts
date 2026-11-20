@@ -184,6 +184,24 @@ describe('BOT ERRORS service templates', () => {
     }
   });
 
+  it('setup writes observe mode and never adds default credential paths to an existing env file', () => {
+    const setup = readFileSync('deploy/setup.sh', 'utf8');
+    const freshStart = setup.indexOf('# Private BOT ERRORS routing config generated');
+    const existingStart = setup.indexOf('bot_errors_env_file="$HOME/.config/whatsoup/bot-errors.env"');
+    const existingEnd = setup.indexOf('# ── Step 5');
+    expect(freshStart).toBeGreaterThan(0);
+    expect(existingStart).toBeGreaterThan(freshStart);
+    expect(existingEnd).toBeGreaterThan(existingStart);
+    const fresh = setup.slice(freshStart, existingStart);
+    const existing = setup.slice(existingStart, existingEnd);
+    expect(fresh).toContain('echo "BOT_ERRORS_INCIDENT_AUTHORITY_MODE=observe"');
+    // Appended only when the key is missing, so an owner's enforce is kept.
+    expect(existing).toContain(
+      'append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_INCIDENT_AUTHORITY_MODE" "observe"',
+    );
+    expect(existing).not.toMatch(/append_env_key_if_missing[^\n]*\n?[^\n]*AUTHORITY_CREDENTIAL_FILE/);
+  });
+
   it('renders launchd plists with routing env from file without executing env-file shell', () => {
     const home = makeTempRoot('whatsoup-launchd-home-');
     const shimDir = makeTempRoot('whatsoup-launchd-shims-');
