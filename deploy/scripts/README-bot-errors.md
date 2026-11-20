@@ -185,17 +185,33 @@ the event depends on the failure:
 
 - **Not ready** (settings missing or invalid; credential missing, unreadable or
   not private; credential refused with 401; scope refused with 403; rate limit
-  429): the event stays in the outbox with its own backoff (up to 15 minutes).
-  It is never quarantined or dead-lettered for this reason and the wait does
-  not count as an attempt. After one rate refusal the dispatcher asks nothing
-  more in that cycle. The dispatcher state records the reason and since when
-  (`incidentAuthorityNotReady`), the daily health report prints it, and the
-  deadman, which sends directly, reports `authority_not_ready` once it has
-  lasted 30 minutes while events wait.
-- **Unavailable** (connection failure, timeout, HTTP 5xx or 507): retried with
-  backoff up to the configured authority-attempt cap, then dead-lettered.
+  429; the authority is down: connection failure, timeout or any 5xx answer):
+  the event stays in the outbox with its own backoff (up to 15 minutes). It is
+  never quarantined or dead-lettered for this reason and the wait does not
+  count as an attempt, so an outage of any length loses no event. After one
+  rate refusal the dispatcher asks nothing more in that cycle.
 - **Terminal** (identity conflict, malformed or mismatched receipt): the event
   is quarantined.
+
+No authority answer dead-letters an event any more. The authority-attempt cap
+(`BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS`) is reached only by a plain
+unavailability that the client no longer raises. Events that already hold a
+receipt keep the existing delivery retry and dead-letter rules for WhatsApp
+and e-mail failures.
+
+What the operator sees while authority is not ready: every notice that needs
+authority waits, and that includes the daily health report, the dead-letter
+meta-alerts and owner copies, because they are queued through the same
+outbox. The one channel that still reaches the operator is the deadman, which
+sends directly (WhatsApp, e-mail as fallback): within 30 to 35 minutes of the
+first refusal, while events wait, it sends `BOT ERRORS DEADMAN … problem:
+authority_not_ready` with the reason, the seconds not ready and the number of
+waiting events, repeats at its cooldown, and sends its recovery when a cycle
+obtains a grant. On the host itself the dispatcher state file holds
+`incidentAuthorityNotReady` (reason and since when), `logs/dispatch.jsonl`
+holds `incident_authority_not_ready` warnings, and the health check's report
+text, when run on the host, carries a `WARN incident_authority: not_ready`
+line.
 
 Notification ambiguity remains a separate delivery state and must be
 reconciled before replay. Revoking both producer credentials or removing the

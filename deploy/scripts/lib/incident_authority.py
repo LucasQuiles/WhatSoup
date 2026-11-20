@@ -51,7 +51,8 @@ class AuthorityNotReady(AuthorityUnavailable):
 
     The settings are missing or invalid, the producer credential is missing,
     unreadable or not private, the authority refused the credential (401) or
-    its scope (403), or it rate-limited the producer (429). The protected
+    its scope (403), rate-limited the producer (429), or is down (connection
+    failure, timeout or any 5xx answer). The protected
     effect waits and is retried with backoff. It is never terminal and never
     counts as an attempt; the message is the bounded reason code.
     """
@@ -440,7 +441,9 @@ class IncidentAuthorityClient:
             response = connection.getresponse()
             payload = response.read(MAX_RESPONSE_BYTES + 1)
         except (OSError, TimeoutError, http.client.HTTPException) as exc:
-            raise AuthorityUnavailable("incident_authority_unavailable") from exc
+            # An outage of the authority holds the work; it is never terminal
+            # and never counts toward the attempt cap.
+            raise AuthorityNotReady("incident_authority_unavailable") from exc
         finally:
             connection.close()
         if len(payload) > MAX_RESPONSE_BYTES:
@@ -453,8 +456,8 @@ class IncidentAuthorityClient:
             raise AuthorityNotReady("authority_scope_denied")
         if response.status == 429:
             raise AuthorityNotReady("incident_authority_rate_limited")
-        if response.status in {500, 502, 503, 504, 507}:
-            raise AuthorityUnavailable("incident_authority_unavailable")
+        if 500 <= response.status < 600:
+            raise AuthorityNotReady("incident_authority_unavailable")
         if 300 <= response.status < 400:
             raise AuthorityProtocolError("authority_redirect_rejected")
         replay = response.status == 200

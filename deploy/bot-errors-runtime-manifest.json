@@ -669,7 +669,7 @@
     },
     {
       "path": "deploy/scripts/lib/incident_authority.py",
-      "sha256": "02a6c310d4ce63c870ba871f28d953be5dba351e09d9b0a9f16538a10282668a",
+      "sha256": "c6d85e152bc2ec7db5954b1ce5c251e23e06850b13f66805116f7c2287bb23fe",
       "mustContain": [
         "class IncidentAuthorityClient:",
         "def canonical_signal(",
