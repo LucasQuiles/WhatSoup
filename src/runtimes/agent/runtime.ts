@@ -388,6 +388,7 @@ import { probeBinaryCommand, type listModelCatalog } from './providers/binary-pr
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import {
+  buildPrimaryProbeRebindDeps,
   buildRuntimePrimaryProbeServiceContext,
   createRuntimePrimaryProbeAdapters,
   resolveModelUsabilityFreshnessMs,
@@ -2988,6 +2989,11 @@ export class AgentRuntime implements Runtime {
       get handoffDistill() { return runtime.typedHandoffDistill; },
       get providerExecutionGate() { return runtime.providerExecutionGate; },
       get primaryProbeServiceContext() { return runtime.primaryProbeServiceContext; },
+      primaryProbeRebindDeps: () => buildPrimaryProbeRebindDeps({
+        provider: runtime.agentProvider, sessionScope: runtime.sessionScope, sandboxPerChat: runtime.sandboxPerChat,
+        stateRoot: config.stateRoot, stored: () => runtime.primaryProbeServiceContext,
+        adopt: (next) => { runtime.primaryProbeServiceContext = next; },
+      }),
       currentPrimaryProbeServiceContext: () => runtime.currentPrimaryProbeServiceContext(),
       get controlSession() { return runtime.controlSession; },
       get fallbackWindow() { return runtime.fallbackWindow; },
@@ -9683,8 +9689,8 @@ export class AgentRuntime implements Runtime {
       this.pendingPostRevertConfirmation = false;
     }
     const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now(), this.modelUsabilityFreshnessMs()).modelUsableStale;
-    this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual', 'turn-success');
-    if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
+    const accepted = this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual', 'turn-success');
+    if (wasStale && accepted) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
 
   private recordTurnCapabilityFailure(

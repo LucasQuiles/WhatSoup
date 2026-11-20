@@ -239,8 +239,8 @@ describe('registry loading', () => {
   it('loads the production SSOT from the repo root', () => {
     const registry = loadRequiredContexts(repoRoot);
     expect(registry.schemaVersion).toBe(1);
-    expect(registry.contexts.length).toBe(2);
-    expect(registry.contexts.map((c) => c.name).sort()).toEqual(['quality (24.x)', 'quality (25.x)']);
+    expect(registry.contexts.length).toBe(3);
+    expect(registry.contexts.map((c) => c.name).sort()).toEqual(['gitleaks', 'quality (24.x)', 'quality (25.x)']);
     expect(registry.failurePolicy.missing).toBe('block');
     expect(registry.failurePolicy.apiError).toBe('block');
     expect(registry.failurePolicy.timeout).toBe('block');
@@ -283,7 +283,7 @@ describe('run() integration with mock deps', () => {
     const result = makeOutput();
     const code = run(['--head-sha', HEAD_SHA], repoRoot, deps, result.out);
     expect(code).toBe(0);
-    expect(result.stdout).toContain('all 2 required context(s) present');
+    expect(result.stdout).toContain('all 3 required context(s) present');
     expect(result.stderr).toBe('');
   });
 
