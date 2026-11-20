@@ -7709,8 +7709,9 @@ SUPPORT_WHATSOUP_SERVICE_NAMES = {
     "whatsoup-fleet",
 }
 
-# launchd jobs retired from the standard: no managed-components entry and no
-# template (docs/releases/2026-11-20-token-backup-job-retired.md). One that is
+# launchd jobs retired from the standard: no managed-components entry; the
+# templates stay tracked until they can be deleted and are excluded from release
+# exports (docs/releases/2026-11-20-token-backup-job-retired.md). One that is
 # loaded, idle or running, is a finding of its own, never an undeclared
 # instance and never a support service.
 RETIRED_WHATSOUP_SERVICE_NAMES = frozenset({
@@ -7765,9 +7766,9 @@ class ServiceInventoryObservation(NamedTuple):
     carried separately -- a collapsing set cannot report that a record was
     unreadable or repeated.
 
-    `retired_loaded` carries every loaded retired job, idle or running. It
-    stays out of `names` and `count`: `names` is the running inventory, and a
-    retired job's normal loaded state is idle.
+    `retired_loaded` carries every loaded retired launchd label, idle or
+    running (launchd backend only); a running one is also in `names`. A
+    retired job's normal loaded state is idle, which `names` never shows.
     """
 
     status: ServiceInventoryStatus
@@ -7919,10 +7920,10 @@ def _launchctl_service_observation() -> ServiceInventoryObservation:
             continue
         retired = label.removeprefix(_LAUNCHCTL_LABEL_PREFIX)
         if label.startswith(_LAUNCHCTL_LABEL_PREFIX) and retired in RETIRED_WHATSOUP_SERVICE_NAMES:
-            # Checked before the idle skip: a retired job is loaded, and worth a
-            # finding, whether or not it is running at this moment.
+            # Recorded before the idle skip: a retired job is loaded, and worth a
+            # finding, whether or not it is running at this moment. A running
+            # copy also stays in the ordinary inventory below.
             retired_loaded.add(retired)
-            continue
         if pid == "-" or not label.startswith(_LAUNCHCTL_LABEL_PREFIX):
             continue
         name = label.removeprefix(_LAUNCHCTL_LABEL_PREFIX)
@@ -8040,13 +8041,22 @@ def unprofiled_service_inventory(
     lines: list[str] = []
     if not reading.can_report_coverage():
         lines.append(unusable_line)
-    for name in sorted((reading.names | reading.retired_loaded) & RETIRED_WHATSOUP_SERVICE_NAMES):
+    retired: set[str] = set()
+    if reading.backend != "systemctl":
+        # The finding is for the retired launchd job only: a systemd unit, or a
+        # unit whose name a configured instance owns, is an instance.
+        retired = {
+            name
+            for name in (reading.names | reading.retired_loaded) & RETIRED_WHATSOUP_SERVICE_NAMES
+            if not (root / name / "config.json").exists()
+        }
+    for name in sorted(retired):
         lines.append(
             f"FAIL retired_service {name}: retired job is loaded "
             f"service=com.whatsoup.{name} remediation=boot_out_then_remove_plist_and_script"
         )
     for name in sorted(reading.names):
-        if name in expected_names or name in RETIRED_WHATSOUP_SERVICE_NAMES:
+        if name in expected_names or name in retired:
             continue
         if (
             name in SUPPORT_WHATSOUP_SERVICE_NAMES
