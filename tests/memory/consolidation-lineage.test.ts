@@ -147,7 +147,7 @@ describe('runConsolidation lineage identity (#2569 A0)', () => {
       sourceRecordIds: ['rec-a', 'rec-b'],
       confidenceQualifier: 'consolidated',
     });
-    expect(written.evidence).toBeUndefined();
+    expect(written).not.toHaveProperty('evidence');
   });
 
   it('writes nothing when two promotions cite the same source set', async () => {
