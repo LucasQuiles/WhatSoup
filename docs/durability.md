@@ -1229,25 +1229,45 @@ these hold:
    `latest.json` is written atomically (temporary file, fsync, rename, folder
    fsync). Both happen in the same synchronous turn as the checks.
 
-`history/` therefore never holds a partial entry, and `latest.json` always names
-a complete one. A process killed inside the publish turn can leave a history
-entry that `latest.json` does not name. Nothing restores from such an entry.
+An entry reaches `history/` only through that rename, so `history/` never holds
+a partly copied entry, and `latest.json` always names a complete one. If the
+`latest.json` write fails after the rename, one rename takes the new entry back
+to its staging name before any of it is removed, so `history/` never holds that
+entry half removed. A process killed inside the publish turn can leave a
+history entry that `latest.json` does not name. Nothing restores from such an
+entry.
 
-**Off the event loop.** A capture is an async run of bounded slices: 64 entries
-per walk slice, and 16 per copy or delete slice. It hands the event loop back
-between slices, so credential and key writes land during a capture. A write
-that lands between a file's read in the pre-copy walk and its read in the copy
-fails validation. With the same identity, the run is deferred and retried.
-Empty or invalid creds inside the fresh-write grace also defer. Anything else
-fails. A write after the copy is not in that backup; the settled snapshot that
-the write schedules covers it.
+`history/` can hold a partly removed stale entry while a prune removes it in
+slices, or after an abort cuts a prune short. Restore reads only the entry
+`latest.json` names, so it never reads one.
+
+**Off the event loop.** A capture is an async run of bounded slices. One budget
+covers the whole run: a slice holds at most 64 units, where a walk entry costs
+1 and a copy or delete entry costs 4, across every phase, sweep orphan and
+pruned entry. The run hands the event loop back between slices, so credential
+and key writes land during a capture:
+
+- A removal between a file's listing and its read in the pre-copy walk makes
+  that read incomplete, and the attempt defers. After six consecutive runs end
+  deferred this way, the seventh such run fails. Any run that ends otherwise
+  resets the count.
+- A rewrite or a removal between a file's read in the pre-copy walk and its
+  read in the copy fails validation; the copy skips an entry that has
+  vanished. With the same identity, the attempt defers.
+- Empty or invalid creds inside the fresh-write grace also defer. Anything
+  else fails.
+
+A deferred attempt is retried, and a run that ends deferred re-arms the settled
+snapshot. A write after the copy is not in that backup; the settled snapshot
+that the write schedules covers it.
 
 **Single flight, nothing dropped.** A guard runs one capture at a time. Requests
 made during a run fold into one trailing run with the most recent reason.
 Folded callers share one promise and one result, and `capture()` never rejects.
 A run that ends deferred re-arms the settled snapshot. A settled snapshot
-refused by the 5-minute floor is re-armed for the rest of the interval. A
-blocked run is refused because publishing would be unsafe. An aborted run is
+refused by the 5-minute floor is re-armed for the rest of the interval. A run
+that ends failed is not re-armed, as before; it pages. A blocked run is refused
+because publishing would be unsafe. An aborted run is
 covered by the reconnect after a restore, or by the next process's open.
 
 **Abort.** `restoreLatestIfNeeded()` aborts an in-flight run immediately before
@@ -1258,7 +1278,9 @@ publishes nothing new, and leaves its staging copy for the next sweep. A socket
 close without a logout does not abort a run.
 
 **Staging residue.** Each capture's sweep removes the `*.tmp-<pid>` staging
-entries of other processes, which is the same residue a crash leaves.
+entries of other processes, which is the same residue a crash leaves. An entry
+carrying the current process's PID stays until another process's sweep removes
+it.
 
 ---
 
