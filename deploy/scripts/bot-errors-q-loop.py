@@ -889,6 +889,22 @@ def persist_activity_state(
     )
 
 
+def apply_q_reply_cadence(
+    state: dict[str, Any], phase: str, blocked_since: int | None
+) -> None:
+    """Set the loop's local reply cadence after a Q reply, with the same values
+    the loop used before IncidentStore authority.
+
+    ``phase`` and ``blocked_since`` only decide whether the loop keeps sending
+    checkpoint notices and what its status lines say. They are not authority:
+    nothing here approves scope (``scope_approved_at`` stays unset), approves or
+    confirms a change, or records anything in the IncidentStore.
+    """
+    state["phase"] = phase
+    if blocked_since is not None:
+        state["blocked_since"] = blocked_since
+
+
 def classify_activity(
     state: dict[str, Any],
     messages: list[dict[str, Any]],
@@ -913,22 +929,30 @@ def classify_activity(
             state["last_q_message_at"] = max(int(state.get("last_q_message_at", 0)), ts)
             unavailable_reason = q_unavailable_reason(body)
             disposition = "received"
+            cadence: tuple[str, int | None] | None = None
             if unavailable_reason:
                 state["last_q_unavailable_at"] = ts
                 state["last_q_unavailable_reason"] = unavailable_reason
                 disposition = f"unavailable_{unavailable_reason}"
+                cadence = (f"q_unavailable_{unavailable_reason}", ts)
             elif re.search(r"\bAPPROVED SCOPE\b", body, re.I):
                 disposition = "approval_claim_observed"
+                cadence = ("sdlc_spec_and_preslice", 0)
             elif re.search(r"\bAPPROVED\b", body, re.I):
                 disposition = "approval_claim_observed"
+                cadence = ("monitoring", 0)
             elif re.search(r"(?im)^\s*(?:[*_`]+)?BLOCKED\b", body):
                 disposition = "block_claim_observed"
+                cadence = ("blocked_by_q", ts)
             elif re.search(
                 r"\b(no response needed|standing by|no post warranted|nothing new|no actionable change|monitoring continues|continuing (?:to )?monitor(?:/poll)?)\b",
                 body,
                 re.I,
             ):
                 disposition = "monitor_claim_observed"
+                cadence = ("monitoring", None)
+            if cadence is not None:
+                apply_q_reply_cadence(state, cadence[0], cadence[1])
             # A chat frame proves only that the loop observed a Q-shaped sender.
             # It cannot approve scope, authorize a change, confirm execution, or
             # prove recovery.  Those facts require the authenticated phase path.
