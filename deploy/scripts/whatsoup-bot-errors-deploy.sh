@@ -53,6 +53,8 @@ ROOT="${2:?missing <root>}"
 # enforces the closure so a future import cannot reopen this silently.
 FILES=(
   "deploy/lib/runtime-path.sh"
+  # Additive exports must arrive before the consumers that import them.
+  "deploy/scripts/lib/bot_errors_daily_health.py"
   "deploy/scripts/bot-errors-dispatcher.py"
   "deploy/scripts/bot-errors-health-check.py"
   "deploy/scripts/write-health-package-pin.py"
@@ -70,7 +72,6 @@ FILES=(
   "deploy/scripts/lib/bounded_jsonl.py"
   "deploy/scripts/lib/bot_errors_envelope.py"
   "deploy/scripts/lib/bot_errors_redaction.py"
-  "deploy/scripts/lib/bot_errors_daily_health.py"
   "deploy/scripts/lib/bot_errors_roster.py"
   "deploy/scripts/lib/controller_log.py"
   "deploy/scripts/lib/controller_state.py"
@@ -485,7 +486,18 @@ case "$MODE" in
     for local_path in "${FILES[@]}"; do
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
+    # Withdraw the new daily-health export only after restoring its consumers.
+    # Preserve the existing relative order for all other managed paths.
+    rollback_files=()
     for local_path in "${FILES[@]}"; do
+      if [[ "$local_path" == "deploy/scripts/lib/bot_errors_daily_health.py" ]]; then
+        daily_health_helper="$local_path"
+      else
+        rollback_files+=("$local_path")
+      fi
+    done
+    rollback_files+=("$daily_health_helper")
+    for local_path in "${rollback_files[@]}"; do
       if [[ -f "$BKDIR/$local_path" ]]; then mkdir -p "$(dirname "$ROOT/$local_path")"; cp -p "$BKDIR/$local_path" "$ROOT/$local_path"; fi
     done
     # delete files that were absent before deploy

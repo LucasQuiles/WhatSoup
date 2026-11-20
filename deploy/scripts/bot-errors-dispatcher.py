@@ -36,6 +36,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_daily_health import (
     daily_health_host_from_payload,
+    daily_health_instance_from_fail_line,
     daily_health_line_is_failure,
     daily_health_line_is_warning,
 )
@@ -3122,9 +3123,16 @@ def daily_health_recovered_incident_keys(
     machine = safe_segment(str(event.get("machine") or "unknown"))
     open_incidents = incident_state.setdefault("openIncidents", {})
     created = event_created_epoch(event)
+    evidence_lines = event_text(event, "evidence").splitlines()
+    failed_instances = {
+        safe_segment(instance)
+        for line in evidence_lines
+        if daily_health_line_is_failure(line)
+        if (instance := daily_health_instance_from_fail_line(line)) is not None
+    }
     recovered: list[str] = []
     seen: set[str] = set()
-    for raw_line in event_text(event, "evidence").splitlines():
+    for raw_line in evidence_lines:
         line = raw_line.strip()
         match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", line)
         if not match:
@@ -3132,7 +3140,7 @@ def daily_health_recovered_incident_keys(
         instance = safe_segment(match.group(1))
         probe = match.group(2).strip()
         scope = f"{machine}|{instance}"
-        if is_verified_whatsapp_health_recovery(probe):
+        if instance not in failed_instances and is_verified_whatsapp_health_recovery(probe):
             for key in (
                 f"{scope}|daily-health-fail:{instance}",
                 f"{machine}|bot-errors-health|daily-health-fail:{instance}",

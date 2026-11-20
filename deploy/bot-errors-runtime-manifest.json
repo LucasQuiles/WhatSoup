@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b81b5fc962b249573e87bbc7ecf59b8b302f8685359103bc6ff7ac7a9eb8e2f0",
+      "sha256": "f5a4528cb94593262a1cc45cc9b7a669d1e28ef9f60db8d1488f00ee613379a0",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -177,7 +177,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "6dd613813c1db15015e5595ee285ba25124b6038a5be28db907a0b2b796c1212",
+      "sha256": "4e1b9ebcb4ab8c8c802cfcf06c501bf5781833a5a9c3bb0f27a9b51dc11fa245",
       "mustContain": [
         "critical_file_problem",
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -502,7 +502,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_daily_health.py",
-      "sha256": "eb750aab0f6ddb1589236027fa508dfd48a8f2d432035401015369a474e0efe0",
+      "sha256": "7c688265c1ba293d9f9059f3a01ba10cb265beebff0763170d6e314d19c0aac3",
       "mustContain": [
         "daily_health_host_from_payload",
         "normalize_hub_host",

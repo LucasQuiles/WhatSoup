@@ -32,7 +32,11 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_envelope import event_machine, new_event_fields
-from lib.bot_errors_daily_health import daily_health_line_is_failure, daily_health_line_is_warning
+from lib.bot_errors_daily_health import (
+    daily_health_instance_from_fail_line as _instance_from_fail_line,
+    daily_health_line_is_failure,
+    daily_health_line_is_warning,
+)
 from lib.target_provenance import (
     safe_observer_provenance,
     safe_release_divergence,
@@ -2879,20 +2883,6 @@ def outbox_event(
     return path
 
 
-_INSTANCE_FAIL_PREFIXES = {
-    "config",
-    "health",
-    "socket",
-    "service",
-    "service_enabled",
-    "auth_bond",
-    "provider_probe",
-    "primary_phone_state",
-    "profile_coverage",
-    "profile_coverage_service",
-    "tree_provenance",
-}
-
 # Infrastructure-class daily-health FAIL categories: host-environment problems
 # that are NOT a bot/auth/credential outage. When EVERY failure is infra-class,
 # the daily summary de-conflates from critical to warning. Per-instance critical
@@ -2946,37 +2936,6 @@ def daily_summary_severity(failures: list[str], warnings: list[str]) -> str:
     if warnings:
         return "warning"
     return "info"
-
-
-def _instance_from_fail_line(line: str) -> str | None:
-    """Extract the per-instance identifier from a daily-health FAIL line.
-
-    Strips a leading "FAIL " token if present, then inspects the first
-    whitespace-delimited token: when it names a known per-instance condition
-    prefix, the second token (with any trailing ":" stripped) is the instance.
-    Returns None for empty/short lines or non-per-instance conditions.
-
-    A token that contains a path separator is NOT an instance name — some
-    inventories emit `config <full/path/config.json>: invalid JSON` where the
-    second token is a filesystem path, not an instance id. Reject those so a
-    salient event is never keyed on (or titled with) a leaked path.
-    """
-    if not line:
-        return None
-    stripped = line.strip()
-    if not stripped:
-        return None
-    if stripped.startswith("FAIL "):
-        stripped = stripped[len("FAIL "):].strip()
-    tokens = stripped.split()
-    if len(tokens) < 2:
-        return None
-    if tokens[0] in _INSTANCE_FAIL_PREFIXES:
-        candidate = tokens[1].rstrip(":")
-        if not candidate or "/" in candidate or os.sep in candidate:
-            return None
-        return candidate
-    return None
 
 
 def emit_per_instance_health_failures(failures: list[str]) -> list[Path]:

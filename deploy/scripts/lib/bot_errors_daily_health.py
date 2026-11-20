@@ -1,4 +1,4 @@
-"""Canonical daily-health host identity and line membership.
+"""Canonical daily-health host identity, line membership and target attribution.
 
 The heartbeat-watchdog derives a host's daily-health liveness, and the dispatcher
 records per-host daily-health freshness into the durable incident-state ledger.
@@ -15,6 +15,7 @@ match (the hub runs the dispatcher and emits without a relay).
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 # Canonical key for the hub machine's daily-health events. The hub hostname is a
@@ -22,6 +23,52 @@ from typing import Any
 # this public repo (the same idiom the repo-hygiene guard uses for its own needed
 # tokens); at runtime this is the ordinary host key.
 _HUB_HOST = "nuc" "les"
+
+
+_INSTANCE_FAIL_PREFIXES = {
+    "config",
+    "health",
+    "socket",
+    "service",
+    "service_enabled",
+    "auth_bond",
+    "provider_probe",
+    "primary_phone_state",
+    "profile_coverage",
+    "profile_coverage_service",
+    "tree_provenance",
+}
+
+
+def daily_health_instance_from_fail_line(line: str) -> str | None:
+    """Extract the per-instance identifier from a daily-health FAIL line.
+
+    Strips a leading "FAIL " token if present, then inspects the first
+    whitespace-delimited token: when it names a known per-instance condition
+    prefix, the second token (with any trailing ":" stripped) is the instance.
+    Returns None for empty/short lines or non-per-instance conditions.
+
+    A token that contains a path separator is NOT an instance name — some
+    inventories emit `config <full/path/config.json>: invalid JSON` where the
+    second token is a filesystem path, not an instance id. Reject those so a
+    salient event is never keyed on (or titled with) a leaked path.
+    """
+    if not line:
+        return None
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("FAIL "):
+        stripped = stripped[len("FAIL "):].strip()
+    tokens = stripped.split()
+    if len(tokens) < 2:
+        return None
+    if tokens[0] in _INSTANCE_FAIL_PREFIXES:
+        candidate = tokens[1].rstrip(":")
+        if not candidate or "/" in candidate or os.sep in candidate:
+            return None
+        return candidate
+    return None
 
 
 def daily_health_line_is_failure(line: str) -> bool:
