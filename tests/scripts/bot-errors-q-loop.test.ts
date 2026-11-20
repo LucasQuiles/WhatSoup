@@ -102,7 +102,7 @@ print(state["phase"])
     expect(result).toBe('monitoring');
   });
 
-  it('records a Q monitoring claim without granting it phase authority', () => {
+  it('records a Q monitoring reply and moves the local cadence to monitoring', () => {
     const root = tmpRoot();
     const result = python(`${importModulePrelude()}
 import json
@@ -125,7 +125,7 @@ m.classify_activity(state, [{
 print(json.dumps({"phase": state["phase"], "disposition": state["last_q_disposition"], "receipt": state["q_receipts"]["1"]}, sort_keys=True))
 `);
     expect(JSON.parse(result)).toEqual({
-      phase: 'blocked_by_q',
+      phase: 'monitoring',
       disposition: 'monitor_claim_observed',
       receipt: {
         authority: 'observation_only',
@@ -162,10 +162,41 @@ print(json.dumps({
 }, sort_keys=True))
 `);
     expect(JSON.parse(result)).toEqual({
-      phase: 'sdlc_design_gate',
+      phase: 'sdlc_spec_and_preslice',
       scopeApproved: false,
       disposition: 'approval_claim_observed',
     });
+  });
+
+  it('sends no further checkpoint after a standing-by reply', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+import json
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+sent = []
+def record_send(state, socket_path, text, **kwargs):
+    sent.append(kwargs.get("authority_event_id"))
+    return True
+m.send_message = record_send
+state = m.default_state()
+state["last_checkpoint_at"] = 0
+replied_at = m.now() - 2 * m.CHECKPOINT_AFTER_SECONDS
+m.classify_activity(state, [{
+  "pk": 3,
+  "body": "Standing by.",
+  "timestamp": replied_at,
+  "is_from_me": 0,
+  "sender_name": "Q",
+}])
+print(json.dumps({"phase": state["phase"], "checkpoint": m.maybe_send_checkpoint(state, "unused.sock"), "sent": sent}, sort_keys=True))
+`);
+    expect(JSON.parse(result)).toEqual({ phase: 'monitoring', checkpoint: false, sent: [] });
   });
 
   it('reports collaboration target coverage without exposing raw group ids', () => {

@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -22,6 +31,31 @@ afterEach(() => {
 
 function dbPath(): string {
   return join(dir, 'fleet', 'incidents.db');
+}
+
+// A database at the schema version before the current one, as an earlier
+// release left it, with a canary row.
+function writePreviousVersionDatabase(): number {
+  const previous = INCIDENT_SCHEMA_VERSION - 1;
+  mkdirSync(join(dir, 'fleet'), { recursive: true, mode: 0o700 });
+  const old = new DatabaseSync(dbPath());
+  for (const migration of MIGRATIONS.filter((entry) => entry.version <= previous)) {
+    for (const statement of migration.statements) old.exec(statement);
+  }
+  old.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`).run(String(previous));
+  old.prepare(`INSERT INTO meta (key, value) VALUES ('canary', 'kept')`).run();
+  old.close();
+  return previous;
+}
+
+function readMeta(path: string, key: string): string | undefined {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const row = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key) as { value?: string } | undefined;
+    return row?.value;
+  } finally {
+    db.close();
+  }
 }
 
 describe('openIncidentDb', () => {
@@ -140,6 +174,56 @@ describe('openIncidentDb', () => {
       { key: 'schema_version', value: String(previous) },
     ]);
     expect(statSync(copyPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes a copy that fails verification and tries again on the next open', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    expect(() => openIncidentDb(dbPath(), {
+      afterPreMigrationCopy: (tmpPath) => writeFileSync(tmpPath, 'torn copy'),
+    })).toThrow(IncidentStoreCorruptError);
+    expect(readdirSync(join(dir, 'fleet')).filter((name) => name.includes('.bak'))).toEqual([]);
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
+
+    openIncidentDb(dbPath()).close();
+    expect(readMeta(copyPath, 'schema_version')).toBe(String(previous));
+    expect(readMeta(copyPath, 'canary')).toBe('kept');
+  });
+
+  it('fails closed on an empty existing copy and leaves it untouched', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    writeFileSync(copyPath, '');
+    expect(() => openIncidentDb(dbPath())).toThrow(/schema-v\d+\.bak/);
+    expect(statSync(copyPath).size).toBe(0);
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
+  });
+
+  it('fails closed on a symlinked copy path without following it', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    // A valid old-version database behind the link: following it would pass.
+    const target = join(dir, 'elsewhere.db');
+    const raw = new DatabaseSync(dbPath());
+    raw.prepare('VACUUM INTO ?').run(target);
+    raw.close();
+    symlinkSync(target, copyPath);
+    expect(() => openIncidentDb(dbPath())).toThrow(/schema-v\d+\.bak/);
+    expect(lstatSync(copyPath).isSymbolicLink()).toBe(true);
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
+  });
+
+  it('keeps a valid existing copy instead of replacing it', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    const raw = new DatabaseSync(dbPath());
+    raw.prepare('VACUUM INTO ?').run(copyPath);
+    raw.prepare(`UPDATE meta SET value = 'changed' WHERE key = 'canary'`).run();
+    raw.close();
+
+    openIncidentDb(dbPath()).close();
+    expect(readMeta(copyPath, 'canary')).toBe('kept');
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(INCIDENT_SCHEMA_VERSION));
   });
 
   it('writes no schema copy for a fresh or already current database', () => {
