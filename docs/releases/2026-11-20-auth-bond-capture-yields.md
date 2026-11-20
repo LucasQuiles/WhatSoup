@@ -76,7 +76,9 @@
 - No `/health` field, configuration field or environment variable changed.
 - The existing error texts, the other deferral rules and the fresh-write grace
   are unchanged. The incomplete-read deferral and its bound add two error
-  texts. The defaults of 3 attempts and a 75 ms retry delay are unchanged.
+  texts. A failed capture whose thrown value has no string form records a
+  third, `thrown value has no string form`. The defaults of 3 attempts and a
+  75 ms retry delay are unchanged.
 - A prune error after a successful publish still reports a failed capture, even
   though `latest.json` already names the new backup. A follow-up will address
   it.
