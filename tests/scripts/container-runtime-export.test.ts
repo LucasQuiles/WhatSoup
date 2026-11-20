@@ -111,6 +111,19 @@ describe('verified container runtime export', () => {
     },
   );
 
+  it('runs the Linux policy probe after the verified load, on the loaded image, without a registry pull', () => {
+    const steps = workflow.jobs.quality.steps;
+    const load = steps.findIndex((step) => step.name === 'Load verified deployment image and runtime providers');
+    const probe = steps.findIndex((step) => step.name === 'Verify Linux policy ownership and controller readability');
+    expect(load).toBeGreaterThanOrEqual(0);
+    expect(probe).toBeGreaterThan(load);
+    const run = steps[probe]!.run ?? '';
+    expect(run).toMatch(/docker run [^\n]*--pull=never/);
+    expect(run).toContain('--entrypoint node whatsoup-ci /policy-probe.mjs');
+    // No earlier step may run the tag: before the load it does not exist in the job's image store.
+    for (const step of steps.slice(0, load)) expect(step.run ?? '').not.toMatch(/docker run\b/);
+  });
+
   it('does not inspect or execute an old image after the exact-source export fails', () => {
     const { result, calls } = runExport({ buildExit: 7 });
     expect(result.status).toBe(7);

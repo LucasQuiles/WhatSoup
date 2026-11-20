@@ -512,8 +512,8 @@ describe('node-pin consistency check', () => {
     const dockerfilePath = path.join(dir, 'docker/Dockerfile');
     writeFileSync(dockerfilePath, [
       `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
-      `# deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main`,
-      `# deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main`,
+      `# deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main`,
+      `# deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main`,
       'RUN : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
       'FROM base AS deps',
       'FROM base AS runtime',
@@ -535,8 +535,8 @@ describe('node-pin consistency check', () => {
     writeFileSync(dockerfilePath, [
       `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
       'RUN \\',
-      `  # deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main \\`,
-      `  # deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main \\`,
+      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main \\`,
+      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main \\`,
       '  : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
       'FROM base AS deps',
       'FROM base AS runtime',

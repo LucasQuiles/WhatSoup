@@ -534,11 +534,25 @@ describe('container build evidence CI contract', () => {
   });
 
   it('attests only the trusted main branch with a pinned action and isolated permissions', () => {
-    expect(qualityWorkflow).toContain('attest-container-build:');
-    expect(qualityWorkflow).toContain("github.event_name == 'push' && github.ref == 'refs/heads/main'");
-    expect(qualityWorkflow).toContain('id-token: write');
-    expect(qualityWorkflow).toContain('attestations: write');
-    expect(qualityWorkflow).toContain('artifact-metadata: write');
+    const workflow = parse(qualityWorkflow) as {
+      permissions?: Record<string, string>;
+      jobs: Record<string, { if?: string; needs?: unknown; permissions?: Record<string, string>; steps?: { run?: string; uses?: string }[] }>;
+    };
+    const attest = workflow.jobs['attest-container-build'];
+    expect(attest).toBeDefined();
+    expect(attest!.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(attest!.needs).toBe('quality');
+    expect(attest!.permissions).toEqual({
+      contents: 'read', 'id-token': 'write', attestations: 'write', 'artifact-metadata': 'write',
+    });
+    // Write permissions belong to the attestation job alone; the workflow default stays read-only.
+    expect(workflow.permissions).toEqual({ contents: 'read' });
+    for (const [id, job] of Object.entries(workflow.jobs)) {
+      if (id === 'attest-container-build') continue;
+      expect(Object.values(job.permissions ?? {}), id).not.toContain('write');
+    }
+    // The signing job only re-verifies downloaded evidence; it never builds or runs an image.
+    expect(attest!.steps?.some((step) => /(^|\s)docker\s+(build|buildx|run|load|pull)\b/m.test(step.run ?? ''))).toBe(false);
     expect(qualityWorkflow).toContain('actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6');
     expect(qualityWorkflow).toContain('id: reverify-container-evidence');
     expect(qualityWorkflow).toContain('--github-output "$GITHUB_OUTPUT"');
@@ -977,6 +991,13 @@ describe('primary review evidence boundaries', () => {
     const archive = path.join(tmp.make('binary-oci-layer'), 'image.tar');
     const output = writeOciArchive(archive, { imageLayerBytes: 32 * 1024 * 1024 + 1 });
     expect(verifyOciArchiveAttestations(archive, output.outputDigest).imageDigest).toBe(output.imageDigest);
+  });
+  it('rejects a binary layer one byte above the 96 MiB entry limit', () => {
+    const archive = path.join(tmp.make('oversized-oci-layer'), 'image.tar');
+    const output = writeOciArchive(archive, { imageLayerBytes: 96 * 1024 * 1024 + 1 });
+    expect(() => verifyOciArchiveAttestations(archive, output.outputDigest)).toThrow(
+      `runnable image layer descriptor exceeds ${96 * 1024 * 1024} byte limit`,
+    );
   });
   it.each(['metadataPath', 'sbomPath'] as const)('rejects oversized %s before parsing', (field) => {
     const input = makeReceiptInput();
