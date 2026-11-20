@@ -137,9 +137,6 @@ TERMINAL_AUTH_FAILURE_CLASSES = {
 }
 LOGGED_OUT_REASON_KEY = "loggedout"
 INCIDENT_AUTHORITY_PRODUCER_ID = "bot-errors-dispatcher"
-INCIDENT_AUTHORITY_MAX_ATTEMPTS = max(
-    1, min(100, int(os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS", "12")))
-)
 
 
 def _warn_incident_authority_mode(code: str) -> None:
@@ -150,6 +147,23 @@ def _warn_incident_authority_mode(code: str) -> None:
 # in lib/incident_authority.py; every authority decision below uses this value.
 INCIDENT_AUTHORITY_MODE = incident_authority_mode(os.environ, _warn_incident_authority_mode)
 INCIDENT_AUTHORITY_RECORD_MAX_BYTES = 1024 * 1024
+
+
+def _incident_authority_max_attempts(raw: str, mode: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        if mode == "enforce":
+            raise
+        # Observe mode never stops on this setting: the default and one warning.
+        _warn_incident_authority_mode("incident_authority_max_attempts_invalid")
+        value = 12
+    return max(1, min(100, value))
+
+
+INCIDENT_AUTHORITY_MAX_ATTEMPTS = _incident_authority_max_attempts(
+    os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS", "12"), INCIDENT_AUTHORITY_MODE
+)
 
 
 def normalized_signal_key(value: str) -> str:
