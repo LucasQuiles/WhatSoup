@@ -150,7 +150,9 @@ describe('runConsolidation lineage identity (#2569 source-set identity)', () => 
     expect(written).not.toHaveProperty('evidence');
   });
 
-  it('writes nothing when two promotions cite the same source set', async () => {
+  // The two shapes below drop one item and keep the run's progress: a failed
+  // count would turn the run partial or failed and /health degraded.
+  it('writes the first promotion and completes the run when two promotions cite the same source set', async () => {
     const pinecone = makePinecone(['rec-a']);
     const report = await runConsolidation(
       pinecone,
@@ -163,15 +165,41 @@ describe('runConsolidation lineage identity (#2569 source-set identity)', () => 
       }),
       { lookbackDays: 7, dryRun: false },
     );
-    expect(pinecone.upsert).not.toHaveBeenCalled();
+    expect(pinecone.upsert).toHaveBeenCalledTimes(1);
+    expect(pinecone.upsert.mock.calls[0][0][0]).toMatchObject({
+      id: `durable:l1:${expectedLineageHash(CHAT, SENDER, ['rec-a'])}`,
+      text: 'SYNTH-2569 likes tea',
+    });
     expect(report).toMatchObject({
-      status: 'failed',
-      failureCode: 'output_invalid',
-      counters: { writeAttempted: 0, writeConfirmed: 0, failed: 1 },
+      status: 'completed',
+      failureCode: 'none',
+      counters: { writeAttempted: 1, writeConfirmed: 1, failed: 0 },
     });
   });
 
-  it('writes nothing when a source is both promoted and discarded', async () => {
+  it('counts one promotion in a dry run and completes when two promotions cite the same source set', async () => {
+    const pinecone = makePinecone(['rec-a']);
+    const report = await runConsolidation(
+      pinecone,
+      makeProvider({
+        durableKnowledge: [
+          promote('SYNTH-2569 likes tea', ['rec-a']),
+          promote('SYNTH-2569 drinks tea daily', ['rec-a']),
+        ],
+        discarded: [],
+      }),
+      { lookbackDays: 7, dryRun: true },
+    );
+    expect(pinecone.upsert).not.toHaveBeenCalled();
+    expect(report).toMatchObject({
+      mode: 'dry_run',
+      status: 'completed',
+      failureCode: 'none',
+      counters: { wouldPromote: 1, failed: 0 },
+    });
+  });
+
+  it('writes the promotion and completes the run when a source is both promoted and discarded', async () => {
     const pinecone = makePinecone(['rec-a', 'rec-b']);
     const report = await runConsolidation(
       pinecone,
@@ -181,8 +209,12 @@ describe('runConsolidation lineage identity (#2569 source-set identity)', () => 
       }),
       { lookbackDays: 7, dryRun: false },
     );
-    expect(pinecone.upsert).not.toHaveBeenCalled();
-    expect(report).toMatchObject({ status: 'failed', failureCode: 'output_invalid' });
+    expect(pinecone.upsert).toHaveBeenCalledTimes(1);
+    expect(report).toMatchObject({
+      status: 'completed',
+      failureCode: 'none',
+      counters: { writeConfirmed: 1, discarded: 0, failed: 0 },
+    });
   });
 
   // Pin, not a new failure: consolidateCluster already rejects a foreign id on
@@ -212,11 +244,14 @@ describe('runConsolidation lineage identity (#2569 source-set identity)', () => 
       }),
       { lookbackDays: 7, dryRun: false },
     );
+    // The write ran, so a lineage id existed while these logs were written.
+    expect(pinecone.upsert).toHaveBeenCalledTimes(1);
     const logs = JSON.stringify(Object.values(mockLineageLogger).map((fn) => fn.mock.calls));
-    expect(logs).toContain('consolidation output validation failed');
+    expect(logs).toContain('consolidation output items dropped');
     expect(logs).not.toContain('rec-a');
     expect(logs).not.toContain('SYNTH-2569');
     expect(logs).not.toContain(CHAT);
     expect(logs).not.toContain(SENDER);
+    expect(logs).not.toContain(expectedLineageHash(CHAT, SENDER, ['rec-a']));
   });
 });
