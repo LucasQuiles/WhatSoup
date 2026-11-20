@@ -72,8 +72,9 @@ const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const INTERPRETER = /^(?:ba|z|da|k|fi)?sh$|^(?:env|node|nodejs|osascript|perl|ruby)$|^python(?:\d+(?:\.\d+)*)?$/;
 const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
 /**
- * WhatSoup launchd jobs retired from the standard, each with the home-relative script it ran: no manifest entry and
- * no template (docs/releases/2026-11-20-token-backup-job-retired.md). Planning refuses a host that still has one
+ * WhatSoup launchd jobs retired from the standard, each with the home-relative script it ran: no manifest entry; the
+ * templates stay tracked until they can be deleted and are excluded from release exports
+ * (docs/releases/2026-11-20-token-backup-job-retired.md). Planning refuses a host that still has one
  * installed or loaded, by name and with the files to remove; it never loads, reloads or counts one as a member.
  */
 const RETIRED_JOBS: ReadonlyMap<string, string> = new Map([

@@ -34,7 +34,8 @@ ALL_INSTANCES=()
 # tests/scripts/launchd-drift.test.ts (manifest-parity test).
 NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check bot-errors-j1-collector whatsoup-fleet)
 
-# Retired stems: jobs removed from the standard (no manifest entry, no template).
+# Retired stems: jobs removed from the standard (no manifest entry; their templates
+# stay tracked until they can be deleted and are excluded from release exports).
 # A leftover plist ($LAUNCHD_DIR/com.whatsoup.<stem>.plist) or script
 # ($BIN_DIR/<stem>) is drift with a removal instruction; the stem is never
 # discovered as an instance. See docs/releases/2026-11-20-token-backup-job-retired.md.

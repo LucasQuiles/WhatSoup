@@ -104,8 +104,9 @@ const REPLY_TEMPLATE = HARNESS_TEMPLATE
   .replace('harness-maintenance', 'reply-guarantee')
   .replace('harness.sh', 'reply-guarantee-drain.sh');
 
-// Retired from the standard: deploy/managed-components.json no longer lists it and no template ships. A host that
-// still has its plist or script is told to remove them; the job is never checked as a template or as an instance.
+// Retired from the standard: deploy/managed-components.json no longer lists it; its templates stay tracked until they
+// can be deleted and are excluded from release exports. A host that still has its plist or script is told to remove
+// them; the job is never checked as a template or as an instance.
 const RETIRED_STEM = 'ms365-token-backup';
 
 // The collector surface carries a schedule the guard cross-checks against the wrapper's default slot minute.

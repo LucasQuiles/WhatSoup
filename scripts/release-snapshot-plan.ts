@@ -39,6 +39,17 @@ export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   RELEASE_MANIFEST_FILE,
 ] as const;
 
+/**
+ * Tracked paths `.gitattributes` marks `export-ignore`, so `git archive` never stages them. They are not copied into a
+ * release and not listed in its manifest; unlike a mutable exclude, the drift check still reports one found in a
+ * release. Today: the retired token backup job's templates, tracked until they can be deleted
+ * (docs/releases/2026-11-20-token-backup-job-retired.md). Keep this list equal to the `.gitattributes` lines.
+ */
+export const RELEASE_EXPORT_IGNORED_PATHS: readonly string[] = [
+  'deploy/templates/com.whatsoup.ms365-token-backup.plist',
+  'deploy/templates/ms365-token-backup.sh',
+];
+
 export interface ReleaseSnapshotFile {
   path: string;
   sha256: string;
@@ -263,7 +274,7 @@ export function createReleaseSnapshotPlan(options: CreateReleaseSnapshotPlanOpti
   const rollbackPath = path.join(rollbackRoot, `${releaseName}-before`);
   const mutablePathExcludes = [...(options.mutablePathExcludes ?? DEFAULT_RELEASE_MUTABLE_EXCLUDES)];
   const files = [...new Set(options.trackedFiles.map(normalizeRepoPath))]
-    .filter((filePath) => !matchesExclude(filePath, mutablePathExcludes))
+    .filter((filePath) => !matchesExclude(filePath, mutablePathExcludes) && !RELEASE_EXPORT_IGNORED_PATHS.includes(filePath))
     .sort()
     .map((filePath) => readSourceFile(sourceRoot, filePath));
 
