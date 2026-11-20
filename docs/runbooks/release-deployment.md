@@ -509,6 +509,11 @@ installed consumer of a selected shared wrapper is declared (the limits are
 below). It prints only paths,
 digests, membership, port numbers, and state; it never prints health tokens,
 config contents, plist environment values, or health bodies.
+A WhatSoup job retired from the standard refuses by name when its plist is
+installed or its label is loaded (`retired:<label>`); the detail names the plist
+and the script to remove. Planning never loads, reloads or counts a retired job
+as a member. The host steps are in
+[the retirement note](../releases/2026-11-20-token-backup-job-retired.md).
 `--backup-dir` has the `release:activate` rule: absent, or a real directory
 owned by the current user with no group or other access, checked for each
 member (`<instance>:backup-dir-private-owned`) when planning and again by
