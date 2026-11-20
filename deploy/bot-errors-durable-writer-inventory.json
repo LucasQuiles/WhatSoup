@@ -302,6 +302,61 @@
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
+      "site_id": "dispatcher-incident-authority-preflight-state",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "_publish_incident_authority_preflight_state",
+      "logical_publication": "dispatcher.incident_authority_preflight_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "_publish_incident_authority_preflight_state",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-incident-authority-attempt",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "process_one",
+      "logical_publication": "dispatcher.incident_authority_attempt",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "process_one",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-incident-authority-unavailable",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "process_one",
+      "logical_publication": "dispatcher.incident_authority_unavailable",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "process_one",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-incident-authority-rejected",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "process_one",
+      "logical_publication": "dispatcher.incident_authority_rejected",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "process_one",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-incident-authority-accepted",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "process_one",
+      "logical_publication": "dispatcher.incident_authority_accepted",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "process_one",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
       "site_id": "dispatcher-dead-letter-meta-clear",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
       "function": "queue_dead_letter_meta_alert",
