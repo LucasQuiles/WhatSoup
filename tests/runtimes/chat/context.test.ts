@@ -195,6 +195,30 @@ describe('loadContext', () => {
     expect(lines).toHaveLength(1);
   });
 
+  it('shows a fact once when a legacy-id record and a source-set-id record carry the same text', async () => {
+    // A consolidation promotion written before source-set identity keeps its
+    // claim-hash id; the same fact promoted again gets a durable:l1: id. Both
+    // can rank in one leg, or one in the chat leg and one in the sender leg.
+    const pinecone = makeMockPinecone(
+      [
+        makeResult('durable:0123456789abcdef', 'user-a prefers green tea'),
+        makeResult('durable:l1:0123456789abcdef0123456789abcdef', 'user-a prefers green tea'),
+        makeResult('rec-other', 'user-a lives near the coast'),
+      ],
+      [makeResult('durable:l1:fedcba9876543210fedcba9876543210', '  user-a  prefers green tea ')],
+    );
+
+    const result = await loadContext(
+      pinecone as any,
+      'chat@g.us',
+      'alice@s.whatsapp.net',
+      'test query',
+    );
+
+    const lines = result.split('\n').filter((l) => l.startsWith('- '));
+    expect(lines).toEqual(['- user-a prefers green tea', '- user-a lives near the coast']);
+  });
+
   it('chat results appear before sender results in the output (insertion order)', async () => {
     const pinecone = makeMockPinecone(
       [makeResult('c1', 'chat fact first')],
