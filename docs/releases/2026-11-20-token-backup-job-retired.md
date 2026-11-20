@@ -15,14 +15,20 @@ from the repository's standard so that no install creates it again.
   carries them, and no setup step, deploy script or manifest references them.
 - New instances cannot take the name `ms365-token-backup`: instance creation
   refuses it, because the instance would get the retired label. An instance that
-  already has that name, found by its config under the instance config root,
-  is checked as that instance by every check below, never as the retired job.
+  already has that name is checked as that instance by every check below, never
+  as the retired job, when a regular file `config.json` exists in
+  `<config root>/ms365-token-backup/`. The config root is
+  `$XDG_CONFIG_HOME/whatsoup/instances`, or `~/.config/whatsoup/instances` when
+  `XDG_CONFIG_HOME` is unset or empty; a directory named `config.json` does not
+  count. The health check also treats a name its profile declares as an instance.
 - `scripts/check-launchd-drift.sh` (`npm run guard:launchd-drift`) reports a
   leftover plist (`~/Library/LaunchAgents/com.whatsoup.ms365-token-backup.plist`)
   or script (`~/.local/bin/ms365-token-backup`) as `retired:` drift, names the
-  file to remove and exits 1. It checks only that each file exists: no other
-  scan opens the retired plist, and discovery never treats it as a bot instance
-  (an operator who names it with `--instance` gets the instance checks instead).
+  file to remove and exits 1. It checks only that each file exists. The
+  maintenance scan never opens the retired plist; the collector scan reads only
+  its `Label` and skips it when that is the retired label. Discovery never treats
+  the plist as a bot instance; an operator who names it with `--instance` gets
+  the instance checks in addition to the retired check.
   It checks the files of the user running it, and only when that user's
   LaunchAgents folder exists.
 - `npm run release:activate-host` refuses a host that still has the plist
@@ -30,14 +36,17 @@ from the repository's standard so that no install creates it again.
   precondition is `retired:com.whatsoup.ms365-token-backup`. Its detail says to
   boot the job out when it is loaded, names the plist launchd loaded it from when
   that differs from the canonical one, and names the canonical plist and the
-  script when they exist. Single-instance `release:activate` does not check for
-  the retired job.
+  script when they exist; with nothing left to remove it says only to boot the
+  job out. A plist with the retired file name whose own `Label` is another job
+  is never named for removal and gives no retired row unless the retired label
+  is loaded. Single-instance `release:activate` does not check for the retired
+  job.
 - The BOT ERRORS health check reports the job when launchd has it loaded, idle
   or running, as `FAIL retired_service ms365-token-backup` in the daily summary.
   It reads only the launchd jobs of the user running the check, on that host.
   It runs only on the profile path: config inventory on, the instance config
   root present, at least one instance declared in the profile, and
-  `allowUnprofiledInstances` not set. An unloaded plist or a script alone gives
+  `allowUnprofiledInstances` unset or false. An unloaded plist or a script alone gives
   no finding, and a systemd unit of that name is an ordinary service.
 
 ## What each Mac host must do before its next login or restart
@@ -50,10 +59,15 @@ booting the job out is not enough.
    `launchctl bootout gui/$(id -u)/com.whatsoup.ms365-token-backup`.
 2. Remove `~/Library/LaunchAgents/com.whatsoup.ms365-token-backup.plist` and
    `~/.local/bin/ms365-token-backup`, and any other plist that
-   `release:activate-host` names as the one the job was loaded from.
+   `release:activate-host` names as the one the job was loaded from. Before
+   removing a plist, confirm its `Label`:
+   `/usr/libexec/PlistBuddy -c 'Print :Label' <plist>` must print
+   `com.whatsoup.ms365-token-backup`. Leave a plist with any other `Label`.
 3. Run `npm run guard:launchd-drift`. It must print no `retired:` line.
 
-`npm run release:activate-host` refuses the host until these steps are done.
+`npm run release:activate-host` refuses the host while the job is loaded or its
+plist is present. It does not detect a leftover script alone; the drift check in
+step 3 does.
 
 ## Not changed
 
