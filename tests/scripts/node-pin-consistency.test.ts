@@ -875,12 +875,22 @@ process.stdout.write('Origin: Debian\\nCodename: bookworm\\n');
         ['--proto', '=https'], ['--proto-redir', '=https'],
         ['--header', 'X-Download-Directly: 1'],
         ['--max-redirs', '0'], ['--max-filesize', '1048576'], ['--max-time', '30'],
+        ['--retry', '2'], ['--retry-delay', '5'], ['--retry-max-time', '60'],
       ]) {
         expect(args.filter((arg) => arg === option)).toHaveLength(1);
         expect(args[args.indexOf(option!) + 1]).toBe(value);
       }
+      expect(args.filter((arg) => arg === '--retry-connrefused')).toHaveLength(1);
+      expect(args).not.toContain('--retry-all-errors');
       expect(args.at(-1)).toMatch(/^https:\/\/snapshot\.debian\.org\//);
     }
+  });
+
+  it('retries each APT download a bounded number of times in every Dockerfile stage', () => {
+    const dockerfile = readFileSync(path.join(repoRoot, 'docker/Dockerfile'), 'utf8').replace(/\\\n/g, ' ');
+    const aptCalls = [...dockerfile.matchAll(/\bapt-get\b[^&\n]*?\b(update|install)\b/g)];
+    expect(aptCalls.map((match) => match[1])).toEqual(['update', 'install', 'update', 'install']);
+    for (const [call] of aptCalls) expect(call).toContain('-o Acquire::Retries=3');
   });
 
   it('refuses an oversized response even when curl does not enforce its size option', () => {
