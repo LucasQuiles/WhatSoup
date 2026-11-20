@@ -463,7 +463,7 @@ describe('container build evidence CI contract', () => {
     expect(attestedBuild?.run).not.toContain('--provenance=false');
     expect(qualityWorkflow).not.toContain('docker image save whatsoup-ci');
     expect(qualityWorkflow).toContain('--metadata-file');
-    expect(qualityWorkflow).toContain('"${source_repository}#${SOURCE_REVISION}"');
+    expect(qualityWorkflow).toContain('"${source_repository}#${SOURCE_REF}"');
     expect(qualityWorkflow).toContain('policy.sbom.generator');
     expect(qualityWorkflow).toContain('policy.platform');
     expect(qualityWorkflow).toContain('--platform "$platform"');
@@ -596,22 +596,15 @@ describe('container build evidence CI contract', () => {
       expect(step(name).env?.SOURCE_REVISION, name).toBe('${{ github.sha }}');
       expect(step(name).env?.SOURCE_REF, name).toBe(mergeRef);
     }
-    expect(qualityWorkflow).not.toContain('pull_request.head.sha');
-    expect(qualityWorkflow).not.toContain('pull_request.head.repo.clone_url');
+    // Scoped to the quality job: the gitleaks job legitimately scans the pull-request head range.
+    const qualityJob = JSON.stringify(workflow.jobs.quality);
+    expect(qualityJob).not.toContain('pull_request.head.sha');
+    expect(qualityJob).not.toContain('pull_request.head.repo.clone_url');
     const build = step('Build Docker deployment image').run ?? '';
     expect(build).toContain('"$(git rev-parse HEAD)" != "$SOURCE_REVISION"');
     expect(build).toContain('"${source_repository}#${SOURCE_REF}"');
     expect(step('Load verified deployment image and runtime providers').run).toContain('"${source_repository}#${SOURCE_REF}"');
     expect(step('Verify container build receipt').run?.match(/--source-ref "\$SOURCE_REF"/g)).toHaveLength(2);
-  });
-
-  it('selects the pull-request head clone URL while retaining policy input for other GitHub events', () => {
-    expect(qualityWorkflow).toContain(
-      "SOURCE_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.clone_url || '' }}",
-    );
-    expect(qualityWorkflow).toContain('source_repository="$SOURCE_REPOSITORY"');
-    expect(qualityWorkflow).toContain('source_repository="$(node -e \'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sourceRepository)\')"');
-    expect(qualityWorkflow).toContain('--source-repository "$source_repository"');
   });
 
   it('refuses an empty Buildx provenance placeholder', () => {

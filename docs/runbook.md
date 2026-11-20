@@ -3731,10 +3731,16 @@ compares its immutable image ID with Docker's inspection of the reviewed digest,
 those runtime bytes and image ID alongside the independently checked SLSA source/invocation.
 BuildKit's SLSA materials do not themselves establish the builder image identity. It builds
 for the policy's explicit platform and sends the policy's digest-pinned SBOM generator to BuildKit.
-For a pull request it builds from GitHub's authoritative head clone URL at the exact full head SHA;
-push and merge-group builds require the fixed `https://github.com/LucasQuiles/WhatSoup.git`
-policy fallback and event SHA. An explicit PR-head fork override remains supported. The selected
-source must be an `https://github.com/<owner>/<repo>.git` clone URL and is recorded in the receipt,
+Every event builds the commit the job checked out (`github.sha`) from the fixed
+`https://github.com/LucasQuiles/WhatSoup.git` policy repository, so the image and the policy probe that
+later runs inside it come from the same tree. For a pull request that commit is the merge result.
+It is on no branch, so BuildKit fetches it through the pull request's merge ref, `refs/pull/<n>/merge`,
+and the verifier accepts that ref (`--source-ref`) only when both provenance records name the
+checked-out commit as the resolved revision. If GitHub moved the merge ref after checkout, the
+receipt step fails; a re-run reuses the old commit, so push again to start a new run. Push and merge-group builds fetch the
+event commit itself. The CLI's explicit `--source-repository` override for another GitHub
+repository remains supported but the workflow does not use it. The selected source must be an
+`https://github.com/<owner>/<repo>.git` clone URL and is recorded in the receipt,
 so BuildKit records a verified `configSource` revision rather than a local checkout hint. The receipt verifies OCI descriptor sizes
 and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
 parsing their SLSA v1 and SPDX statements. It requires every statement subject to name the

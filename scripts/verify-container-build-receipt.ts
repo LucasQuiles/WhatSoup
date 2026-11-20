@@ -37,6 +37,8 @@ export interface ContainerBuildReceiptInput {
   imagePath: string;
   sourceRevision: string;
   sourceRepository?: string;
+  /** Git ref BuildKit fetched: the revision itself, or a pull request's merge ref resolved to that revision. */
+  sourceRef?: string;
   builder: string;
   buildxVersion: string;
   buildkitVersion: string;
@@ -82,6 +84,7 @@ const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
 const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
 const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
+const PULL_REQUEST_MERGE_REF_PATTERN = /^refs\/pull\/[1-9][0-9]*\/merge$/;
 const CANONICAL_SOURCE_REPOSITORY = 'https://github.com/LucasQuiles/WhatSoup.git';
 const PLATFORM = 'linux/amd64';
 const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?digest=sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d&platform=linux%2Famd64';
@@ -113,6 +116,7 @@ interface InTotoStatement { _type?: unknown; subject?: unknown; predicateType?: 
 interface OciVerificationExpectation {
   sourceRevision: string;
   sourceRepository: string;
+  sourceRef: string;
   provenanceBuilderId: string;
   baseImageDependency: string;
   baseImageResolvedDigest: string;
@@ -304,6 +308,16 @@ function selectedSourceRepository(policy: ContainerInputPolicy, sourceRepository
   return selected;
 }
 
+// The commit is pinned by the provenance digest checks against sourceRevision; the ref only names what
+// BuildKit fetched. A pull request's merge commit is not on a branch, so it is fetched through its merge ref.
+function selectedSourceRef(sourceRevision: string, sourceRef?: string): string {
+  const selected = sourceRef ?? sourceRevision;
+  if (selected !== sourceRevision && !PULL_REQUEST_MERGE_REF_PATTERN.test(selected)) {
+    throw new Error('source ref must be the source revision or a pull request merge ref');
+  }
+  return selected;
+}
+
 function readOciArchiveEntry(archivePath: string, entry: string, budget: VerificationBudget,
   entryMaxBytes = OCI_ENTRY_MAX_BYTES): Buffer {
   for (const candidate of [entry, `./${entry}`]) {
@@ -452,7 +466,7 @@ function assertBuildxProvenance(
   if (!isRecord(configSource.digest) || configSource.digest.sha1 !== expected.sourceRevision) {
     throw new Error('Buildx metadata config source revision does not match requested source revision');
   }
-  if (configSource.uri !== `${expected.sourceRepository}#${expected.sourceRevision}`) {
+  if (configSource.uri !== `${expected.sourceRepository}#${expected.sourceRef}`) {
     throw new Error('Buildx metadata config source repository does not match the reviewed remote context');
   }
   if (configSource.entryPoint !== 'docker/Dockerfile') {
@@ -482,7 +496,7 @@ function assertSlsaPredicate(
   if (!isRecord(buildDefinition.externalParameters) || !isRecord(buildDefinition.externalParameters.configSource)) throw new Error('SLSA provenance predicate is missing config source');
   const configSource = buildDefinition.externalParameters.configSource;
   if (!isRecord(configSource.digest) || configSource.digest.sha1 !== expected.sourceRevision) throw new Error('SLSA config source revision does not match requested source revision');
-  if (configSource.uri !== `${expected.sourceRepository}#${expected.sourceRevision}`) throw new Error('SLSA config source repository does not match the reviewed remote context');
+  if (configSource.uri !== `${expected.sourceRepository}#${expected.sourceRef}`) throw new Error('SLSA config source repository does not match the reviewed remote context');
   if (configSource.path !== 'docker/Dockerfile') throw new Error('SLSA config source path is not docker/Dockerfile');
   if (!Array.isArray(buildDefinition.resolvedDependencies) || !hasResolvedDependency(
     buildDefinition.resolvedDependencies,
@@ -671,6 +685,7 @@ function assertInput(input: ContainerBuildReceiptInput, budget: VerificationBudg
   }
   const policy = loadPolicy(input.repoRoot);
   const sourceRepository = selectedSourceRepository(policy, input.sourceRepository);
+  const sourceRef = selectedSourceRef(input.sourceRevision, input.sourceRef);
   if (input.builder !== expectedBuilderIdentity(policy)) throw new Error('builder identity does not match docker/container-inputs.json');
   if (input.buildxVersion !== policy.buildx.version) throw new Error('Buildx version does not match docker/container-inputs.json');
   if (input.buildkitVersion !== expectedBuildkitVersion(policy)) throw new Error('BuildKit version does not match docker/container-inputs.json');
@@ -695,6 +710,7 @@ function assertInput(input: ContainerBuildReceiptInput, budget: VerificationBudg
   const oci = verifyArchive(input.imagePath, metadata['containerimage.digest'], {
     sourceRevision: input.sourceRevision,
     sourceRepository,
+    sourceRef,
     provenanceBuilderId: input.provenanceBuilderId,
     baseImageDependency: policy.baseImageDependency,
     baseImageResolvedDigest: policy.baseImageResolvedDigest,
@@ -767,6 +783,7 @@ export interface ParsedArgs {
   imagePath: string;
   sourceRevision: string;
   sourceRepository?: string;
+  sourceRef?: string;
   builder: string;
   buildxVersion: string;
   buildkitVersion: string;
@@ -782,11 +799,11 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
     booleanOptions: [],
     valueOptions: [
       '--metadata', '--runtime-evidence', '--sbom', '--verified-sbom-output', '--image', '--source', '--source-repository',
-      '--builder', '--buildx-version', '--buildkit-version', '--provenance-builder-id',
+      '--source-ref', '--builder', '--buildx-version', '--buildkit-version', '--provenance-builder-id',
       '--repo-root', '--output', '--receipt', '--github-output',
     ],
   });
-  const usage = 'usage: verify-container-build-receipt.ts --metadata PATH --runtime-evidence PATH (--sbom PATH | --verified-sbom-output PATH) --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--source-repository HTTPS_GITHUB_CLONE_URL] [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)';
+  const usage = 'usage: verify-container-build-receipt.ts --metadata PATH --runtime-evidence PATH (--sbom PATH | --verified-sbom-output PATH) --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--source-repository HTTPS_GITHUB_CLONE_URL] [--source-ref COMMIT|refs/pull/N/merge] [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)';
   if (parsed.error) throw new Error(usage);
   const values = parsed.values;
   const required = (flag: string): string => {
@@ -803,7 +820,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
   if (receiptPath && verifiedSbomOutputPath) throw new Error('receipt verification requires an existing SBOM');
   return {
     metadataPath: required('--metadata'), runtimeEvidencePath: required('--runtime-evidence'), sbomPath, verifiedSbomOutputPath, imagePath: required('--image'),
-    sourceRevision: required('--source'), sourceRepository: values.get('--source-repository'), builder: required('--builder'), buildxVersion: required('--buildx-version'),
+    sourceRevision: required('--source'), sourceRepository: values.get('--source-repository'), sourceRef: values.get('--source-ref'), builder: required('--builder'), buildxVersion: required('--buildx-version'),
     buildkitVersion: required('--buildkit-version'), provenanceBuilderId: required('--provenance-builder-id'),
     repoRoot: values.get('--repo-root') ?? cwd, outputPath, receiptPath, githubOutputPath: values.get('--github-output'),
   };
@@ -813,7 +830,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   const args = parseArgs(argv, cwd);
   const input: ContainerBuildReceiptInput = {
     repoRoot: args.repoRoot, metadataPath: args.metadataPath, runtimeEvidencePath: args.runtimeEvidencePath, sbomPath: args.sbomPath, verifiedSbomOutputPath: args.verifiedSbomOutputPath, imagePath: args.imagePath,
-    sourceRevision: args.sourceRevision, sourceRepository: args.sourceRepository, builder: args.builder, buildxVersion: args.buildxVersion,
+    sourceRevision: args.sourceRevision, sourceRepository: args.sourceRepository, sourceRef: args.sourceRef, builder: args.builder, buildxVersion: args.buildxVersion,
     buildkitVersion: args.buildkitVersion, provenanceBuilderId: args.provenanceBuilderId,
   };
   const receipt = createContainerBuildReceipt(input);
