@@ -375,3 +375,36 @@ def test_loaded_retired_launchd_job_is_a_retired_finding(monkeypatch, tmp_path, 
         f"FAIL retired_service {_RETIRED}: retired job is loaded "
         f"service=com.whatsoup.{_RETIRED} remediation=boot_out_then_remove_plist_and_script"
     ], lines
+
+
+def test_instance_with_the_retired_name_is_never_the_retired_job(backend_env, tmp_path):
+    """The finding is for the launchd job only: a systemd unit of that name, or
+    any unit whose name a configured instance owns, is an instance and keeps the
+    ordinary coverage path (declared: no line)."""
+    (tmp_path / _RETIRED).mkdir()
+    (tmp_path / _RETIRED / "config.json").write_text("{}", encoding="utf-8")
+    if backend_env["platform"] == "darwin":
+        stdout = f"4242\t0\tcom.whatsoup.{_RETIRED}\n"
+    else:
+        stdout = f"whatsoup@{_RETIRED}.service loaded active running WhatSoup\n"
+    module = backend_env["module"]
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path, {_RETIRED})
+    assert lines == [], lines
+
+
+def test_systemd_unit_with_the_retired_name_is_an_ordinary_service(monkeypatch, tmp_path):
+    """Without a config, a systemd unit of that name is still not the retired
+    launchd job: it gets the ordinary undeclared-service line."""
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM", "linux")
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM_RELEASE", "6.8.0-generic")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES", raising=False)
+    module = _load("bot_errors_health_check_retired_systemd", _SCRIPT)
+    stdout = f"whatsoup@{_RETIRED}.service loaded active running WhatSoup\n"
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path, set())
+    assert lines == [
+        f"FAIL profile_coverage_service {_RETIRED}: active service not declared "
+        f"in health profile service=com.whatsoup.{_RETIRED} config_exists=False"
+    ], lines
