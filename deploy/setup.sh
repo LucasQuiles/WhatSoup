@@ -637,8 +637,11 @@ if [ ! -f "$HOME/.config/whatsoup/bot-errors.env" ]; then
     echo "BOT_ERRORS_SOCKET=$bot_errors_socket"
     echo "BOT_ERRORS_DB=$bot_errors_db"
     echo "BOT_ERRORS_HEALTH_PROFILE=$bot_errors_health_profile"
-    echo "# IncidentStore authority: enroll both producers and write their credential files"
-    echo "# before enabling the services (deploy/scripts/README-bot-errors.md)."
+    echo "# IncidentStore authority. observe (the default) asks for a grant and records the"
+    echo "# answer but sends every notice; enforce sends nothing without a grant. Switch a host"
+    echo "# to enforce only after enrolling both producers and reading its record"
+    echo "# (deploy/scripts/README-bot-errors.md)."
+    echo "BOT_ERRORS_INCIDENT_AUTHORITY_MODE=observe"
     echo "BOT_ERRORS_INCIDENT_AUTHORITY_URL=$bot_errors_authority_url"
     echo "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE=$bot_errors_dispatcher_credential"
     echo "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE=$bot_errors_q_loop_credential"
@@ -667,16 +670,15 @@ else
   fi
   append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_DB" "$bot_errors_default_db"
   append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_HEALTH_PROFILE" "$bot_errors_default_health_profile"
+  # Only when missing: an owner's enforce setting is kept. No credential path
+  # is added; until a host is enrolled its record says "not configured".
+  append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_INCIDENT_AUTHORITY_MODE" "observe"
   append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_INCIDENT_AUTHORITY_URL" \
     "${BOT_ERRORS_INCIDENT_AUTHORITY_URL:-http://127.0.0.1:9099/api/signals}"
-  append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE" \
-    "${BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE:-$HOME/.config/whatsoup/bot-errors-dispatcher.credential}"
-  append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE" \
-    "${BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE:-$HOME/.config/whatsoup/bot-errors-q-loop.credential}"
   echo "  ✓ Existing BOT ERRORS routing config preserved at ~/.config/whatsoup/bot-errors.env"
-  echo "  - IncidentStore authority: enroll the dispatcher and Q-loop producers and write their credential"
-  echo "    files (deploy/scripts/README-bot-errors.md, upgrade section) before or with this upgrade."
-  echo "    Until then BOT ERRORS holds every notice in its outbox and the deadman reports it after 30 minutes."
+  echo "  - IncidentStore authority runs in observe mode unless this host's env file says enforce:"
+  echo "    every notice is sent and each authority answer is recorded. To enroll this host and"
+  echo "    read its record, see deploy/scripts/README-bot-errors.md (authority modes)."
 fi
 
 # ── Step 5: Install hardened npm defaults ───────────────────────────

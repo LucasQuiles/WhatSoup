@@ -55,16 +55,21 @@ surrounding whitespace (see "Machine identity").
 
 ### NORMATIVE — IncidentStore authority for notification and remediation
 
-The dispatcher and Q loop treat authenticated IncidentStore acceptance as the
-authority for BOT ERRORS side effects. This is a source and configuration
-contract. Merging these files or passing source tests does not prove that a
-fleet host has the settings, producer registrations, credentials, database
-capacity, network route, or running release required to enforce it.
+The dispatcher and Q loop can treat authenticated IncidentStore acceptance as
+the authority for BOT ERRORS side effects. `BOT_ERRORS_INCIDENT_AUTHORITY_MODE`
+chooses how (see "Authority modes" below). In observe mode, the default, they
+ask for a grant and record the answer but deliver every notice as before. In
+enforce mode, which the owner turns on per host, no protected notice leaves
+without a grant. This is a source and configuration contract. Merging these
+files or passing source tests does not prove that a fleet host has the
+settings, producer registrations, credentials, database capacity, network
+route, or running release required to enforce it.
 
-Before the dispatcher mutates incident/suppression state or tries any human
-notification for an eligible outbox event, it writes a canonical,
-content-free signal to `POST /api/signals` and durably records the bound
-receipt beside the event. A restart revalidates the producer, signal identity,
+In enforce mode, before the dispatcher mutates incident/suppression state or
+tries any human notification for an eligible outbox event, it writes a
+canonical, content-free signal to `POST /api/signals` and durably records the
+bound receipt beside the event. In observe mode it sends the same signal once
+per event per cycle and writes nothing into the event. A restart revalidates the producer, signal identity,
 payload digest, receipt identity, and disposition before reusing that receipt.
 That check proves the stored receipt matches the event on the same service
 user; it is not a signature from the authority. A process that can write the
@@ -82,20 +87,23 @@ The preflight covers outbox events. Notifications that the dispatcher derives
 inside a pass (a flap-storm alert, a stale renotify, the auto-close digest) are
 authorized when they are sent, through the same wrapper. Their bookkeeping runs
 first, as it does today: the flap trip is counted, a stale incident is marked,
-and an aged non-actionable incident is closed. A refused or unavailable
-authority is handled like a failed send: the flap-storm lifecycle is rolled
-back, the stale record is marked failed, and the digest stays pending, so each
-notice is retried on a later pass and none is recorded as delivered.
+and an aged non-actionable incident is closed. In enforce mode a refused or
+unavailable authority is handled like a failed send: the flap-storm lifecycle
+is rolled back, the stale record is marked failed, and the digest stays
+pending, so each notice is retried on a later pass and none is recorded as
+delivered. In observe mode the wrapper records the answer and sends.
 
-The guarantee covers the dispatcher, the Q loop, and the owner route. The
-deadman and health-check paths in `bot-errors-health-check.py` still send
-directly, so that they can report a stalled or unreachable stack; they are
-outside this boundary.
+In enforce mode the guarantee covers the dispatcher, the Q loop, and the owner
+route. The deadman and health-check paths in `bot-errors-health-check.py` send
+directly in both modes, so that they can report a stalled or unreachable
+stack; they are outside this boundary.
 
-The Q loop performs the same acceptance before bootstrap, nudge, or checkpoint
-messages. Owner copies and credential re-pages pass through the shared
-receipt-validating sender in `lib/owner_route.py`; the repository security
-boundary guard rejects direct dispatcher, owner-route, or Q-loop transports.
+The Q loop asks the same authority before bootstrap, nudge, or checkpoint
+messages. Owner copies and credential re-pages pass through the shared sender
+in `lib/owner_route.py`, which checks the receipt in enforce mode. The
+repository security boundary guard rejects direct dispatcher, owner-route, or
+Q-loop transports. The mode decision lives inside those wrappers, so the
+guard's call-site counts hold in both modes; the guard does not check the mode.
 The guard also pins the authority preflight ahead of credential observation,
 suppression, flap/storm mutation, and delivery, inventories the full `deploy/`
 tree, rejects test-only dry seams in service definitions, and verifies the two
@@ -107,6 +115,7 @@ Configure the authority through the private host env file:
 
 | Variable | Consumer | Contract |
 |---|---|---|
+| `BOT_ERRORS_INCIDENT_AUTHORITY_MODE` | dispatcher and Q loop | `observe` or `enforce`. Absent, empty or any other value means `observe`; an unknown value logs one `incident_authority_mode_unknown` warning. Read once per process by `incident_authority_mode()` in `lib/incident_authority.py`. The macOS installer copies it into the dispatcher plist; systemd units read it from the env file. |
 | `BOT_ERRORS_INCIDENT_AUTHORITY_URL` | dispatcher and Q loop | Exact `/api/signals` URL. HTTP is accepted only for a literal loopback address; authenticated deployments use HTTPS. Userinfo, query strings, fragments, alternate paths, and redirects are rejected. |
 | `BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE` | dispatcher | Absolute path to the dispatcher producer credential. |
 | `BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE` | Q loop | Absolute path to the separate Q-loop producer credential. |
@@ -180,57 +189,124 @@ stored with different bytes is refused with 409. Per-producer admission counters
 IncidentStore database, so handler recreation and concurrent processes do not
 reset the limit.
 
-Every authority failure stops the protected action. How the dispatcher keeps
-the event depends on the failure:
+### Authority modes
+
+**Observe (the default).** The dispatcher and the Q loop ask the authority
+and record the answer, then deliver every notice exactly as before the
+authority existed. No answer holds, delays beyond the one bounded request,
+reorders, quarantines, dead-letters or suppresses an event, a derived notice,
+a meta-alert, an owner copy, a credential page, a Q-loop message or an e-mail
+fallback, and nothing is written into the event. The bounds: one request per
+event per cycle with a 2 second timeout, and at most 8 requests and 8 seconds
+of request time per dispatcher cycle (`OBSERVE_*` in `lib/incident_authority.py`).
+The timeout applies to each socket operation, so a reply that trickles in can
+run past it once before the cycle bound stops further requests. After a bound,
+or after a 429, the rest of the cycle is recorded `not_asked` and still sent.
+The Q loop asks at most once per notice, so at most three times per pass.
+Observe mode never sets `incidentAuthorityNotReady`, so the
+`authority_not_ready` deadman member stays quiet.
+
+**Enforce (the owner's per-host decision).** No protected notice leaves
+without a grant. Every authority failure stops the protected action, and how
+the dispatcher keeps the event depends on the failure:
 
 - **Not ready** (settings missing or invalid; credential missing, unreadable or
   not private; credential refused with 401; scope refused with 403; rate limit
-  429; the authority is down: connection failure, timeout or any 5xx answer):
-  the event stays in the outbox with its own backoff (up to 15 minutes). It is
-  never quarantined or dead-lettered for this reason and the wait does not
-  count as an attempt, so an outage of any length loses no event. After one
-  rate refusal the dispatcher asks nothing more in that cycle.
-- **Terminal** (identity conflict, malformed or mismatched receipt): the event
-  is quarantined.
+  429; the authority is down: connection failure, timeout or any 5xx answer,
+  whatever the size of its body): the event stays in the outbox with its own
+  backoff, doubling from 2 seconds to at most 512 seconds. It is never
+  quarantined or dead-lettered for this reason and the wait does not count as
+  an attempt. After one rate refusal the dispatcher asks nothing more in that
+  cycle, including during the first queue scan.
+- **Terminal** (identity conflict; a malformed or mismatched receipt; a
+  redirect; any other status, where only 200 and 201 are success; an oversized
+  reply that is not a refusal or an outage): the event is quarantined.
 
-No authority answer dead-letters an event any more. The authority-attempt cap
+No authority answer dead-letters an event. The authority-attempt cap
 (`BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS`) is reached only by a plain
 unavailability that the client no longer raises. Events that already hold a
 receipt keep the existing delivery retry and dead-letter rules for WhatsApp
 and e-mail failures.
 
-What the operator sees while authority is not ready: every notice that needs
-authority waits, and that includes the daily health report, the dead-letter
-meta-alerts and owner copies, because they are queued through the same
-outbox. The one channel that still reaches the operator is the deadman, which
-sends directly (WhatsApp, e-mail as fallback): within 30 to 35 minutes of the
+What the operator sees in enforce mode while authority is not ready: every
+notice that needs authority waits, and that includes the daily health report,
+the dead-letter meta-alerts and owner copies, because they are queued through
+the same outbox. The deadman sends directly: within 30 to 35 minutes of the
 first refusal, while events wait, it sends `BOT ERRORS DEADMAN … problem:
 authority_not_ready` with the reason, the seconds not ready and the number of
-waiting events, repeats at its cooldown, and sends its recovery when a cycle
-obtains a grant. On the host itself the dispatcher state file holds
-`incidentAuthorityNotReady` (reason and since when), `logs/dispatch.jsonl`
-holds `incident_authority_not_ready` warnings, and the health check's report
-text, when run on the host, carries a `WARN incident_authority: not_ready`
-line.
+outbox events, to the configured BOT ERRORS group, by e-mail only when the
+group send fails. That group may not notify the owner's phone. It repeats at
+its cooldown and recovers when a cycle obtains a grant. On the host itself the
+dispatcher state file holds `incidentAuthorityNotReady` (reason and since
+when), `logs/dispatch.jsonl` holds `incident_authority_not_ready` warnings,
+and the health check's report text carries a `WARN incident_authority:
+not_ready` line. The Q loop only logs its refusals.
 
 Notification ambiguity remains a separate delivery state and must be
-reconciled before replay. Revoking both producer credentials or removing the
-authority settings is the fail-closed rollback: new events wait in the outbox,
-and receipts, phase facts and diagnostic evidence remain available for
-investigation. An event that already holds a receipt is still delivered,
-because a stored receipt is reused without asking again. Rollback does not
-undo a notification or action that already occurred.
+reconciled before replay. In enforce mode, revoking both producer credentials
+or removing the authority settings is the fail-closed rollback: new events
+wait in the outbox, and receipts, phase facts and diagnostic evidence remain
+available for investigation. An event that already holds a receipt is still
+delivered, because a stored receipt is reused without asking again. Switching
+the host back to observe sends the held events on the next cycles. Rollback
+does not undo a notification or action that already occurred.
 
-### Upgrading a host to IncidentStore authority
+**The record.** Each answer is one JSON line: `time`, `eventClass` (`alert`,
+`clear`, `observation`, `q_notice` or `other`), `outcome` (`granted`,
+`refused`, `not_ready`, `protocol_error`, `not_configured`, `not_asked`),
+`reason` (a fixed code) and `mode`. It holds no message content, path, name
+or chat id. The dispatcher appends to `logs/incident-authority.jsonl` under
+its state root (bounded to 1 MiB, oldest lines dropped first); the Q loop
+appends to `incident-authority.jsonl` in its own state root (rotated at its
+log size bound). An identity conflict, a rejected credential and a denied
+scope are `refused`; a rate limit, an outage and an unreadable credential are
+`not_ready`; an exception the client did not classify is `protocol_error`
+with reason `authority_client_error`. The daily health report adds, per
+producer, a plain line `incident_authority_record: producer=… last_24h
+total=… granted=… refused=… not_ready=… protocol_error=… not_configured=…
+not_asked=… would_hold_or_refuse_in_enforce=… mode=…`. The count enforce
+would have stopped is refused + not_ready + protocol_error + not_configured.
 
-Enroll both producers (`bot-errors-dispatcher`, `bot-errors-q-loop`) and write
-their credential files before or with the upgrade, then set the three settings
-above in the private env file (`deploy/setup.sh` writes default paths when they
-are missing and prints this step). A host upgraded without them sends no new
-BOT ERRORS notice: every event waits in the outbox as not ready, nothing is
-lost, and the deadman reports `authority_not_ready` after 30 minutes. Once the
-credentials are in place the held events go out on the next cycles. The Q loop
-logs its refusals and sends nothing until its own credential is in place.
+**Enrolling a host and switching it to enforce.**
+
+1. Enroll both producers (`bot-errors-dispatcher`, `bot-errors-q-loop`), write
+   their credential files and set the URL and both credential paths in the
+   private env file (`deploy/setup.sh` writes `observe` and the URL when they
+   are missing, and adds no credential path).
+2. Restart the BOT ERRORS services and let the host run in observe mode.
+3. Read the health report's `incident_authority_record` lines: switch only
+   after a period in which `would_hold_or_refuse_in_enforce` is 0 and
+   `granted` covers the host's traffic.
+4. Close every item in "Before any host is switched to enforce" below.
+5. The owner sets `BOT_ERRORS_INCIDENT_AUTHORITY_MODE=enforce` in that host's
+   env file and restarts the services (on macOS, rerun
+   `install-bot-errors-launchd.sh`, which copies the setting into the plist).
+   `deploy/setup.sh` never changes an existing value.
+
+**Before any host is switched to enforce.** These enforce-mode gaps are known
+and not fixed yet:
+
+- Not-ready tracking is per cycle, not per event: any fresh grant clears
+  `incidentAuthorityNotReady`, so an event refused while others are granted
+  (for example a scope that admits notices but not alerts) can wait with no
+  deadman member. The deadman also counts the whole outbox, not the held
+  events.
+- The deadman's message goes to the BOT ERRORS group, with e-mail only when
+  that send fails, and that group may not notify the owner's phone.
+- The recovery sweep before delivery can archive an alert that is held for
+  authority when a matching clear is admitted first.
+- Two failure shapes escape the classification: an I/O error while reading the
+  credential after it was opened, and a receipt whose `disposition` is a list
+  (a `TypeError`). Either can stop the preflight for the rest of the cycle.
+- An existing pre-migration copy (`incidents.db.schema-v<N>.bak`) is kept
+  without checking that its mode is 0600, and a WAL-backed copy can pass the
+  check through its sidecar.
+
+### Upgrading a host to this release
+
+Nothing is needed for delivery: without the mode setting the host runs in
+observe mode, sends every notice as before, and records `not_configured` until
+it is enrolled. Enrolment and the switch to enforce follow the steps above.
 
 Release rollback and the incident database: this release migrates the fleet
 incident database (`incidents.db`) to schema version 3, and an earlier release
@@ -1057,12 +1133,14 @@ reads. The budget therefore bounds how late the next cycle can start. The
 queue holds at most 20 copies; a cycle that fails
 after its sends skips the drain, and a copy arriving at a full queue is
 logged as `skippedQueueFull` and dropped (its group copy exists).
-The queued event carries its accepted IncidentStore receipt. The queue hook
-revalidates it, and `lib/owner_route.py` revalidates it again before recording
-the delivery floor or invoking either channel. A missing or mismatched receipt
-therefore cannot consume the interval or produce an owner copy. The check is
-local self-consistency on the same service user, not a remote proof (see the
-authority section above).
+In enforce mode the queued event carries its accepted IncidentStore receipt.
+The queue hook revalidates it, and `lib/owner_route.py` revalidates it again
+before recording the delivery floor or invoking either channel. A missing or
+mismatched receipt therefore cannot consume the interval or produce an owner
+copy. The check is local self-consistency on the same service user, not a
+remote proof (see the authority section above). In observe mode, the default,
+the owner copy is queued and sent without a receipt, as before the authority
+existed; the dispatcher records the authority's answer.
 
 **Inert by default.** Nothing is read, parsed or logged unless both
 `BOT_ERRORS_OWNER_ROUTE_JID` and `BOT_ERRORS_OWNER_ROUTE_SOCKET` are set, so an
