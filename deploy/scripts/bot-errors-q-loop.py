@@ -1011,10 +1011,12 @@ def classify_activity(
                 cadence = ("monitoring", None)
             if cadence is not None:
                 apply_q_reply_cadence(state, cadence[0], cadence[1])
+                # As before the authority: only a recognised reply ends the
+                # wait; an ordinary reply keeps the nudge armed.
+                state["awaiting_q_since"] = 0
             # A chat frame proves only that the loop observed a Q-shaped sender.
             # It cannot approve scope, authorize a change, confirm execution, or
             # prove recovery.  Those facts require the authenticated phase path.
-            state["awaiting_q_since"] = 0
             state["last_q_disposition"] = disposition
             receipts = state.setdefault("q_receipts", {})
             if not isinstance(receipts, dict):
