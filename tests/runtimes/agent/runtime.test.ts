@@ -952,6 +952,8 @@ describe('AgentRuntime', () => {
       model: 'configured-primary',
     });
     await runtime.start();
+    // Until the startup probe settles, a turn success cannot clear the alert (restart reconciliation).
+    await vi.waitFor(() => expect((runtime as unknown as { primaryModelUsability: { probeInFlight?: boolean } | null }).primaryModelUsability?.probeInFlight).toBe(false));
     mockClearAlertSource.mockClear(); // isolate turn-success clear from startup-probe clear
     const rt = runtime as unknown as {
       recordTurnCapabilitySuccess: (u: boolean, s: unknown) => void;
