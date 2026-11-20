@@ -133,9 +133,13 @@ to enable the job.
 
 Review the plan, then repeat the same command with `--apply` and
 `--expected-candidate-sha256 <candidate_sha256-from-plan>`. The installer refuses
-a changed plist, a running or disabled job, or another active re-pin. It validates
-a staged plist, keeps an original backup and restores the original configuration
-and service after a failed activation. It never enables a disabled service or
+a changed plist, a running or disabled job, or another active re-pin; the
+running or disabled check comes before anything is staged. It validates a staged plist, keeps an original backup and
+restores the original configuration and service after a failed activation.
+Rollback unloads the job only when the plist on disk is the candidate this run
+wrote: when the bootout fails and the original plist and its job are still in
+place, the installer stops nothing and reports `unchanged` with exit `2`. Every
+receipt after the backup is staged names that backup. It never enables a disabled service or
 restarts bot instances. A successful apply still requires live configuration and
 authenticated runtime verification.
 Immediately before applying, verify that the loaded definition still matches
@@ -150,7 +154,8 @@ restoration; the backup is the manual recovery source. Do not treat a successful
 re-pin as permission to clear existing incidents or recovery debt.
 
 A refusal prints a JSON receipt with `"status": "refused"`, including for a plist
-whose top level or `EnvironmentVariables` is not a dictionary. A refusal before
+whose top level or `EnvironmentVariables` is not a dictionary, with or without
+`--runtime-manifest`. A refusal before
 the bootout removes the backup it staged. Without `--repin-existing` the
 installer takes no arguments: it renders a fresh installation only when called
 with none, and any other argument exits 2 before anything is written or loaded.

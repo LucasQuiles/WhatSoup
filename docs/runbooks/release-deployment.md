@@ -212,7 +212,9 @@ inside the new release: both `ci` installs, then the console build. Until
 `<release>/dist/index.html` is a regular file inside the release, `--plan`
 lists the precondition `release-required-outputs-present` as failed and exits
 `2`, and `--apply` refuses the same way. `--apply` checks the outputs again
-under the activation lock, just before the switch. A release whose manifest
+under the activation lock, just before the switch, against the list the plan
+checked: a manifest whose `requiredOutputs` or `release.path` changed after
+planning is refused before any change. A release whose manifest
 lists no `requiredOutputs`, such as one exported before this requirement, is
 not affected.
 
@@ -286,7 +288,8 @@ Preconditions include: the wrapper symlink points at
 `deploy/whatsoup`, `src/bootstrap.ts` and `node_modules`; every manifest
 `requiredOutputs` path (the built console) is a regular file inside the new release,
 reached without a symlinked path component, checked again under the activation lock
-just before the switch; each auxiliary job
+just before the switch, where the manifest must still name `--release` and list
+exactly the outputs the plan checked; each auxiliary job
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 
