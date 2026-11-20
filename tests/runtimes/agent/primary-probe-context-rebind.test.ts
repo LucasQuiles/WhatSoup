@@ -888,18 +888,20 @@ describe('primary probe service context after an in-place CLI update', () => {
     const age = (): void => {
       (state.primaryModelUsability as unknown as { checkedAt: number }).checkedAt = Date.now() - 6 * 60 * 60_000;
     };
+    // One matcher for both: the control below proves it matches the real call, so the negative is not vacuous.
+    const staleLogFields = expect.objectContaining({ provider: 'claude-cli', model: null });
 
     record(REFUSED);
     age();
     runtimeLog.info.mockClear();
     state.recordTurnCapabilitySuccess(true);
-    expect(runtimeLog.info).not.toHaveBeenCalledWith(expect.anything(), STALE_LINE);
+    expect(runtimeLog.info).not.toHaveBeenCalledWith(staleLogFields, STALE_LINE);
 
     // Control: an accepted turn success after a stale ordinary failure still logs it.
     record(USABLE);
     record(TIMEOUT);
     age();
     state.recordTurnCapabilitySuccess(true);
-    expect(runtimeLog.info).toHaveBeenCalledWith(expect.anything(), STALE_LINE);
+    expect(runtimeLog.info).toHaveBeenCalledWith(staleLogFields, STALE_LINE);
   });
 });
