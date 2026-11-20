@@ -815,11 +815,17 @@ def test_the_health_report_summarises_the_last_day_of_the_record(tmp_path):
     now = 1_763_600_000
     record = tmp_path / "incident-authority.jsonl"
 
-    def line(age: int, outcome: str, mode: str = "observe") -> str:
+    def line(age: int, outcome: object, mode: str = "observe", reason: object = "x") -> str:
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - age))
-        return json.dumps({"time": stamp, "eventClass": "alert", "outcome": outcome, "reason": "x", "mode": mode})
+        return json.dumps(
+            {"time": stamp, "eventClass": "alert", "outcome": outcome, "reason": reason, "mode": mode}
+        )
 
     record.write_text("\n".join([
+        # A row whose outcome or reason is not a string is skipped and counted.
+        line(30, ["granted"]),
+        line(40, 7),
+        line(50, "granted", reason=["x"]),
         line(60, "granted"),
         line(120, "granted"),
         line(180, "refused"),
@@ -834,7 +840,7 @@ def test_the_health_report_summarises_the_last_day_of_the_record(tmp_path):
     assert summary == (
         "incident_authority_record: producer=dispatcher last_24h total=7 granted=2 refused=1 "
         "not_ready=1 protocol_error=1 not_configured=1 not_asked=1 "
-        "would_hold_or_refuse_in_enforce=4 mode=observe"
+        "would_hold_or_refuse_in_enforce=4 mode=observe skipped=4"
     )
     assert not summary.startswith(("WARN", "FAIL"))
     assert health.incident_authority_record_line("dispatcher", tmp_path / "absent.jsonl", now) is None
