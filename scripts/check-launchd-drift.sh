@@ -104,10 +104,14 @@ for stem in ${RETIRED_STEMS[@]+"${RETIRED_STEMS[@]}"}; do
   if [ ! -f "$INSTANCE_CONFIG_ROOT/$stem/config.json" ]; then UNOWNED_RETIRED_STEMS+=("$stem"); fi
 done
 
-is_unowned_retired_plist() { # PLIST_PATH
-  local k
+is_unowned_retired_plist() { # PLIST_PATH — the retired file name AND, read with plistlib, the retired Label
+  local k label
   for k in ${UNOWNED_RETIRED_STEMS[@]+"${UNOWNED_RETIRED_STEMS[@]}"}; do
-    if [ "$(basename "$1")" = "com.whatsoup.$k.plist" ]; then return 0; fi
+    if [ "$(basename "$1")" = "com.whatsoup.$k.plist" ]; then
+      label="$(plist_key "$1" Label 2>/dev/null)" || return 1
+      [ "$label" = "com.whatsoup.$k" ] && return 0
+      return 1
+    fi
   done
   return 1
 }
@@ -510,7 +514,7 @@ warn_unmanaged_collector_jobs() { # any OTHER LaunchAgent that runs the J1 colle
   for f in "$LAUNCHD_DIR"/*.plist; do
     [ -e "$f" ] || continue
     case "$(basename "$f")" in com.whatsoup.bot-errors-j1-collector.plist) continue ;; esac
-    if is_unowned_retired_plist "$f"; then continue; fi # reported by check_retired_surfaces; never read
+    if is_unowned_retired_plist "$f"; then continue; fi # the retired job's own plist: check_retired_surfaces reports it
     if grep -q 'bot_errors_j1_collector' "$f" 2>/dev/null; then
       label="$(basename "$f" .plist)"
       echo "warn: unmanaged collector job: $label (runs bot_errors_j1_collector outside the managed label; boot it out before installing com.whatsoup.bot-errors-j1-collector)"
