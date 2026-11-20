@@ -35,13 +35,19 @@ INCIDENT_AUTHORITY_TEST_ENV_KEYS = (
     "BOT_ERRORS_TEST_MODE",
     "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
     "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_MODE",
 )
 
 
 def incident_authority_test_env(state_dir: Path) -> dict[str, str]:
-    """Return the opt-in environment for the production dry-authority receipt path."""
+    """Return the opt-in environment for the production dry-authority receipt path.
+
+    The mode is set to the default, observe, explicitly, so a value left in the
+    shell cannot switch these delivery tests to enforce.
+    """
 
     return {
+        "BOT_ERRORS_INCIDENT_AUTHORITY_MODE": "observe",
         "BOT_ERRORS_DRY_SEND_CAPTURE": "",
         "BOT_ERRORS_TEST_MODE": "1",
         "BOT_ERRORS_DRY_AUTHORITY_CAPTURE": str(

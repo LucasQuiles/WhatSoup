@@ -173,6 +173,9 @@ describe('BOT ERRORS service templates', () => {
     expect(qLoop).not.toContain('BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE');
     expect(installer).toContain('<key>BOT_ERRORS_INCIDENT_AUTHORITY_URL</key>');
     expect(installer).toContain('<key>BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE</key>');
+    expect(installer).toContain('<key>BOT_ERRORS_INCIDENT_AUTHORITY_MODE</key>');
+    // Without a value in the env file the macOS dispatcher runs in observe mode.
+    expect(installer).toContain('env_or_default BOT_ERRORS_INCIDENT_AUTHORITY_MODE "observe"');
     for (const file of [...serviceTemplates, ...launchdInstallers]) {
       expect(readFileSync(file, 'utf8')).not.toMatch(/BOT_ERRORS_(?:DRY_(?:AUTHORITY|SEND)|TEST_MODE)/);
     }
@@ -210,6 +213,7 @@ describe('BOT ERRORS service templates', () => {
       `BOT_ERRORS_DB=${db}`,
       `BOT_ERRORS_INCIDENT_AUTHORITY_URL=${authorityUrl}`,
       `BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE=${authorityCredential}`,
+      'BOT_ERRORS_INCIDENT_AUTHORITY_MODE=enforce',
       `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
       `MALICIOUS_TOUCH=$(touch ${maliciousTouch})`,
       '',
@@ -274,6 +278,10 @@ describe('BOT ERRORS service templates', () => {
     );
     expect(dispatcherPlist).toContain(
       `<key>BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE</key><string>${xmlEscape(authorityCredential)}</string>`,
+    );
+    // The owner's per-host enforce switch reaches the macOS dispatcher.
+    expect(dispatcherPlist).toContain(
+      '<key>BOT_ERRORS_INCIDENT_AUTHORITY_MODE</key><string>enforce</string>',
     );
     for (const label of ['com.bot-errors.deadman', 'com.bot-errors.health', 'com.bot-errors.health-only']) {
       const plist = readFileSync(launchAgentPath(home, label), 'utf8');

@@ -9,6 +9,10 @@ identity conflict or a malformed authority reply is terminal.
 A notice the dispatcher derives inside a pass (flap storm, flap resolve, stale
 renotify, auto-close digest, poison meta-alert, credential meta-alert) must not
 reach a transport without a grant either.
+
+All of this is enforce mode, which the owner turns on per host; every
+dispatcher here is loaded with BOT_ERRORS_INCIDENT_AUTHORITY_MODE=enforce.
+Observe mode, the default, is covered by test_bot_errors_authority_observe.py.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ _ENV_KEYS = [
     "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
     "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
     "BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_MODE",
 ]
 _LOOPBACK_AUTHORITY = "http://127.0.0.1:7419/api/signals"
 
@@ -77,7 +82,10 @@ def _load_module(script: Path, state_dir: Path, name: str):
 
 
 def _load(state_dir: Path):
-    return _load_module(_DISPATCHER, state_dir, "bot_errors_dispatcher_not_ready")
+    os.environ["BOT_ERRORS_INCIDENT_AUTHORITY_MODE"] = "enforce"
+    mod = _load_module(_DISPATCHER, state_dir, "bot_errors_dispatcher_not_ready")
+    assert mod.INCIDENT_AUTHORITY_MODE == "enforce"
+    return mod
 
 
 def _event(event_id: str) -> dict:
@@ -361,9 +369,36 @@ def test_a_refused_meta_alert_keeps_the_quarantine_record(tmp_path):
 
     assert dest.exists()
     assert calls == [], "the meta-alert has no grant, so neither channel may send"
-    log_text = (paths["logs"] / "dispatch.jsonl").read_text()
-    assert '"quarantine"' in log_text
-    assert "authority_refused" in log_text
+    records = [
+        json.loads(line)
+        for line in (paths["logs"] / "dispatch.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    quarantined = [record for record in records if record.get("recordKind") == "quarantine"]
+    assert len(quarantined) == 1, "the quarantine record must be written despite the refusal"
+    details = quarantined[0].get("details") or {}
+    # The controller log keeps only allowlisted values: the refused e-mail
+    # status ("authority_refused") is not one, so the log carries the failed
+    # direct send and no e-mail outcome at all, and never "email_delivered".
+    assert details.get("directWhatsapp") == "failed"
+    assert "emailFallback" not in details
+
+
+def test_the_cycle_state_is_reset_before_the_first_queue_scan():
+    # A poison meta-alert in the first queue scan can ask the authority. A
+    # reset after that scan forgot its rate refusal and asked again.
+    source = _DISPATCHER.read_text(encoding="utf-8")
+    run_once = source[source.index("\ndef run_once("):]
+    run_once = run_once[: run_once.index("\ndef ", 1)]
+    reset = run_once.index("begin_incident_authority_cycle()")
+    for first_scan in (
+        "reconcile_unrenderable_signals(paths)",
+        "reclaim_processing(paths)",
+        "suppress_test_provenance_events(paths)",
+        "authority_preflight = ",
+    ):
+        assert reset < run_once.index(first_scan), first_scan
+    assert run_once.count("begin_incident_authority_cycle()") == 1
 
 
 def _derived_events(mod) -> dict[str, dict]:

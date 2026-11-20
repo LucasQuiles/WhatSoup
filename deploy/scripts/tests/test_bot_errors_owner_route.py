@@ -164,6 +164,63 @@ def test_invalid_authority_grant_cannot_record_a_floor_or_send(route_env):
     assert not (route_env / "owner-route-state.json").exists()
 
 
+def _route_without_grant(rec: _Recorder, state_dir: Path, **mode: str) -> None:
+    owner_route.route_owner_critical(
+        _alert(),
+        key="host-a|sample|provider_fallback_activated",
+        is_alert=True,
+        group_text="group text",
+        state_dir=state_dir,
+        authority_grant=None,
+        json_rpc_call=rec.rpc,
+        email_fallback=rec.email,
+        log=rec.log,
+        **mode,
+    )
+
+
+def test_observe_mode_sends_the_owner_copy_without_a_grant(route_env):
+    # Observe mode delivers as before the authority existed.
+    rec = _Recorder()
+    _route_without_grant(rec, route_env, authority_mode="observe")
+    assert len(rec.sends) == 1
+    assert [log["type"] for log in rec.logs] == ["owner_route_sent"]
+
+
+def test_the_route_defaults_to_enforce_and_refuses_a_missing_grant(route_env):
+    rec = _Recorder()
+    with pytest.raises(AuthorityProtocolError):
+        _route_without_grant(rec, route_env)
+    assert rec.sends == [] and rec.emails == []
+
+
+def test_observe_mode_sends_a_credential_page_without_a_grant(route_env):
+    rec = _Recorder()
+    counters = {"count": 1, "failedAttempts": 0, "hours": 4}
+    accepted = owner_route.send_credential_page(
+        "line", "body",
+        counters=counters,
+        authority_grant=None,
+        authority_claim=None,
+        json_rpc_call=rec.rpc,
+        email_fallback=rec.email,
+        log=rec.log,
+        authority_mode="observe",
+    )
+    assert accepted is True and len(rec.sends) == 1
+    with pytest.raises(AuthorityProtocolError):
+        owner_route.send_credential_page(
+            "line", "body",
+            counters=counters,
+            authority_grant=None,
+            authority_claim=None,
+            json_rpc_call=rec.rpc,
+            email_fallback=rec.email,
+            log=rec.log,
+        )
+    assert len(rec.sends) == 1, "enforce, the default, sends nothing without a grant"
+
+
 @pytest.mark.parametrize(
     ("event", "is_alert", "reason"),
     [

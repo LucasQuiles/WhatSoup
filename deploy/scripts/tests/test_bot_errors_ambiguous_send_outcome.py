@@ -663,7 +663,8 @@ def test_absent_incident_authority_never_reaches_transport(tmp_path):
     queued = _seed_outbox(paths, event)
     calls: list = []
 
-    with patch.object(
+    # Enforce mode, which the owner turns on per host; observe mode sends.
+    with patch.object(mod, "INCIDENT_AUTHORITY_MODE", "enforce"), patch.object(
         mod, "send_whatsapp", side_effect=lambda *args, **_kwargs: calls.append(args)
     ):
         result = mod.process_one(queued, paths)
@@ -705,7 +706,9 @@ def test_refused_incident_authority_never_reaches_transport(tmp_path):
             "BOT_ERRORS_INCIDENT_AUTHORITY_URL": "http://127.0.0.1:1/api/signals",
             "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(credential),
         },
-    ), patch.object(mod, "IncidentAuthorityClient", _MalformedReplyAuthority):
+    ), patch.object(mod, "IncidentAuthorityClient", _MalformedReplyAuthority), patch.object(
+        mod, "INCIDENT_AUTHORITY_MODE", "enforce"
+    ):
         with patch.object(
             mod, "send_whatsapp", side_effect=lambda *args, **_kwargs: calls.append(args)
         ):

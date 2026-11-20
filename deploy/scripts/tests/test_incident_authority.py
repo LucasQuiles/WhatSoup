@@ -297,3 +297,127 @@ def test_store_and_transport_failures_are_not_ready(credential: Path):
     client, _ = _client(_refused, credential)
     with pytest.raises(AuthorityNotReady, match=r"^incident_authority_unavailable$"):
         client.accept(CLAIM)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "reason"),
+    [
+        (401, "authority_credential_rejected"),
+        (403, "authority_scope_denied"),
+        (429, "incident_authority_rate_limited"),
+        (503, "incident_authority_unavailable"),
+    ],
+)
+def test_an_oversized_refusal_is_classified_by_its_status(credential: Path, status_code, reason):
+    # A proxy's large error page must not turn a refusal or an outage into a
+    # protocol error: the status decides before the body size does.
+    oversized = b"x" * (16 * 1024 + 1)
+    client, _ = _client(
+        lambda _body, code=status_code: (code, {"Content-Type": "text/html"}, oversized),
+        credential,
+    )
+    with pytest.raises(AuthorityNotReady, match=rf"^{reason}$"):
+        client.accept(CLAIM)
+
+
+def test_an_oversized_success_reply_stays_a_protocol_error(credential: Path):
+    oversized = b"x" * (16 * 1024 + 1)
+    client, _ = _client(
+        lambda _body: (201, {"Content-Type": "application/json"}, oversized),
+        credential,
+    )
+    with pytest.raises(AuthorityProtocolError, match=r"^authority_response_oversized$"):
+        client.accept(CLAIM)
+
+
+def _authority_lib():
+    import lib.incident_authority as authority
+
+    return authority
+
+
+@pytest.mark.parametrize(
+    ("value", "mode", "warned"),
+    [
+        (None, "observe", False),
+        ("", "observe", False),
+        ("   ", "observe", False),
+        ("observe", "observe", False),
+        ("enforce", "enforce", False),
+        (" enforce\n", "enforce", False),
+        ("Enforce", "observe", True),
+        ("on", "observe", True),
+    ],
+)
+def test_the_mode_reader_defaults_to_observe(value, mode, warned):
+    authority = _authority_lib()
+    environ = {} if value is None else {authority.AUTHORITY_MODE_SETTING: value}
+    warnings: list[str] = []
+    assert authority.incident_authority_mode(environ, warnings.append) == mode
+    assert warnings == (["incident_authority_mode_unknown"] if warned else [])
+    assert authority.AUTHORITY_MODE_SETTING == "BOT_ERRORS_INCIDENT_AUTHORITY_MODE"
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome", "reason"),
+    [
+        (None, "granted", "none"),
+        ("conflict", "refused", "incident_authority_identity_conflict"),
+        ("credential_rejected", "refused", "authority_credential_rejected"),
+        ("scope_denied", "refused", "authority_scope_denied"),
+        ("rate_limited", "not_ready", "incident_authority_rate_limited"),
+        ("unavailable", "not_ready", "incident_authority_unavailable"),
+        ("credential_unreadable", "not_ready", "authority_credential_unreadable"),
+        ("not_configured", "not_configured", "incident_authority_not_configured"),
+        ("receipt", "protocol_error", "authority_receipt_malformed"),
+        ("type_error", "protocol_error", "authority_client_error"),
+        ("os_error", "protocol_error", "authority_client_error"),
+        ("free_text", "protocol_error", "authority_client_error"),
+    ],
+)
+def test_outcomes_are_classified_into_closed_codes(error, outcome, reason):
+    errors = {
+        None: None,
+        "conflict": AuthorityConflict("incident_authority_identity_conflict"),
+        "credential_rejected": AuthorityNotReady("authority_credential_rejected"),
+        "scope_denied": AuthorityNotReady("authority_scope_denied"),
+        "rate_limited": AuthorityNotReady("incident_authority_rate_limited"),
+        "unavailable": AuthorityNotReady("incident_authority_unavailable"),
+        "credential_unreadable": AuthorityNotReady("authority_credential_unreadable"),
+        "not_configured": AuthorityNotReady("incident_authority_not_configured"),
+        "receipt": AuthorityProtocolError("authority_receipt_malformed"),
+        "type_error": TypeError("unhashable type: 'list'"),
+        "os_error": OSError("read failed on /private/path"),
+        "free_text": AuthorityProtocolError("contains a path /private/state and spaces"),
+    }
+    authority = _authority_lib()
+    assert authority.classify_authority_outcome(errors[error]) == (outcome, reason)
+
+
+def test_the_outcome_record_carries_only_closed_fields():
+    authority = _authority_lib()
+    record = authority.authority_outcome_record(
+        event_class="alert",
+        outcome="refused",
+        reason="authority_scope_denied",
+        mode="observe",
+        observed_epoch=1_763_600_000,
+    )
+    assert record == {
+        "time": "2025-11-20T00:53:20Z",
+        "eventClass": "alert",
+        "outcome": "refused",
+        "reason": "authority_scope_denied",
+        "mode": "observe",
+    }
+    unsafe = authority.authority_outcome_record(
+        event_class="host-a private summary",
+        outcome="whatever",
+        reason="text with /private/state",
+        mode="loud",
+        observed_epoch=1_763_600_000,
+    )
+    assert unsafe["eventClass"] == "other"
+    assert unsafe["outcome"] == "protocol_error"
+    assert unsafe["reason"] == "authority_client_error"
+    assert unsafe["mode"] == "observe"
