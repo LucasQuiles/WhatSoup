@@ -183,6 +183,65 @@ describe('unset tool update mode', () => {
   });
 });
 
+/**
+ * Text A, a tool call, then text B six seconds later, with a ten-second text aggregate delay.
+ * In full mode, main's five-second tool-batch timer (TOOL_BATCH_DELAY_MS) flushes A before
+ * the tool status, so A and B arrive as separate messages.
+ */
+async function textAroundToolBatch(mode: 'unset' | 'full'): Promise<Harness> {
+  instance.textAggregateDelayMs = 10_000;
+  const harness = await makeUnsetQueue();
+  if (mode === 'full') harness.queue.setToolUpdateMode('full');
+  assistantText(harness, FIRST);
+  harness.queue.discardPreToolAssistantText();
+  harness.queue.enqueueToolUpdate(harness.buildToolUpdate('Write', { file_path: TOOL_PATH }));
+  await vi.advanceTimersByTimeAsync(6_000);
+  assistantText(harness, SECOND);
+  await vi.advanceTimersByTimeAsync(11_000);
+  harness.queue.abortTurn();
+  return harness;
+}
+
+/**
+ * A coordinator turn: text A, a tool batch, then a provider crash, aborted as the runtime
+ * does (runtime.ts:11211; finalizeRuntimeCrash at runtime.ts:5600). In full mode main's batch
+ * keeps the deferred answer buffered but marks visible output, so the crash discards A
+ * instead of salvaging it.
+ */
+async function crashAfterToolBatch(mode: 'unset' | 'full'): Promise<Harness> {
+  const harness = await makeUnsetQueue();
+  if (mode === 'full') harness.queue.setToolUpdateMode('full');
+  harness.queue.beginTurnEvidence('turn-1', { conversationKey: toConversationKey(chatJid), chatJid });
+  assistantText(harness, FIRST);
+  harness.queue.discardPreToolAssistantText();
+  harness.queue.enqueueToolUpdate(harness.buildToolUpdate('Write', { file_path: TOOL_PATH }));
+  await vi.advanceTimersByTimeAsync(6_000);
+  harness.queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
+  await vi.advanceTimersByTimeAsync(10_000);
+  return harness;
+}
+
+describe('unset tool update mode, tool batch effects on text', () => {
+  it('sends text before and after a tool batch as two messages on a turn without turn evidence', async () => {
+    const full = await textAroundToolBatch('full');
+    expect(full.sent.map((message) => message.text)).toHaveLength(3);
+    expect(full.sent[0]).toEqual({ jid: chatJid, text: FIRST });
+    expect(full.sent[2]).toEqual({ jid: chatJid, text: SECOND });
+
+    const unset = await textAroundToolBatch('unset');
+    expect(unset.sent).toEqual([{ jid: chatJid, text: FIRST }, { jid: chatJid, text: SECOND }]);
+  });
+
+  it('discards the buffered answer when the provider crashes after a tool batch on a coordinator turn', async () => {
+    const full = await crashAfterToolBatch('full');
+    expect(full.sent).toHaveLength(1);
+    expect(full.sent[0]?.text).not.toContain(FIRST);
+
+    const unset = await crashAfterToolBatch('unset');
+    expect(unset.sent).toEqual([]);
+  });
+});
+
 /** One event for each mode branch of OutboundQueue.enqueueProgressUpdate. */
 const PROGRESS_EVENTS: ReadonlyArray<{ readonly name: string; readonly event: ProgressEvent }> = [
   { name: 'thinking_long', event: { type: 'thinking_long', gapMs: 10_000 } },
