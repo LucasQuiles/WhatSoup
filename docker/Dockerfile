@@ -6,6 +6,8 @@ FROM node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459
 # The pinned Node binary supplies bundled roots before APT installs certificates.
 # HTTPS authenticates the snapshot server; APT still verifies signed metadata.
 RUN node -e "require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\n') + '\n')"
+# The snapshot sources below name bookworm; stop if the pinned image is another Debian release.
+RUN grep -qx 'VERSION_CODENAME=bookworm' /etc/os-release
 RUN printf '%s\n' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \

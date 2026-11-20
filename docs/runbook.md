@@ -3699,6 +3699,12 @@ the `ca-certificates` package. APT signature checks remain enabled. HTTP transpo
 peer/hostname verification bypasses are rejected; this prevents replay by an on-path HTTP
 intermediary while the immutable snapshot uses `check-valid-until=no`.
 
+The image tag names no Debian release, so right after the CA bootstrap the base stage runs
+`grep -qx 'VERSION_CODENAME=bookworm' /etc/os-release` and the build stops if the pinned image is
+another release. The guard requires that exact instruction in that place, and derives it, the source
+lines and the snapshot `Release` probe from one suite name; changing the suite means changing all
+three together.
+
 The source-list bootstrap is the only authorized writer of the effective APT descriptor set.
 The guard rejects later absolute or relative descriptor operands, entry into `/etc` or its APT
 subtree, and APT-root indirection assignments, including both `ENV` forms and `ARG` default

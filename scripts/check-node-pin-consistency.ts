@@ -358,6 +358,10 @@ const UNSAFE_APT_TLS_PATTERN = /Acquire::https::Verify-(?:Peer|Host)(?:::[A-Za-z
 const APT_CA_BOOTSTRAP = "RUN node -e \"require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\\n') + '\\n')\"";
 const APT_GET_UPDATE_PATTERN = /\bapt-get\b(?:(?![;&|]).)*?\s+update(?=\s|\\|$)/gis;
 const FAIL_CLOSED_APT_UPDATE_OPTION = 'APT::Update::Error-Mode=any';
+// One suite name feeds the source lines, the snapshot probe and the base-image release check, so the
+// pinned image cannot silently be another Debian release than the packages installed on it.
+const APT_SUITE = 'bookworm';
+const APT_RELEASE_CHECK = `RUN grep -qx 'VERSION_CODENAME=${APT_SUITE}' /etc/os-release`;
 
 function descriptorPaths(instruction: string): string[] {
   return [...instruction.matchAll(APT_SOURCE_DESCRIPTOR_PATH_PATTERN)].map((match) => match[0] ?? '');
@@ -450,8 +454,8 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
   }
 
   const expectedSources = [
-    `https://snapshot.debian.org/archive/debian/${policy.apt.snapshot}/ bookworm main`,
-    `https://snapshot.debian.org/archive/debian-security/${policy.apt.snapshot}/ bookworm-security main`,
+    `https://snapshot.debian.org/archive/debian/${policy.apt.snapshot}/ ${APT_SUITE} main`,
+    `https://snapshot.debian.org/archive/debian-security/${policy.apt.snapshot}/ ${APT_SUITE}-security main`,
   ];
   if (
     policy.apt.sources.length !== expectedSources.length
@@ -474,6 +478,13 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
     policyIssues.push(containerInputIssue(
       cwd, 'docker/Dockerfile',
       'Dockerfile must bootstrap the pinned Node CA roots before APT and preserve that trust store',
+    ));
+  }
+  if (activeInstructions[2]?.text !== APT_RELEASE_CHECK
+    || activeInstructions.filter((instruction) => instruction.text.includes('/etc/os-release')).length !== 1) {
+    policyIssues.push(containerInputIssue(
+      cwd, 'docker/Dockerfile',
+      `Dockerfile must check that the base image is Debian ${APT_SUITE} right after the CA bootstrap and before APT`,
     ));
   }
   for (const image of dockerExternalImageRefs(dockerfile)) {
@@ -556,8 +567,8 @@ function verifyContainerSnapshotAvailability(
 
   const snapshot = policyResult.policy.apt.snapshot;
   const releases = [
-    `https://snapshot.debian.org/archive/debian/${snapshot}/dists/bookworm/Release`,
-    `https://snapshot.debian.org/archive/debian-security/${snapshot}/dists/bookworm-security/Release`,
+    `https://snapshot.debian.org/archive/debian/${snapshot}/dists/${APT_SUITE}/Release`,
+    `https://snapshot.debian.org/archive/debian-security/${snapshot}/dists/${APT_SUITE}-security/Release`,
   ];
   const issues: NodePinDrift['missing'] = [];
   for (const release of releases) {
