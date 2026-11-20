@@ -556,7 +556,7 @@ async function prepareCliModelProbe(
     if (!invocation.binaryToken || !invocation.executablePath) return;
     if (invocation.blockedReason !== null && !rebindCandidate(target, deps, invocation)) return;
     prepared.identity = { executablePath: invocation.executablePath, binarySha256: invocation.binarySha256 };
-    const refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(invocation.binaryToken, invocation.env);
+    const refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(invocation.executablePath, invocation.env);
     // Only a currently held refresh suppresses alerts. Other refresh failures still block the
     // killable probe, but carry an alertable reason because no running child was established.
     if (refreshAheadDefersProbe(refreshed)) {

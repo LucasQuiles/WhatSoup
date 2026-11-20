@@ -454,13 +454,17 @@ export type PrimaryTurnRecoveryHold = 'service-context' | 'startup' | null;
 /**
  * The hold after a probe result. A service-context refusal holds. A usable
  * result or an ordinary alerting failure releases it, so turns recover those.
- * A non-alerting result leaves the outstanding alert, and so its hold, as it was.
+ * A non-alerting result settles the startup probe and releases its hold, except
+ * a deferral, which keeps the hold until the next probe result. A service-context
+ * hold stays, because its refusal and alert remain outstanding.
  */
 export function nextPrimaryTurnRecoveryHold(
   current: PrimaryTurnRecoveryHold,
   result: PrimaryModelUsabilityResult,
 ): PrimaryTurnRecoveryHold {
   if (isPrimaryProbeContextRefusal(result)) return 'service-context';
-  if (result.status !== 'usable' && !primaryModelUsabilityRequiresAlert(result)) return current;
+  if (result.status !== 'usable' && !primaryModelUsabilityRequiresAlert(result)) {
+    return current === 'startup' && result.reason !== DEFERRED_REFRESH_IN_FLIGHT ? null : current;
+  }
   return null;
 }
