@@ -668,13 +668,15 @@ def test_absent_incident_authority_never_reaches_transport(tmp_path):
     ):
         result = mod.process_one(queued, paths)
 
-    assert result == (False, "incident_authority_unavailable")
+    assert result == (False, "incident_authority_not_ready")
     assert calls == [], "an absent authority must fail before transport"
     requeued = list(paths["outbox"].glob("*.json"))
-    assert len(requeued) == 1, f"the unavailable event must remain retryable: {requeued!r}"
+    assert len(requeued) == 1, f"the not-ready event must stay in the outbox: {requeued!r}"
     delivery = json.loads(requeued[0].read_text()).get("delivery") or {}
-    assert delivery.get("incidentAuthorityStatus") == "unavailable"
-    assert delivery.get("incidentAuthorityAttempts") == 1
+    assert delivery.get("incidentAuthorityStatus") == "not_ready"
+    assert delivery.get("incidentAuthorityError") == "incident_authority_not_configured"
+    # Not ready is not an attempt: it never counts toward the dead-letter cap.
+    assert delivery.get("incidentAuthorityAttempts") == 0
 
 
 def test_refused_incident_authority_never_reaches_transport(tmp_path):
@@ -688,13 +690,22 @@ def test_refused_incident_authority_never_reaches_transport(tmp_path):
     credential.chmod(0o600)
     calls: list = []
 
+    class _MalformedReplyAuthority:
+        """An authority whose reply breaks the receipt contract: terminal."""
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def accept(self, _claim):
+            raise mod.AuthorityProtocolError("authority_receipt_malformed")
+
     with patch.dict(
         os.environ,
         {
-            "BOT_ERRORS_INCIDENT_AUTHORITY_URL": "http://example.com/api/signals",
+            "BOT_ERRORS_INCIDENT_AUTHORITY_URL": "http://127.0.0.1:1/api/signals",
             "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(credential),
         },
-    ):
+    ), patch.object(mod, "IncidentAuthorityClient", _MalformedReplyAuthority):
         with patch.object(
             mod, "send_whatsapp", side_effect=lambda *args, **_kwargs: calls.append(args)
         ):

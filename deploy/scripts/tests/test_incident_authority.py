@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lib.incident_authority import (
     AuthorityConflict,
+    AuthorityNotReady,
     AuthorityProtocolError,
     AuthorityUnavailable,
     IncidentAuthorityClient,
@@ -237,7 +238,9 @@ def test_credential_contract_rejects_symlink_fifo_public_mode_and_oversize(
             path,
             expected_producer_id="bot-errors-dispatcher",
         )
-        with pytest.raises(AuthorityProtocolError, match=rf"^{expected_error}$"):
+        # A local credential problem is "not ready": nothing is sent and the
+        # protected effect waits, but it is never a terminal protocol error.
+        with pytest.raises(AuthorityNotReady, match=rf"^{expected_error}$"):
             client.accept(CLAIM)
 
 
@@ -249,5 +252,39 @@ def test_destination_contract_rejects_userinfo_query_fragment_and_nonlocal_http(
         "http://example.com/api/signals",
         "http://127.0.0.1:1/other",
     ):
-        with pytest.raises(AuthorityProtocolError):
+        with pytest.raises(AuthorityNotReady):
             IncidentAuthorityClient(url, credential, expected_producer_id="bot-errors-dispatcher")
+
+
+def test_missing_credential_file_is_not_ready(private_credential_root: Path):
+    client = IncidentAuthorityClient(
+        "http://127.0.0.1:1/api/signals",
+        private_credential_root / "not-enrolled-yet",
+        expected_producer_id="bot-errors-dispatcher",
+    )
+    with pytest.raises(AuthorityNotReady, match=r"^authority_credential_unreadable$"):
+        client.accept(CLAIM)
+
+
+def test_refused_credential_scope_and_rate_are_not_ready(credential: Path):
+    cases = (
+        (401, "authority_credential_rejected"),
+        (403, "authority_scope_denied"),
+        (429, "incident_authority_rate_limited"),
+    )
+    for status_code, reason in cases:
+        client, _ = _client(
+            lambda _body, code=status_code: (code, {"Content-Type": "application/json"}, b"{}"),
+            credential,
+        )
+        with pytest.raises(AuthorityNotReady, match=rf"^{reason}$"):
+            client.accept(CLAIM)
+
+
+def test_store_failure_stays_plain_unavailable(credential: Path):
+    client, _ = _client(
+        lambda _body: (503, {"Content-Type": "application/json"}, b"{}"), credential
+    )
+    with pytest.raises(AuthorityUnavailable) as raised:
+        client.accept(CLAIM)
+    assert not isinstance(raised.value, AuthorityNotReady)
