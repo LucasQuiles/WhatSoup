@@ -116,4 +116,30 @@ describe('release:activate --apply', () => {
     expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
     expect(world.mutatingCalls()).toEqual([]);
   });
+
+  // The recheck must use the outputs the plan checked, not whatever the manifest
+  // says at switch time: an edited manifest could otherwise drop the requirement.
+  it('refuses a candidate manifest whose requiredOutputs changed after planning', async () => {
+    const output = requireConsoleOutput();
+    writeBuiltConsole(output);
+    const manifestPath = path.join(fixture.newRelease, '.whatsoup-release-manifest.json');
+    // A host writer drops the requirement and the build after planning, while apply stages the plists.
+    const world = new SimulatedLaunchd(fixture, {
+      onExec: (file) => {
+        if (file !== 'plutil') return;
+        const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { requiredOutputs?: string[] };
+        manifest.requiredOutputs = [];
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+        rmSync(output, { force: true });
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(String(result.json.failure)).toContain('requiredOutputs changed');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.mutatingCalls()).toEqual([]);
+  });
 });

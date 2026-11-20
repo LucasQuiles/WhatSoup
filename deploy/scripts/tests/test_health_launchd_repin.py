@@ -56,16 +56,19 @@ import json, os, pathlib, plistlib, signal, sys
 h = pathlib.Path(os.environ["HOME"]); state = h / "service.json"
 args = sys.argv[1:]; mode = args[0]
 with (h / "calls.jsonl").open("a") as f: f.write(json.dumps(args) + "\\n")
+def count(verb): return sum(1 for line in (h / "calls.jsonl").read_text().splitlines() if json.loads(line)[0] == verb)
 if mode == "print-disabled":
-    print('disabled services = { }' if os.environ.get("DISABLED") == "omit" else 'disabled services = { "com.bot-errors.health" => ' + os.environ.get("DISABLED", "enabled") + ' }')
+    if os.environ.get("DISABLED_GARBLED_ON") == str(count("print-disabled")): print("output the installer cannot verify")
+    else: print('disabled services = { }' if os.environ.get("DISABLED") == "omit" else 'disabled services = { "com.bot-errors.health" => ' + os.environ.get("DISABLED", "enabled") + ' }')
 elif mode == "list":
-    lists = sum(1 for line in (h / "calls.jsonl").read_text().splitlines() if json.loads(line)[0] == "list")
+    lists = count("list")
     if os.environ.get("EDIT_ON_LIST") == str(lists):
         with (h / "Library/LaunchAgents/com.bot-errors.health.plist").open("ab") as f: f.write(b"\\n")
     if os.environ.get("LIST_FAIL") or not state.exists(): sys.exit(113)
-    print('{ "Label" = "com.bot-errors.health"; ' + ('"PID" = 123;' if os.environ.get("BUSY") else '') + ' }')
+    busy = os.environ.get("BUSY") or os.environ.get("BUSY_ON_LIST") == str(lists)
+    print('{ "Label" = "com.bot-errors.health"; ' + ('"PID" = 123;' if busy else '') + ' }')
 elif mode == "bootout":
-    if os.environ.get("BOOTOUT_FAIL"): sys.exit(5)
+    if os.environ.get("BOOTOUT_FAIL") or os.environ.get("BOOTOUT_FAIL_ON") == str(count("bootout")): sys.exit(5)
     state.unlink(missing_ok=True)
     if os.environ.get("BOOTOUT_FAILED_AFTER_UNLOAD"): sys.exit(5)
     if os.environ.get("SIGNAL_AFTER_UNLOAD"): os.kill(os.getppid(), signal.SIGTERM)
@@ -147,6 +150,7 @@ def test_failed_bootstrap_restores_bytes_mode_and_loaded_job(job):
     result = apply(job, BOOTSTRAP_FAIL="1")
     assert result.returncode == 1
     assert json.loads(result.stdout)["status"] == "rolled_back"
+    assert Path(json.loads(result.stdout)["backup"]).read_bytes() == job["raw"]
     assert job["plist"].read_bytes() == job["raw"]
     assert stat.S_IMODE(job["plist"].stat().st_mode) == 0o600
     assert json.loads(job["state"].read_text()) == job["original"]
@@ -180,6 +184,7 @@ def test_failed_bootout_after_unload_reloads_original(job):
     result = apply(job, BOOTOUT_FAILED_AFTER_UNLOAD="1")
     assert result.returncode == 1
     assert json.loads(result.stdout)["status"] == "rolled_back"
+    assert Path(json.loads(result.stdout)["backup"]).read_bytes() == job["raw"]
     assert job["plist"].read_bytes() == job["raw"]
     assert json.loads(job["state"].read_text()) == job["original"]
 
@@ -188,6 +193,37 @@ def test_interruption_after_unload_restores_original(job):
     result = apply(job, SIGNAL_AFTER_UNLOAD="1")
     assert result.returncode == 1
     assert json.loads(result.stdout)["status"] == "rolled_back"
+    assert Path(json.loads(result.stdout)["backup"]).read_bytes() == job["raw"]
+    assert job["plist"].read_bytes() == job["raw"]
+    assert json.loads(job["state"].read_text()) == job["original"]
+
+
+# Calls in an apply run: the plan run makes the first print-disabled and list
+# calls, apply's own plan check the second, and the idle check inside apply the
+# third. A refusal at that third check comes before any change.
+@pytest.mark.parametrize("env", [{"BUSY_ON_LIST": "3"}, {"DISABLED_GARBLED_ON": "3"}])
+def test_refusal_at_the_idle_check_inside_apply_stops_nothing(job, env):
+    result = apply(job, **env)
+    assert result.returncode == 2, result.stderr
+    assert json.loads(result.stdout)["status"] == "refused"
+    calls = (job["home"] / "calls.jsonl").read_text()
+    assert "bootout" not in calls and "bootstrap" not in calls
+    assert job["plist"].read_bytes() == job["raw"]
+    assert json.loads(job["state"].read_text()) == job["original"]
+    assert sorted(p.name for p in job["plist"].parent.iterdir()) == [LABEL + ".plist", LABEL + ".plist.repin.lock"]
+
+
+def test_failed_check_after_a_failed_bootout_does_not_unload_the_original_job(job):
+    # The bootout fails and leaves the job loaded (list call 4). The job then runs
+    # at the check that follows (list call 5). The file and the job are still the
+    # original ones, so rollback must not unload the job or bootstrap it again.
+    result = apply(job, BOOTOUT_FAIL_ON="1", BUSY_ON_LIST="5")
+    assert result.returncode == 2, result.stdout
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "unchanged"
+    assert Path(receipt["backup"]).read_bytes() == job["raw"]
+    verbs = [json.loads(line)[0] for line in (job["home"] / "calls.jsonl").read_text().splitlines()]
+    assert verbs.count("bootout") == 1 and verbs.count("bootstrap") == 0
     assert job["plist"].read_bytes() == job["raw"]
     assert json.loads(job["state"].read_text()) == job["original"]
 
@@ -259,6 +295,14 @@ def test_environment_variables_that_are_not_a_dict_are_refused_with_a_receipt(jo
     result = run_installer(job, *args, "--runtime-manifest", str(manifest))
     assert result.returncode == 2, result.stderr
     assert json.loads(result.stdout)["status"] == "refused"
+    assert job["plist"].read_bytes() == raw
+
+
+def test_environment_variables_that_are_not_a_dict_are_refused_without_a_runtime_manifest(job):
+    raw, args = repin_plan(job, {**job["original"], "EnvironmentVariables": "not a dict"})
+    result = run_installer(job, *args)
+    assert result.returncode == 2, result.stderr
+    assert json.loads(result.stdout) == {"status": "refused", "reason": "EnvironmentVariables must be a dict"}
     assert job["plist"].read_bytes() == raw
 
 
