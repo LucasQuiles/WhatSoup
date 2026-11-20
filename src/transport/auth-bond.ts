@@ -502,6 +502,15 @@ function isHistoryStagingDirName(name: string): boolean {
   return /\.tmp-\d+$/.test(name);
 }
 
+/** A history entry the prune may remove: a real folder. One gone or unreadable is not. */
+function isHistoryEntryDir(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Live, O(1) check that the auth root is a real directory.
  *
@@ -2821,11 +2830,7 @@ export class AuthBondGuard {
     for (const name of names) {
       yield WALK_ENTRY_UNITS;
       const path = join(this.historyRoot, name);
-      try {
-        if (lstatSync(path).isDirectory()) entries.push(path);
-      } catch {
-        // Gone or unreadable: not a backup to prune.
-      }
+      if (isHistoryEntryDir(path)) entries.push(path);
     }
     entries.sort().reverse();
     for (const stale of entries.slice(retainedBackups)) {
