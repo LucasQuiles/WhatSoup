@@ -1061,7 +1061,7 @@ export class AuthBondGuard {
     try {
       this.onCaptureEvent(event);
     } catch {
-      // Logging must never break a capture.
+      // Intentional: logging must never break a capture.
     }
   }
 

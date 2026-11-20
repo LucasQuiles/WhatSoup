@@ -584,7 +584,7 @@ export function writePrivateJson(path: string, value: unknown): void {
     fsyncDirectory(dir);
   } catch (err) {
     if (fd !== null) closeSync(fd);
-    try { unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    try { unlinkSync(tmpPath); } catch { /* intentional: best-effort temp file cleanup; the write error is rethrown */ }
     throw err;
   }
 }
