@@ -764,9 +764,11 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
     copy or delete entry costs 4, and a phase boundary does not restart the
     count.
   - The capture's own slices do not open an `event_loop_starvation` hold. On a
-    large tree, the open handler's two synchronous walks (its `connection_open`
-    record and its persist) can still add stalls inside an open-path capture,
-    and so can the settle persist after the run.
+    large tree, the open handler's synchronous walks (three with a data root
+    set: its `connection_open` record, that record's bond event and its
+    persist) can still add stalls inside an open-path capture, and so can
+    the bond event of the run's result record and the settle persist after
+    the run.
 
   Each run logs two lines on the `connection` logger with the same `run`
   number:

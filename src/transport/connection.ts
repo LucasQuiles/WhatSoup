@@ -1458,6 +1458,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       note?: string;
       baileysVersion?: string;
       authBond?: AuthBondSnapshot;
+      /** Reused by the bond event instead of its own walk; only the deferred re-arm passes it. */
+      bondEventSnapshot?: AuthBondSnapshot;
     } = {},
   ): void {
     const authBond = options.authBond;
@@ -1509,7 +1511,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.credentialLifecycleEvents.length - ConnectionManager.CREDENTIAL_LIFECYCLE_EVENT_LIMIT,
       );
     }
-    this.persistBondEvent(entry);
+    this.persistBondEvent(entry, options.bondEventSnapshot);
   }
 
   private sanitizeLifecycleEventForBondEvent(event: CredentialLifecycleEvent): Record<string, unknown> {
@@ -1596,11 +1598,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
-  private persistBondEvent(entry: CredentialLifecycleEvent): void {
+  private persistBondEvent(entry: CredentialLifecycleEvent, snapshot?: AuthBondSnapshot): void {
     if (!config.dataRoot) return;
 
     try {
-      const authBond = this.authBond.inspect();
+      const authBond = snapshot ?? this.authBond.inspect();
       const payload = {
         version: 1,
         eventId: shortHash(`${entry.at}:${config.botName}:${process.pid}:${entry.event}:${this.credentialLifecycleEvents.length}`, 24),
@@ -2821,8 +2823,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // `error` rather than asserted by this line.
       this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred');
       // Owed, not dropped: a settled snapshot asks again. Its schedule record
-      // is built from this run's result snapshot, which carries the current
-      // backup half, instead of a new synchronous walk.
+      // and that record's bond event are built from this run's result
+      // snapshot, which carries the current backup half, instead of new
+      // synchronous walks.
       this.scheduleSettledAuthBondSnapshot('auth-bond-capture-deferred', result.snapshot);
     } else {
       this.lastAuthSnapshotFailedAt = Date.now();
@@ -2955,8 +2958,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   /**
    * `resultSnapshot` is passed only by the deferred re-arm, whose run has just
-   * read the tree; every other caller pays a synchronous inspect() for the
-   * schedule record, as on main.
+   * read the tree; the schedule record and its bond event are both built from
+   * it. Every other caller pays a synchronous inspect() for each, as on main.
    */
   private scheduleSettledAuthBondSnapshot(reason: string, resultSnapshot?: AuthBondSnapshot): void {
     // Deliberately does NOT invalidate the auth-bond tree cache. Five of this
@@ -2980,6 +2983,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.recordCredentialLifecycle('auth_snapshot_scheduled', {
       authBond: resultSnapshot ?? this.authBond.inspect(),
       note: reason,
+      bondEventSnapshot: resultSnapshot,
     });
 
     this.armSettledAuthBondSnapshot(reason, ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS);
