@@ -755,6 +755,41 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   ages, 120 s by default) after process start. A completed walk that finds a
   problem, a transient read, a backup error, or a first walk that does not
   complete within the bound latches as before.
+- **Auth-bond snapshot capture.** The capture that backs up the auth tree runs
+  on connection open and 60 s after credential, key or send activity settles.
+  It runs in slices and hands the event loop back between them, so a capture on
+  a large tree no longer opens an `event_loop_starvation` hold. Each run logs
+  two lines on the `connection` logger with the same `run` number:
+  - `auth bond capture started` (info): `reason`, `run`, `coalescedRequests`,
+    `queuedMs`.
+  - `auth bond capture finished`: `outcome`, `elapsedMs`, `attempts`,
+    `slices`, `maxSliceMs`, `phaseMs` (inspect, sweep, copy, validate,
+    publish, prune), `fileCount`, `totalBytes`, `error` and
+    `consecutiveDeferrals`.
+    - Logged at info: `captured` (a new backup) and `unchanged` (the latest
+      backup already matches).
+    - Logged at warn: `deferred` (a credential write or a transient read was in
+      progress; retried), `blocked` (a logout or bond-lost state refused it)
+      and `aborted` (a restore or shutdown stopped it before it published).
+    - Logged at error: `failed`.
+
+  `maxSliceMs` is the longest single stretch the capture held the loop, and it
+  should stay far under the 250 ms starvation threshold. No alert covers backup
+  age, so a `consecutiveDeferrals` that keeps climbing on a busy instance means
+  `latest.json` is getting old.
+  - A request made during a run folds into one trailing run.
+  - A run that ends `deferred` re-arms the 60 s settled snapshot.
+  - A settled snapshot refused by the 5-minute floor still records
+    `auth_snapshot_skipped` (`settled-snapshot-min-interval`), and is re-armed
+    for the rest of the interval. The info line `auth bond settled snapshot
+    re-armed for the minimum interval` carries `retryInMs`.
+  - A `blocked` run is recorded as `auth_snapshot_skipped` with note
+    `capture-blocked:<reason>`. It does not page
+    `whatsapp_auth_bond_local_failure`.
+  - The next capture's sweep removes a staging copy left by a killed process
+    or a shutdown.
+
+  The contract is in [Durability §5.9](durability.md#59-auth-bond-backups).
 - **Log.** The `degradation silence latch set` line carries `reasons`, the
   sorted latched reason codes, so a latch-only reading names what armed it.
 - **Advance.** Every later evaluation that observes real degradation reasons

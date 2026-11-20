@@ -1208,6 +1208,58 @@ removes delivery metadata and its associated events after 90 days from issuance.
 Referenced outbound audit rows remain until that journal expires; ordinary audit
 age and row limits continue to apply to unreferenced records.
 
+### 5.9 Auth-bond backups
+
+`AuthBondGuard` (`src/transport/auth-bond.ts`) keeps copies of the WhatsApp auth
+tree under `<stateRoot>/auth-bond-backups/<instance>/`: complete copies in
+`history/`, in-progress copies in `staging/`, and `latest.json`, which names the
+newest complete copy. `restoreLatestIfNeeded()` restores only from the entry
+`latest.json` names.
+
+**Complete-only publish.** A capture publishes a history entry only when all of
+these hold:
+
+1. The capture's own pre-copy live walk found the tree `present`, and the
+   staged copy matches that walk: no symlink; `creds.json` readable, non-empty
+   and a JSON object with an identity; the same creds hash, identity hash and
+   full tree digest (relative path, mode and bytes of every file).
+2. In the publish turn, immediately before the rename, the run has not been
+   aborted and `captureBlockReason()` is null.
+3. The staging folder, manifest included, is renamed into `history/`, and then
+   `latest.json` is written atomically (temporary file, fsync, rename, folder
+   fsync). Both happen in the same synchronous turn as the checks.
+
+`history/` therefore never holds a partial entry, and `latest.json` always names
+a complete one. A process killed inside the publish turn can leave a history
+entry that `latest.json` does not name. Nothing restores from such an entry.
+
+**Off the event loop.** A capture is an async run of bounded slices: 64 entries
+per walk slice, and 16 per copy or delete slice. It hands the event loop back
+between slices, so credential and key writes land during a capture. A write
+that lands between a file's read in the pre-copy walk and its read in the copy
+fails validation. With the same identity, the run is deferred and retried.
+Empty or invalid creds inside the fresh-write grace also defer. Anything else
+fails. A write after the copy is not in that backup; the settled snapshot that
+the write schedules covers it.
+
+**Single flight, nothing dropped.** A guard runs one capture at a time. Requests
+made during a run fold into one trailing run with the most recent reason.
+Folded callers share one promise and one result, and `capture()` never rejects.
+A run that ends deferred re-arms the settled snapshot. A settled snapshot
+refused by the 5-minute floor is re-armed for the rest of the interval. A
+blocked run is refused because publishing would be unsafe. An aborted run is
+covered by the reconnect after a restore, or by the next process's open.
+
+**Abort.** `restoreLatestIfNeeded()` aborts an in-flight run immediately before
+its first write. That run removes its own staging copy in slices and settles
+aborted. `shutdownCaptures()`, which `ConnectionManager.shutdown()` awaits,
+aborts the run and refuses later requests. The run settles on a microtask,
+publishes nothing new, and leaves its staging copy for the next sweep. A socket
+close without a logout does not abort a run.
+
+**Staging residue.** Each capture's sweep removes the `*.tmp-<pid>` staging
+entries of other processes, which is the same residue a crash leaves.
+
 ---
 
 ## 6. Database Schema
