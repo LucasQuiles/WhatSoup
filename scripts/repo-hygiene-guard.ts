@@ -282,17 +282,47 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
   const addedLines: AddedLine[] = [];
   let filePath: string | null = null;
   let nextLine = 0;
+  // Lines still due in the current hunk, from its header counts. Inside them every line is
+  // content: an added line whose text starts with '++ ' prints as '+++ …', and read as a header
+  // it would drop or move every later added line of the file. Past the counts the handling
+  // below is unchanged.
+  let oldDue = 0;
+  let newDue = 0;
 
   for (const rawLine of diff.split(/\r?\n/)) {
+    if (oldDue > 0 || newDue > 0) {
+      if (newDue > 0 && rawLine.startsWith('+')) {
+        if (filePath && nextLine !== 0) addedLines.push({ filePath, line: nextLine, text: rawLine.slice(1) });
+        nextLine += 1;
+        newDue -= 1;
+        continue;
+      }
+      if (oldDue > 0 && rawLine.startsWith('-')) {
+        oldDue -= 1;
+        continue;
+      }
+      if (oldDue > 0 && newDue > 0 && rawLine.startsWith(' ')) {
+        nextLine += 1;
+        oldDue -= 1;
+        newDue -= 1;
+        continue;
+      }
+      if (rawLine.startsWith('\\')) continue;
+      oldDue = 0;
+      newDue = 0;
+    }
+
     if (rawLine.startsWith('+++ ')) {
       const candidate = rawLine.slice(4).trim();
       filePath = candidate === '/dev/null' ? null : stripDiffPath(candidate);
       continue;
     }
 
-    const hunk = rawLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunk = rawLine.match(/^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
     if (hunk) {
-      nextLine = Number(hunk[1]);
+      nextLine = Number(hunk[2]);
+      oldDue = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newDue = hunk[3] === undefined ? 1 : Number(hunk[3]);
       continue;
     }
 
@@ -382,9 +412,35 @@ function splitHistoryIssues(
   }));
 }
 
+/** Options of the added-line scans that only the hosted candidate check sets. */
+export interface AddedLineScanOptions {
+  /**
+   * Apply the private-name rules under fixture paths too. A fixture is exempt from the generic
+   * shapes only, never from private names, as --tree applies it; the local diff modes keep their
+   * whole fixture exemption.
+   */
+  readonly fixturePrivateNames?: boolean;
+}
+
+/** The private-name part of the added-line scan for one line: the fallback rules, then the term rules. */
+function privateNameIssues(filePath: string, line: AddedLine, termRules: readonly PrivateTermRule[]): GuardIssue[] {
+  const location = { filePath: line.filePath, line: line.line };
+  const reported = new Set<string>();
+  const issues: GuardIssue[] = [];
+  for (const pattern of fallbackPrivatePatterns) {
+    if (findDisallowedMatch(filePath, pattern, line.text)) {
+      reported.add(pattern.code);
+      issues.push({ code: pattern.code, message: pattern.message, ...location });
+    }
+  }
+  issues.push(...termRuleIssues(filePath, line.text, location, termRules, reported));
+  return issues;
+}
+
 export function scanAddedLines(
   lines: AddedLine[],
   termRules: readonly PrivateTermRule[] = activePrivateTermRules(),
+  options: AddedLineScanOptions = {},
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
 
@@ -394,6 +450,7 @@ export function scanAddedLines(
 
     if (isFixtureFile(filePath)) {
       issues.push(...scanProjectedFileSecretLines([line]));
+      if (options.fixturePrivateNames === true) issues.push(...privateNameIssues(filePath, line, termRules));
       continue;
     }
     if (isSourceConsoleCall(filePath, line.text)) {
@@ -545,6 +602,8 @@ function scanStagedSensitiveArtifacts(cwd: string): GuardIssue[] {
 
 // The issue-triage callers and the release-hygiene mode scan with the generic and fallback
 // patterns only; term coverage of tracked files comes from --tree against the private baseline.
+// --release-hygiene calls this without term rules: that mode applies its own rule set. The
+// parameter stays for a caller that adds the term rules to whole-file content.
 export function scanContentLines(
   lines: AddedLine[],
   termRules: readonly PrivateTermRule[] = [],
@@ -696,33 +755,38 @@ function baseRefFileLines(
   return lines;
 }
 
-function scanBranchCommitSecretLines(
-  cwd: string,
+/** Options of the per-commit history line scan. */
+export interface CommitLineScanOptions extends AddedLineScanOptions {
+  /** True for a line byte-identical to a line of the same file at the base ref. */
+  readonly isBaseLine?: (filePath: string, text: string) => boolean;
+}
+
+/**
+ * The lines one branch commit adds, through the history rules (the secret shapes plus the term
+ * rules). --branch-diff reads each commit with `git show`; the hosted candidate check reads it
+ * from its bare candidate directory; both share this scan. With `fixturePrivateNames`, a fixture
+ * path gets the term rules and no secret shape.
+ */
+export function scanCommitAddedLines(
+  lines: readonly AddedLine[],
   sha: string,
-  baseRef: string | undefined,
-  baseLineCache: Map<string, Set<string>> | undefined,
   termRules: readonly PrivateTermRule[],
+  options: CommitLineScanOptions = {},
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
-  const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
 
-  for (const line of parseUnifiedDiffAddedLines(diff)) {
+  for (const line of lines) {
     const filePath = normalizeRepoPath(line.filePath);
-    if (isFixtureFile(filePath)) continue;
+    const fixture = isFixtureFile(filePath);
+    if (fixture && options.fixturePrivateNames !== true) continue;
     // Correctness (not a detection weakening): a line byte-identical to the base ref
     // (origin/main) is already-published content, not branch-introduced. Merge commits
     // re-expose the base's own lines as branch-unique per-commit diffs; skipping those
     // removes that false-positive class. A genuinely new secret cannot already exist in
     // origin/main, so every real introduction is still flagged.
-    if (
-      baseRef
-      && baseLineCache
-      && baseRefFileLines(cwd, baseRef, line.filePath, baseLineCache).has(line.text)
-    ) {
-      continue;
-    }
+    if (options.isBaseLine?.(line.filePath, line.text) === true) continue;
     const found = new Set<string>();
-    for (const pattern of historyPatterns(termRules)) {
+    for (const pattern of fixture ? termRules : historyPatterns(termRules)) {
       if (findDisallowedMatch(filePath, pattern, line.text)) {
         found.add(pattern.code);
         issues.push({
@@ -739,6 +803,20 @@ function scanBranchCommitSecretLines(
   }
 
   return issues;
+}
+
+function scanBranchCommitSecretLines(
+  cwd: string,
+  sha: string,
+  baseRef: string | undefined,
+  baseLineCache: Map<string, Set<string>> | undefined,
+  termRules: readonly PrivateTermRule[],
+): GuardIssue[] {
+  const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
+  const options: CommitLineScanOptions = baseRef && baseLineCache
+    ? { isBaseLine: (filePath, text) => baseRefFileLines(cwd, baseRef, filePath, baseLineCache).has(text) }
+    : {};
+  return scanCommitAddedLines(parseUnifiedDiffAddedLines(diff), sha, termRules, options);
 }
 
 function scanBranchCommitSensitiveArtifacts(cwd: string, sha: string): GuardIssue[] {
@@ -771,26 +849,31 @@ export function scanBranchSecretHistory(
   return issues;
 }
 
+const COMMIT_AUTHOR_FIELD_COUNT = 8;
+const COMMIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * Parse a COMMIT_AUTHOR_LOG_FORMAT log. Every record must hold exactly its eight fields, a full
+ * commit id and a numeric committer time. A record separator (0x1E) inside a message or an
+ * identity cuts its record in two, and dropping either part would drop the fields it holds (a
+ * message that ends in 0x1E lost its committer name, email and time). So a malformed record fails
+ * the scan (exit 1) instead; only the empty tail after the last separator is skipped.
+ */
 export function parseCommitAuthorLog(log: string): CommitAuthor[] {
-  return log
-    .split('\x1e')
-    .map((record) => record.trim())
-    .filter(Boolean)
-    .map((record) => {
-      // The message (%B) cannot hold a NUL, so the committer fields after it split cleanly.
-      const [sha, name, email, subject, message, committerName, committerEmail, committerTime] = record.split('\x00');
-      return {
-        sha: sha ?? '',
-        name: name ?? '',
-        email: email ?? '',
-        subject: subject ?? '',
-        ...(message === undefined ? {} : { message }),
-        ...(committerName === undefined ? {} : { committerName }),
-        ...(committerEmail === undefined ? {} : { committerEmail }),
-        ...(committerTime === undefined || !/^[0-9]+$/.test(committerTime) ? {} : { committerTime: Number(committerTime) }),
-      };
-    })
-    .filter((commit) => commit.sha !== '');
+  const fragments = log.split('\x1e');
+  const commits: CommitAuthor[] = [];
+  fragments.forEach((fragment, index) => {
+    const record = fragment.trim();
+    if (record === '' && index === fragments.length - 1) return;
+    const fields = record.split('\x00');
+    const [sha = '', name = '', email = '', subject = '', message = '', committerName = '', committerEmail = '', committerTime = ''] = fields;
+    const time = /^[0-9]+$/.test(committerTime) ? Number(committerTime) : Number.NaN;
+    if (fields.length !== COMMIT_AUTHOR_FIELD_COUNT || !COMMIT_OBJECT_ID.test(sha) || !Number.isSafeInteger(time)) {
+      throw new GuardInputError('a commit record in the log is malformed; the commit scan fails closed');
+    }
+    commits.push({ sha, name, email, subject, message, committerName, committerEmail, committerTime: time });
+  });
+  return commits;
 }
 
 /** The epoch in seconds; an unparsable constant yields NaN, so every commit counts as recent (blocking). */
@@ -977,7 +1060,7 @@ function commitAuthorBaseRef(cwd: string): string | null {
 }
 
 // sha, author name and email, subject, message, committer name, email and time (seconds).
-const COMMIT_AUTHOR_LOG_FORMAT = '%H%x00%an%x00%ae%x00%s%x00%B%x00%cn%x00%ce%x00%ct%x1e';
+export const COMMIT_AUTHOR_LOG_FORMAT = '%H%x00%an%x00%ae%x00%s%x00%B%x00%cn%x00%ce%x00%ct%x1e';
 
 export function readCommitAuthors(cwd: string): CommitAuthor[] {
   const baseRef = commitAuthorBaseRef(cwd);
@@ -1021,6 +1104,8 @@ const EXACT_RANGE_PROVENANCE_MODULE_PATH = fileURLToPath(
   new URL('./lib/ci-control/exact-range-provenance.ts', import.meta.url),
 );
 const PRIVATE_TERMS_MODULE_PATH = fileURLToPath(new URL('./lib/private-terms.ts', import.meta.url));
+// The term loader and the boundary module both import isRecord from here.
+const TYPE_GUARDS_MODULE_PATH = fileURLToPath(new URL('../src/lib/type-guards.ts', import.meta.url));
 const REPO_HYGIENE_BOUNDARY_MODULE_PATH = fileURLToPath(
   new URL('./lib/repo-hygiene-boundary.ts', import.meta.url),
 );
@@ -1241,13 +1326,15 @@ function readToolBytes(): Buffer {
 }
 
 // The compared policy digest covers the public policy only: the loader and boundary module
-// bytes and the term codes. Whether a term file was loaded, and its digest, sit in the receipt's
-// own privateTerms field, so a receipt made where a term file exists validates where none does,
-// and the reverse. Regex sources of term rules are never serialized: they hold private names.
+// bytes, the shared type guards both import, and the term codes. Whether a term file was loaded,
+// and its digest, sit in the receipt's own privateTerms field, so a receipt made where a term
+// file exists validates where none does, and the reverse. Regex sources of term rules are never
+// serialized: they hold private names.
 function privateTermsPolicyBinding(): unknown {
   return {
     loaderDigest: sha256Bytes(readFileSync(PRIVATE_TERMS_MODULE_PATH)),
     boundaryDigest: sha256Bytes(readFileSync(REPO_HYGIENE_BOUNDARY_MODULE_PATH)),
+    typeGuardsDigest: sha256Bytes(readFileSync(TYPE_GUARDS_MODULE_PATH)),
     codes: [...PRIVATE_TERM_CODES],
   };
 }
@@ -2296,7 +2383,8 @@ Modes:
 
 Every mode but --release-hygiene also applies the private term file (WHATSOUP_PRIVATE_TERMS_FILE,
 else ~/.config/whatsoup/private-terms.json) when it exists; WHATSOUP_REQUIRE_PRIVATE_TERMS=1 makes
-an absent file a failure. Findings print a location and a rule code only.
+an absent file a failure. --release-hygiene still loads and validates the file, then applies its
+own rule set. Findings print a location and a rule code only.
 Exit codes: 0 clean, 1 findings, 2 usage or term-file failure, or an inconclusive scan.
 
 By default, this guard is changed-content only. Use --release-hygiene for the release-hygiene file gate.`);
