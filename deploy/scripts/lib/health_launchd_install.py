@@ -170,7 +170,8 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
         idle_job(domain, label)
         staged = stage(path, data, info, ".health-candidate-")
         try:
-            # Every receipt below is written after this line, so each names a real backup.
+            # Only the re-read refusal just below deletes this backup (its receipt names none);
+            # every receipt after it names this backup.
             backup = stage(path, current, info, path.name + ".backup-")
             try:
                 _, current_info = read_original(path, sha(raw))
@@ -180,6 +181,10 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
                 # Nothing has changed yet, and the refusal receipt names no backup.
                 backup.unlink(missing_ok=True)
                 raise
+            # What this run has done, set as each step returns. Rollback decides from
+            # these, not from the bytes on disk, which another writer can change.
+            unloaded = False  # this run unloaded the original job
+            installed = False  # this run replaced the plist with the candidate
             try:
                 result = command("launchctl", "bootout", domain, str(path))
                 if result.returncode:
@@ -191,11 +196,14 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
                         _, current_info = read_original(path, sha(raw))
                         same_permissions(current_info, info)
                         return 2, {"status": "unchanged", "backup": str(backup), "reason": "bootout failed"}
+                    unloaded = loaded.returncode == 113
                     raise Refused("bootout failed after unloading or losing job visibility")
+                unloaded = True
                 # Do not overwrite an unrelated writer even after the old job is unloaded.
                 _, current_info = read_original(path, sha(raw))
                 same_permissions(current_info, info)
                 replace(staged, path)
+                installed = True
                 result = command("launchctl", "bootstrap", domain, str(path))
                 if result.returncode:
                     raise Refused("candidate bootstrap failed")
@@ -207,19 +215,26 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
                 try:
                     found, current_info = read_current(path)
                     same_permissions(current_info, info)
-                    if found not in (raw, data):
-                        raise Refused("concurrent plist update; rollback would overwrite it")
-                    loaded = command("launchctl", "list", label)
-                    if loaded.returncode == 0:
-                        if found != data:
-                            # The original file is in place and its job is loaded: this run
-                            # neither wrote that file nor loaded that job, so it stops nothing.
+                    loaded = command("launchctl", "list", label).returncode
+                    if loaded not in (0, 113):
+                        raise Refused("job visibility is unknown during rollback")
+                    # Every path here issued the first bootout, so a job now absent is one
+                    # this run unloaded, even when that command failed or was interrupted.
+                    unloaded = unloaded or loaded == 113
+                    if not (unloaded or installed):
+                        # The original job is still loaded and this run installed nothing:
+                        # unload nothing, whatever the plist on disk now holds.
+                        if found == raw:
                             return 2, {"status": "unchanged", "backup": str(backup),
                                        "reason": "original job still loaded; nothing was stopped"}
-                        if command("launchctl", "bootout", domain, str(path)).returncode:
-                            raise Refused("cannot unload candidate during rollback")
-                    elif loaded.returncode != 113:
-                        raise Refused("job visibility is unknown during rollback")
+                        return 3, {"status": "rollback_unverified", "backup": str(backup),
+                                   "reason": "plist changed while the original job stayed loaded; nothing was unloaded"}
+                    if found not in (raw, data):
+                        raise Refused("concurrent plist update; rollback would overwrite it")
+                    # This run unloaded the original or installed the candidate: unload
+                    # whatever is loaded now and restore the original.
+                    if loaded == 0 and command("launchctl", "bootout", domain, str(path)).returncode:
+                        raise Refused("cannot unload candidate during rollback")
                     restored = stage(path, raw, info, ".health-rollback-")
                     replace(restored, path)
                     if command("launchctl", "bootstrap", domain, str(path)).returncode:
@@ -228,8 +243,10 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
                     _, current_info = read_original(path, sha(raw))
                     same_permissions(current_info, info)
                     return 1, {"status": "rolled_back", "backup": str(backup)}
-                except (Exception, KeyboardInterrupt):
-                    return 3, {"status": "rollback_unverified", "backup": str(backup)}
+                except (Exception, KeyboardInterrupt) as exc:
+                    # Subprocess output and plist contents can hold private values: a fixed reason only.
+                    return 3, {"status": "rollback_unverified", "backup": str(backup),
+                               "reason": str(exc) if isinstance(exc, Refused) else type(exc).__name__}
         finally:
             staged.unlink(missing_ok=True)
 
