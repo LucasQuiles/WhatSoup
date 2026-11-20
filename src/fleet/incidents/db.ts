@@ -43,6 +43,21 @@ function applyMigrations(db: DatabaseSync, fromVersion: number): void {
   }
 }
 
+// An earlier release refuses a database above its own schema version, so a
+// migration first leaves a copy that release can open. The first copy taken at
+// a version is the rollback point and is never overwritten.
+function keepPreMigrationCopy(db: DatabaseSync, dbPath: string, fromVersion: number): void {
+  if (fromVersion >= INCIDENT_SCHEMA_VERSION) return;
+  const copyPath = `${dbPath}.schema-v${fromVersion}.bak`;
+  if (existsSync(copyPath)) return;
+  try {
+    db.prepare('VACUUM INTO ?').run(copyPath);
+    chmodSync(copyPath, 0o600);
+  } catch {
+    throw new IncidentStoreCorruptError('pre-migration copy failed');
+  }
+}
+
 function readExistingVersion(db: DatabaseSync): number {
   const check = db.prepare('PRAGMA quick_check').get() as { quick_check?: string } | undefined;
   if (!check || check.quick_check !== 'ok') {
@@ -82,7 +97,9 @@ export function openIncidentDb(dbPath: string): DatabaseSync {
     if (fresh) {
       applyMigrations(db, 0);
     } else {
-      applyMigrations(db, readExistingVersion(db));
+      const fromVersion = readExistingVersion(db);
+      keepPreMigrationCopy(db, dbPath, fromVersion);
+      applyMigrations(db, fromVersion);
     }
   } catch (err) {
     db.close();
