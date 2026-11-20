@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -65,6 +66,10 @@ const SBOM_GENERATOR_DEPENDENCY = `pkg:docker/docker/buildkit-syft-scanner@stabl
 function sha256(contents: string | Buffer): string {
   return createHash('sha256').update(contents).digest('hex');
 }
+
+// The default fixture layer is a real gzip blob whose uncompressed bytes the config names as its diff_id.
+const LAYER_CONTENT = 'uncompressed-layer-bytes';
+const LAYER_DIFF_ID = `sha256:${sha256(LAYER_CONTENT)}`;
 
 function makeReceiptInput(options: {
   provenance?: unknown;
@@ -134,6 +139,9 @@ function makeReceiptInput(options: {
 interface OciArchiveOptions {
   jsonBytes?: { kind: 'root index' | 'output index' | 'image manifest' | 'config' | 'attestation manifest' | 'provenance' | 'SBOM'; size: number };
   imageLayerBytes?: number;
+  layerContents?: string[];
+  undecodableLayer?: boolean;
+  configRootfs?: 'mismatch' | 'reordered' | 'extra' | 'no diff_ids' | 'no rootfs' | 'wrong type';
   sourceRevision?: string;
   sourceRepository?: string;
   sourceRef?: string;
@@ -176,17 +184,41 @@ function writeOciArchive(
       ? contents.padEnd(options.jsonBytes.size, ' ')
       : contents
   );
-  const writeBlob = (contents: string): { digest: string; size: number } => {
-    const bytes = Buffer.from(contents, 'utf8');
+  const writeBlob = (contents: string | Buffer): { digest: string; size: number } => {
+    const bytes = typeof contents === 'string' ? Buffer.from(contents, 'utf8') : contents;
     const digest = sha256(bytes);
     writeFileSync(path.join(blobs, digest), bytes);
     return { digest: `sha256:${digest}`, size: bytes.length };
   };
 
-  const config = writeBlob(jsonBytes('config', JSON.stringify({ ...(options.configPlatform ?? { architecture: 'amd64', os: 'linux' }), rootfs: { type: 'layers', diff_ids: [] } })));
-  const layer = writeBlob('compressed-layer-bytes'.padEnd(options.imageLayerBytes ?? 0, ' '));
+  // A sized layer is an uncompressed tar blob, so its byte count is exact; its diff_id is its own digest.
+  const layerBlobs = options.imageLayerBytes !== undefined
+    ? [{ mediaType: 'application/vnd.oci.image.layer.v1.tar', bytes: Buffer.alloc(options.imageLayerBytes, 0x20), diffId: '' }]
+    : options.undecodableLayer
+      ? [{ mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip', bytes: Buffer.from('not gzip bytes'), diffId: `sha256:${sha256('not gzip bytes')}` }]
+      : (options.layerContents ?? [LAYER_CONTENT]).map((content) => ({
+        mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
+        bytes: gzipSync(Buffer.from(content, 'utf8')),
+        diffId: `sha256:${sha256(content)}`,
+      }));
+  const layerDescriptors = layerBlobs.map((blob) => ({ mediaType: blob.mediaType, ...writeBlob(blob.bytes) }));
+  const layerDiffIds = layerBlobs.map((blob, index) => blob.diffId || layerDescriptors[index]!.digest);
+  const layerCount = options.imageLayerCount ?? layerDescriptors.length;
+  const manifestLayers = Array.from({ length: layerCount }, (_, index) => layerDescriptors[index % layerDescriptors.length]!);
+  const diffIds = Array.from({ length: layerCount }, (_, index) => layerDiffIds[index % layerDiffIds.length]!);
+  const rootfs = options.configRootfs === 'mismatch' ? { type: 'layers', diff_ids: [`sha256:${sha256('different-layer-bytes')}`, ...diffIds.slice(1)] }
+    : options.configRootfs === 'reordered' ? { type: 'layers', diff_ids: [...diffIds].reverse() }
+      : options.configRootfs === 'extra' ? { type: 'layers', diff_ids: [...diffIds, diffIds[0]] }
+        : options.configRootfs === 'no diff_ids' ? { type: 'layers' }
+          : options.configRootfs === 'wrong type' ? { type: 'files', diff_ids: diffIds }
+            : options.configRootfs === 'no rootfs' ? undefined
+              : { type: 'layers', diff_ids: diffIds };
+  const config = writeBlob(jsonBytes('config', JSON.stringify({
+    ...(options.configPlatform ?? { architecture: 'amd64', os: 'linux' }),
+    ...(rootfs === undefined ? {} : { rootfs }),
+  })));
   const configDescriptor = { mediaType: 'application/vnd.oci.image.config.v1+json', ...config };
-  const layerDescriptor = { mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip', ...layer };
+  const layerDescriptor = layerDescriptors[0]!;
   if (options.invalidBlob) {
     const descriptor = options.invalidBlob.kind === 'config' ? configDescriptor : layerDescriptor;
     const file = path.join(blobs, descriptor.digest.slice('sha256:'.length));
@@ -199,7 +231,7 @@ function writeOciArchive(
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
     config: configDescriptor,
-    layers: Array.from({ length: options.imageLayerCount ?? 1 }, () => layerDescriptor),
+    layers: manifestLayers,
   })));
   const imageDigest = runnable.digest;
   const sourceRevision = options.sourceRevision ?? SOURCE_REVISION;
@@ -362,6 +394,31 @@ describe('container build evidence CI contract', () => {
     );
   });
 
+  it('accepts an image whose config diff_ids name its archived layers in order', () => {
+    const imagePath = path.join(tmp.make('diff-ids'), 'image.tar');
+    const oci = writeOciArchive(imagePath, { layerContents: ['layer-one', 'layer-two'] });
+    expect(verifyOciArchiveAttestations(imagePath, oci.outputDigest).imageDigest).toBe(oci.imageDigest);
+  });
+
+  it.each([
+    ['mismatch', 'runnable image config diff_ids do not match the archived layers'],
+    ['reordered', 'runnable image config diff_ids do not match the archived layers'],
+    ['extra', 'runnable image config diff_ids do not match the archived layers'],
+    ['no diff_ids', 'runnable image config must declare a layers rootfs with diff_ids'],
+    ['no rootfs', 'runnable image config must declare a layers rootfs with diff_ids'],
+    ['wrong type', 'runnable image config must declare a layers rootfs with diff_ids'],
+  ] as const)('rejects a config rootfs with %s against the archived layers', (configRootfs, error) => {
+    const imagePath = path.join(tmp.make('bad-diff-ids'), 'image.tar');
+    const oci = writeOciArchive(imagePath, { layerContents: ['layer-one', 'layer-two'], configRootfs });
+    expect(() => verifyOciArchiveAttestations(imagePath, oci.outputDigest)).toThrow(error);
+  });
+
+  it('rejects a layer whose bytes do not decompress as its declared media type', () => {
+    const imagePath = path.join(tmp.make('undecodable-layer'), 'image.tar');
+    const oci = writeOciArchive(imagePath, { undecodableLayer: true });
+    expect(() => verifyOciArchiveAttestations(imagePath, oci.outputDigest)).toThrow('cannot be decompressed');
+  });
+
   it('hashes multiple chunks exactly and refuses evidence larger than its bound', () => {
     const file = path.join(tmp.make('hash'), 'evidence');
     const bytes = Buffer.alloc(3 * 64 * 1024 + 7, 0x83);
@@ -517,7 +574,7 @@ describe('container build evidence CI contract', () => {
   it('binds the runtime image identity to the verified OCI configuration bytes', () => {
     const input = makeReceiptInput();
     const receipt = createContainerBuildReceipt(input);
-    const config = JSON.stringify({ architecture: 'amd64', os: 'linux', rootfs: { type: 'layers', diff_ids: [] } });
+    const config = JSON.stringify({ architecture: 'amd64', os: 'linux', rootfs: { type: 'layers', diff_ids: [LAYER_DIFF_ID] } });
 
     expect(receipt.imageConfigDigest).toBe(`sha256:${sha256(config)}`);
     expect(() => verifyContainerBuildReceipt({
