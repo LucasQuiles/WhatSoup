@@ -790,9 +790,11 @@ def _authority_notification_claim(event_id: str, observed_epoch: int) -> dict[st
 
 
 def _request_notification_authority(
-    claim: dict[str, Any], *, timeout_seconds: float
+    claim: dict[str, Any], *, timeout_seconds: float, deadline_seconds: float | None = None
 ) -> Any:
-    """Ask the authority (or the dry test seam) for one grant; both modes use it."""
+    """Ask the authority (or the dry test seam) for one grant; both modes use it.
+
+    ``deadline_seconds`` (observe mode) bounds the whole request."""
     dry_capture = os.environ.get("BOT_ERRORS_DRY_AUTHORITY_CAPTURE", "").strip()
     if dry_capture:
         if os.environ.get("BOT_ERRORS_TEST_MODE") != "1":
@@ -808,12 +810,15 @@ def _request_notification_authority(
     ).strip()
     if not url or not credential:
         raise AuthorityNotReady("incident_authority_not_configured")
-    return IncidentAuthorityClient(
+    client = IncidentAuthorityClient(
         url,
         Path(credential).expanduser(),
         expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
         timeout_seconds=timeout_seconds,
-    ).accept(claim)
+    )
+    if deadline_seconds is None:
+        return client.accept(claim)
+    return client.accept(claim, deadline_seconds=deadline_seconds)
 
 
 def _record_notification_authority(error: BaseException | None) -> None:
@@ -844,7 +849,9 @@ def _authorize_notification(
         error: BaseException | None = None
         try:
             _request_notification_authority(
-                claim, timeout_seconds=OBSERVE_TIMEOUT_SECONDS
+                claim,
+                timeout_seconds=OBSERVE_TIMEOUT_SECONDS,
+                deadline_seconds=OBSERVE_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 - every answer is recorded, none stops a send
             error = exc

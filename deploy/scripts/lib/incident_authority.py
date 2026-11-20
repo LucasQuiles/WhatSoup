@@ -14,7 +14,9 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import stat
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +58,20 @@ _REFUSED_REASONS = (
     "authority_credential_rejected",
     "authority_scope_denied",
 )
+
+
+def _abort_connection(connection: Any) -> None:
+    """End an abandoned request: shut its socket so a blocked read returns."""
+    sock = getattr(connection, "sock", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:  # intentional: the socket may already be closed
+            pass
+    try:
+        connection.close()
+    except Exception:  # noqa: BLE001 - intentional: best effort on an abandoned request
+        pass
 
 
 def incident_authority_mode(environ: Mapping[str, str], warn: Callable[[str], None]) -> str:
@@ -495,7 +511,44 @@ class IncidentAuthorityClient:
         self.timeout_seconds = timeout_seconds
         self.connection_factory = connection_factory
 
-    def accept(self, producer_claim: dict[str, Any]) -> AuthorityGrant:
+    def accept(
+        self, producer_claim: dict[str, Any], *, deadline_seconds: float | None = None
+    ) -> AuthorityGrant:
+        """Ask for one grant.
+
+        With ``deadline_seconds`` (observe mode) the whole request, from the
+        connection to the last body byte, is bounded by that many seconds: no
+        socket operation waits longer, and past the deadline the request is
+        closed, left behind and answered as unavailable. Without it (enforce
+        mode) each socket operation keeps the client timeout.
+        """
+        if deadline_seconds is None:
+            return self._accept(producer_claim, self.timeout_seconds, [])
+        opened: list[Any] = []
+        answer: dict[str, Any] = {}
+
+        def ask() -> None:
+            try:
+                answer["grant"] = self._accept(
+                    producer_claim, min(self.timeout_seconds, deadline_seconds), opened
+                )
+            except BaseException as exc:  # noqa: BLE001 - handed back to the caller below
+                answer["error"] = exc
+
+        worker = threading.Thread(target=ask, name="incident-authority-request", daemon=True)
+        worker.start()
+        worker.join(max(0.0, deadline_seconds))
+        if worker.is_alive():
+            for connection in opened:
+                _abort_connection(connection)
+            raise AuthorityNotReady("incident_authority_unavailable")
+        if "error" in answer:
+            raise answer["error"]
+        return answer["grant"]
+
+    def _accept(
+        self, producer_claim: dict[str, Any], timeout_seconds: float, opened: list[Any]
+    ) -> AuthorityGrant:
         signal = canonical_signal(producer_claim)
         try:
             credential = _read_private_credential(self.credential_path)
@@ -510,53 +563,59 @@ class IncidentAuthorityClient:
             self.connection_factory(
                 self.destination.host,
                 self.destination.port,
-                self.timeout_seconds,
+                timeout_seconds,
             )
             if self.connection_factory is not None
             else connection_class(
                 self.destination.host,
                 self.destination.port,
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds,
             )
         )
+        opened.append(connection)
         try:
-            connection.request(
-                "POST",
-                self.destination.path,
-                body=signal.body,
-                headers={
-                    "Authorization": f"Bearer {credential}",
-                    "Content-Type": "application/json",
-                    "Content-Length": str(len(signal.body)),
-                },
-            )
-            response = connection.getresponse()
-            payload = response.read(MAX_RESPONSE_BYTES + 1)
-        except (OSError, TimeoutError, http.client.HTTPException) as exc:
-            # An outage of the authority holds the work; it is never terminal
-            # and never counts toward the attempt cap.
-            raise AuthorityNotReady("incident_authority_unavailable") from exc
+            try:
+                connection.request(
+                    "POST",
+                    self.destination.path,
+                    body=signal.body,
+                    headers={
+                        "Authorization": f"Bearer {credential}",
+                        "Content-Type": "application/json",
+                        "Content-Length": str(len(signal.body)),
+                    },
+                )
+                response = connection.getresponse()
+            except (OSError, TimeoutError, http.client.HTTPException) as exc:
+                # An outage of the authority holds the work; it is never terminal
+                # and never counts toward the attempt cap.
+                raise AuthorityNotReady("incident_authority_unavailable") from exc
+            # The status decides before the body is read: a refusal or an
+            # outage needs no body, so a rate limit is recognised even when its
+            # body never arrives, and a large error page is not a protocol error.
+            if response.status == 409:
+                raise AuthorityConflict("incident_authority_identity_conflict")
+            if response.status == 401:
+                raise AuthorityNotReady("authority_credential_rejected")
+            if response.status == 403:
+                raise AuthorityNotReady("authority_scope_denied")
+            if response.status == 429:
+                raise AuthorityNotReady("incident_authority_rate_limited")
+            if 500 <= response.status < 600:
+                raise AuthorityNotReady("incident_authority_unavailable")
+            if 300 <= response.status < 400:
+                raise AuthorityProtocolError("authority_redirect_rejected")
+            if response.status not in {200, 201}:
+                raise AuthorityProtocolError("authority_response_status_rejected")
+            try:
+                payload = response.read(MAX_RESPONSE_BYTES + 1)
+            except (OSError, TimeoutError, http.client.HTTPException) as exc:
+                raise AuthorityNotReady("incident_authority_unavailable") from exc
         finally:
             connection.close()
-        # The status decides before the body size: a proxy's large error page
-        # on a refusal or an outage must not become a protocol error.
-        if response.status == 409:
-            raise AuthorityConflict("incident_authority_identity_conflict")
-        if response.status == 401:
-            raise AuthorityNotReady("authority_credential_rejected")
-        if response.status == 403:
-            raise AuthorityNotReady("authority_scope_denied")
-        if response.status == 429:
-            raise AuthorityNotReady("incident_authority_rate_limited")
-        if 500 <= response.status < 600:
-            raise AuthorityNotReady("incident_authority_unavailable")
-        if 300 <= response.status < 400:
-            raise AuthorityProtocolError("authority_redirect_rejected")
         if len(payload) > MAX_RESPONSE_BYTES:
             raise AuthorityProtocolError("authority_response_oversized")
         replay = response.status == 200
-        if response.status not in {200, 201}:
-            raise AuthorityProtocolError("authority_response_status_rejected")
         replay_header = response.getheader("Idempotent-Replay")
         if replay != (replay_header == "true"):
             raise AuthorityProtocolError("authority_replay_contract_invalid")

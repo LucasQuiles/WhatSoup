@@ -5735,12 +5735,14 @@ def _request_incident_authority(
     *,
     timeout_seconds: float,
     rate_limited: bool,
+    deadline_seconds: float | None = None,
 ) -> Any:
     """Ask the authority (or the dry test seam) for one grant; both modes use it.
 
     Raises ``AuthorityNotReady("incident_authority_not_configured")`` without a
     request when the settings are missing, and ``..._rate_limited`` without a
-    request when ``rate_limited`` is set.
+    request when ``rate_limited`` is set. ``deadline_seconds`` (observe mode)
+    bounds the whole request.
     """
     dry_send_capture = os.environ.get("BOT_ERRORS_DRY_SEND_CAPTURE", "").strip()
     configured_dry_authority = os.environ.get("BOT_ERRORS_DRY_AUTHORITY_CAPTURE", "").strip()
@@ -5764,12 +5766,15 @@ def _request_incident_authority(
     if rate_limited:
         # One rate refusal stops every further request for this cycle.
         raise AuthorityNotReady("incident_authority_rate_limited")
-    return IncidentAuthorityClient(
+    client = IncidentAuthorityClient(
         url,
         Path(credential).expanduser(),
         expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
         timeout_seconds=timeout_seconds,
-    ).accept(claimed_event)
+    )
+    if deadline_seconds is None:
+        return client.accept(claimed_event)
+    return client.accept(claimed_event, deadline_seconds=deadline_seconds)
 
 
 def incident_authority_record_path(paths: dict[str, Path]) -> Path:
@@ -5846,11 +5851,15 @@ def observe_incident_authority(
         else:
             started = _authority_clock()
             error: BaseException | None = None
+            # One deadline for the whole request, never longer than the
+            # request time left in this cycle, so the last one ends by the cap.
+            time_left = INCIDENT_AUTHORITY_OBSERVE_SECONDS_PER_CYCLE - _AUTHORITY_CYCLE["observe_seconds"]
             try:
                 _request_incident_authority(
                     claim,
                     timeout_seconds=INCIDENT_AUTHORITY_OBSERVE_TIMEOUT_SECONDS,
                     rate_limited=False,
+                    deadline_seconds=min(INCIDENT_AUTHORITY_OBSERVE_TIMEOUT_SECONDS, time_left),
                 )
             except Exception as exc:  # noqa: BLE001 - every answer is recorded, none stops a send
                 error = exc
