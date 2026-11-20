@@ -367,19 +367,23 @@ describe('resolveProviderArgs — conditional argv branches', () => {
     expect(args).not.toContain('--plugin-dir');
   });
 
-  it('codex-cli includes --model when a model is set', () => {
+  it('codex-cli passes the model through -c when a model is set', () => {
     const args = __provider_switch_for_test.getProviderArgs(
       'codex-cli', 'SYS', '/home/testuser', undefined, 'codex-model', [],
     );
     expect(args).toContain('app-server');
-    expect(args.join(' ')).toContain('--model codex-model');
+    const modelIndex = args.indexOf('model="codex-model"');
+    expect(modelIndex).toBeGreaterThan(0);
+    expect(args[modelIndex - 1]).toBe('-c');
+    expect(args).not.toContain('--model');
   });
 
-  it('codex-cli omits --model when absent', () => {
+  it('codex-cli omits the model override when absent', () => {
     const args = __provider_switch_for_test.getProviderArgs(
       'codex-cli', 'SYS', '/home/testuser', undefined, undefined, [],
     );
     expect(args).not.toContain('--model');
+    expect(args.some((arg) => arg.startsWith('model='))).toBe(false);
   });
 
   it('opencode-cli adds -m for a plain model (no custom endpoint)', () => {

@@ -19,6 +19,8 @@ import {
   deleteMessagesAndHandoffArtifacts,
 } from './runtimes/agent/handoff-artifact.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
+import { reportCodexDeferredDefects } from './runtimes/agent/codex-deferred-defect-check.ts';
+import { isHostWorkAdmissionEnabled } from './runtimes/agent/host-work-admission.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
 import { extractExpectedAccountDigest } from './lib/service-identity-config.ts';
 import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from './lib/time-units.ts';
@@ -539,6 +541,15 @@ if (instanceType === 'agent') {
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
+  // Logs an ERROR and raises a BOT ERRORS warning when codex-cli can reach a
+  // Codex resume risk that is not proven fixed. It never refuses to start.
+  reportCodexDeferredDefects({
+    instance: config.botName,
+    provider: config.agentProvider,
+    fallbacks: config.agentFallbacks,
+    sessionScope: agentOpts?.sessionScope,
+    hostWorkAdmission: isHostWorkAdmissionEnabled(),
+  });
   const agentRuntime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
     providerProcessIsolation: config.providerProcessIsolation ?? undefined,

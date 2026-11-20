@@ -58,7 +58,8 @@ interface AgentOptions {
   /**
    * Agent-scoped model override. Highest-precedence input to
    * resolveAgentModel (before top-level `model` and `models.conversation`);
-   * passed to the provider CLI as `--model` at spawn.
+   * passed to the provider CLI at spawn (`--model` for claude-cli,
+   * `-c model="..."` for codex-cli; see resolveProviderArgs in session.ts).
    */
   model?: string;
   instructionsPath?: string;

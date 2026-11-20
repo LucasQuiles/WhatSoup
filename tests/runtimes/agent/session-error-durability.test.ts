@@ -25,6 +25,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { killSessionTree } from '../../../src/runtimes/agent/process-tree.ts';
+import { incrementMessageCount } from '../../../src/runtimes/agent/session-db.ts';
 
 const CHAT_JID = '15550171@s.whatsapp.net';
 const CONVERSATION_KEY = '15550171';
@@ -708,5 +709,239 @@ describe('SessionManager durable error lifecycle', () => {
     }
     expect(sm.getStatus()).toMatchObject({ active: false, sessionId: null });
     expect(sm.getDbRowId()).toBeNull();
+  });
+});
+
+// After a failed thread/resume the session starts a fresh thread in the same
+// child. Until that thread's init, the row, the checkpoint and the manager must
+// all name the stored thread, so every close in that window matches exactly. A
+// close that throws inside the child's exit listener is an uncaught exception,
+// and main.ts shuts the whole bot down on one.
+describe('Codex resume fallback keeps one durable identity until the fresh thread starts', () => {
+  const STORED_THREAD = 'codex-stored-thread';
+  let db: Database;
+  let durability: DurabilityEngine;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = new Database(':memory:');
+    db.open();
+    durability = new DurabilityEngine(db);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
+
+  function codexRequests(child: ReturnType<typeof makeChild>): Array<{ id: string; method?: string }> {
+    return child.stdin.write.mock.calls.map(([payload]) => JSON.parse(String(payload)) as { id: string; method?: string });
+  }
+
+  // The app-server may send replies without the jsonrpc field, so each case
+  // runs in both forms. The headed form isolates the identity rule: a blanked
+  // row id made the exact close throw even when the fallback was reached.
+  const WIRE_FORMS = [
+    { wire: 'without a jsonrpc field', headed: false },
+    { wire: 'with jsonrpc 2.0', headed: true },
+  ] as const;
+
+  function emitLine(child: ReturnType<typeof makeChild>, message: Record<string, unknown>, headed: boolean): void {
+    const line = headed ? { jsonrpc: '2.0', ...message } : message;
+    child.stdout.emit('data', `${JSON.stringify(line)}\n`);
+  }
+
+  function agentRow(rowId: number): { session_id: string | null; status: string } | undefined {
+    return db.raw.prepare('SELECT session_id, status FROM agent_sessions WHERE id = ?').get(rowId) as
+      { session_id: string | null; status: string } | undefined;
+  }
+
+  function checkpoint(): { session_id: string | null; session_status: string } | undefined {
+    return db.raw.prepare(
+      'SELECT session_id, session_status FROM session_checkpoints WHERE conversation_key = ?',
+    ).get(CONVERSATION_KEY) as { session_id: string | null; session_status: string } | undefined;
+  }
+
+  /** Resume a stored thread with no turns, get "no rollout found", and stop before the fresh init. */
+  async function resumeIntoFallback(headed: boolean) {
+    const rowId = lifecycleRow(db, STORED_THREAD, 'suspended', CONVERSATION_KEY, 'codex-cli');
+    durability.upsertSessionCheckpoint(CONVERSATION_KEY, {
+      sessionId: STORED_THREAD,
+      sessionStatus: 'suspended',
+    });
+    const child = makeChild(17301);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const onResumeFailed = vi.fn();
+    const onCrash = vi.fn();
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      onResumeFailed,
+      onCrash,
+      provider: 'codex-cli',
+    });
+    sm.setDurability(durability);
+
+    await sm.spawnSession(STORED_THREAD, rowId);
+    expect(sm.getDbRowId()).toBe(rowId);
+    const resume = codexRequests(child).find((request) => request.method === 'thread/resume');
+    if (resume === undefined) throw new Error('no thread/resume request was sent');
+    emitLine(child, {
+      id: resume.id,
+      error: { code: -32600, message: `no rollout found for thread id ${STORED_THREAD}` },
+    }, headed);
+    const fresh = codexRequests(child).filter((request) => request.method === 'thread/start');
+    expect(fresh).toHaveLength(1);
+    return { sm, child, rowId, freshId: fresh[0]!.id, onResumeFailed, onCrash };
+  }
+
+  it.each(WIRE_FORMS)('closes the stored identity as resume_failed when the child exits with code 1 before the fresh init (reply $wire)', async ({ headed }) => {
+    const { child, rowId, onResumeFailed } = await resumeIntoFallback(headed);
+
+    expect(() => child.emit('exit', 1, null)).not.toThrow();
+
+    expect(agentRow(rowId)).toEqual({ session_id: STORED_THREAD, status: 'resume_failed' });
+    expect(checkpoint()).toEqual({ session_id: STORED_THREAD, session_status: 'orphaned' });
+    expect(onResumeFailed).toHaveBeenCalledOnce();
+  });
+
+  it.each(WIRE_FORMS)('closes the stored identity as crashed when the child exits abnormally before the fresh init (reply $wire)', async ({ headed }) => {
+    const { child, rowId, onCrash } = await resumeIntoFallback(headed);
+
+    expect(() => child.emit('exit', 7, null)).not.toThrow();
+
+    expect(agentRow(rowId)).toEqual({ session_id: STORED_THREAD, status: 'crashed' });
+    expect(checkpoint()).toEqual({ session_id: STORED_THREAD, session_status: 'orphaned' });
+    expect(onCrash).toHaveBeenCalledOnce();
+  });
+
+  it.each(WIRE_FORMS)('suspends the stored identity when the session shuts down before the fresh init (reply $wire)', async ({ headed }) => {
+    const { sm, child, rowId } = await resumeIntoFallback(headed);
+
+    await expect(sm.shutdown(true)).resolves.toBeUndefined();
+
+    expect(agentRow(rowId)).toEqual({ session_id: STORED_THREAD, status: 'suspended' });
+    expect(checkpoint()).toEqual({ session_id: STORED_THREAD, session_status: 'suspended' });
+    expect(() => child.emit('exit', null, 'SIGTERM')).not.toThrow();
+    expect(agentRow(rowId)).toEqual({ session_id: STORED_THREAD, status: 'suspended' });
+  });
+
+  it.each(WIRE_FORMS)('keeps the stored id on the row and the checkpoint until the fresh init, then moves both and closes the new identity on a later exit (reply $wire)', async ({ headed }) => {
+    const { child, rowId, freshId } = await resumeIntoFallback(headed);
+
+    expect(agentRow(rowId)).toEqual({ session_id: STORED_THREAD, status: 'active' });
+    expect(checkpoint()).toEqual({ session_id: STORED_THREAD, session_status: 'active' });
+
+    emitLine(child, { id: freshId, result: { thread: { id: 'codex-fresh-thread' } } }, headed);
+
+    expect(agentRow(rowId)).toEqual({ session_id: 'codex-fresh-thread', status: 'active' });
+    expect(checkpoint()).toEqual({ session_id: 'codex-fresh-thread', session_status: 'active' });
+    expect(() => child.emit('exit', 7, null)).not.toThrow();
+    expect(agentRow(rowId)).toEqual({ session_id: 'codex-fresh-thread', status: 'crashed' });
+    expect(checkpoint()).toEqual({ session_id: 'codex-fresh-thread', session_status: 'orphaned' });
+  });
+
+  // message_count belongs to the row, which the fresh thread's init re-keys. A
+  // count kept from the abandoned thread made a later "no rollout found" for
+  // the never-used fresh thread send a false loss notice.
+  const REPLACEMENT_THREAD = 'codex-replacement-thread';
+  const LOST_NOTICE = '_Previous session could not be restored_ — starting fresh.';
+
+  function messageCount(rowId: number): number | null | undefined {
+    return (db.raw.prepare('SELECT message_count FROM agent_sessions WHERE id = ?').get(rowId) as
+      { message_count: number | null } | undefined)?.message_count;
+  }
+
+  /** A stored thread with three counted turns fails to resume; the replacement thread then sends its init. */
+  async function replaceThreadWithCountedTurns() {
+    const rowId = lifecycleRow(db, STORED_THREAD, 'suspended', CONVERSATION_KEY, 'codex-cli');
+    for (let turn = 0; turn < 3; turn += 1) incrementMessageCount(db, rowId);
+    durability.upsertSessionCheckpoint(CONVERSATION_KEY, {
+      sessionId: STORED_THREAD,
+      sessionStatus: 'suspended',
+    });
+    const child = makeChild(17311);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const notifyUser = vi.fn();
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      notifyUser,
+      provider: 'codex-cli',
+    });
+    sm.setDurability(durability);
+
+    await sm.spawnSession(STORED_THREAD, rowId);
+    const resume = codexRequests(child).find((request) => request.method === 'thread/resume');
+    if (resume === undefined) throw new Error('no thread/resume request was sent');
+    emitLine(child, { id: resume.id, error: { code: -32603, message: 'failed to load thread' } }, false);
+    // The stored thread really had turns, so this first notice is true.
+    expect(notifyUser).toHaveBeenCalledOnce();
+    expect(notifyUser).toHaveBeenCalledWith(LOST_NOTICE);
+    const fresh = codexRequests(child).filter((request) => request.method === 'thread/start');
+    expect(fresh).toHaveLength(1);
+    emitLine(child, { id: fresh[0]!.id, result: { thread: { id: REPLACEMENT_THREAD } } }, false);
+    expect(agentRow(rowId)).toEqual({ session_id: REPLACEMENT_THREAD, status: 'active' });
+    return { sm, child, rowId };
+  }
+
+  /** A new manager on the same row resumes the replacement thread, whose rollout is missing. */
+  async function restartIntoMissingRollout(rowId: number) {
+    const child = makeChild(17312);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const notifyUser = vi.fn();
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      notifyUser,
+      provider: 'codex-cli',
+    });
+    sm.setDurability(durability);
+
+    await sm.spawnSession(REPLACEMENT_THREAD, rowId);
+    const resume = codexRequests(child).find((request) => request.method === 'thread/resume');
+    if (resume === undefined) throw new Error('no thread/resume request was sent');
+    emitLine(child, {
+      id: resume.id,
+      error: { code: -32600, message: `no rollout found for thread id ${REPLACEMENT_THREAD}` },
+    }, false);
+    return { sm, child, notifyUser };
+  }
+
+  it('starts the replacement thread at zero counted turns, so a restart that finds no rollout for it starts fresh with no notice', async () => {
+    const { sm, child, rowId } = await replaceThreadWithCountedTurns();
+    expect(messageCount(rowId)).toBe(0);
+
+    await sm.shutdown(true);
+    expect(() => child.emit('exit', null, 'SIGTERM')).not.toThrow();
+    expect(agentRow(rowId)).toEqual({ session_id: REPLACEMENT_THREAD, status: 'suspended' });
+
+    const restarted = await restartIntoMissingRollout(rowId);
+    expect(restarted.notifyUser).not.toHaveBeenCalled();
+    expect(codexRequests(restarted.child).filter((request) => request.method === 'thread/start')).toHaveLength(1);
+    await restarted.sm.shutdown(true);
+  });
+
+  it('still notifies the user when a turn was counted on the replacement thread before a restart that finds no rollout for it', async () => {
+    const { sm, child, rowId } = await replaceThreadWithCountedTurns();
+    incrementMessageCount(db, rowId);
+    // The thread/started notification for the same thread can arrive after a
+    // turn was written; only the first init after the fallback resets the count.
+    emitLine(child, { method: 'thread/started', params: { thread: { id: REPLACEMENT_THREAD } } }, true);
+    expect(messageCount(rowId)).toBe(1);
+
+    await sm.shutdown(true);
+    expect(() => child.emit('exit', null, 'SIGTERM')).not.toThrow();
+
+    const restarted = await restartIntoMissingRollout(rowId);
+    expect(restarted.notifyUser).toHaveBeenCalledOnce();
+    expect(restarted.notifyUser).toHaveBeenCalledWith(LOST_NOTICE);
+    await restarted.sm.shutdown(true);
   });
 });

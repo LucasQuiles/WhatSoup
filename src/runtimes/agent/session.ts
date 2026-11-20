@@ -33,7 +33,9 @@ import { isModelId } from '../../lib/model-id.ts';
 import {
   createSession,
   endAbandonedActiveSession,
+  getSessionTurnCount,
   incrementMessageCount,
+  resetSessionTurnCount,
   resolveResumableAgentSession,
   updateResumedSessionStatus,
   updateSessionId,
@@ -76,6 +78,7 @@ import {
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 import { isKeylessOpenCodeRoute, PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
+import { isRecord } from '../../lib/type-guards.ts';
 import { killSessionTree } from './process-tree.ts';
 import { claudeRefreshLockGrace } from './providers/claude-refresh-ahead.ts';
 import { sha256File, type ProviderAdmission } from './provider-canary-proof.ts';
@@ -571,6 +574,36 @@ export function getProviderBinary(provider: string): string | null {
  */
 export { opencodeUsesConfigModel } from './providers/opencode-execution-profile.ts';
 
+/**
+ * The codex-cli model as a TOML basic string for `-c model=...`. JSON escapes
+ * are valid TOML escapes, but JSON.stringify leaves DEL (U+007F) raw and writes
+ * a lone surrogate as `\udXXX`; TOML rejects both, and Codex then keeps the raw
+ * text, quotes included, as the model name.
+ */
+function codexModelTomlString(model: string): string {
+  if (!model.isWellFormed()) {
+    throw new Error(
+      '[session-manager:resolveProviderArgs] codex-cli model is not well-formed Unicode (lone surrogate)',
+    );
+  }
+  return JSON.stringify(model).replaceAll('\u007F', '\\u007F');
+}
+
+/**
+ * Codex thread/start params, for a new session and for the fresh thread after
+ * a failed resume. codex-cli 0.153.1 has no persistExtendedHistory field and
+ * ignores it.
+ */
+function codexThreadStartParams(cwd: string, systemPrompt: string): Record<string, unknown> {
+  return {
+    cwd,
+    approvalPolicy: 'never' as const,
+    sandbox: 'danger-full-access' as const,
+    persistExtendedHistory: true,
+    ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
+  };
+}
+
 /** Resolve the argv for a CLI-backed provider. */
 function resolveProviderArgs(
   provider: ProviderId,
@@ -648,7 +681,9 @@ function resolveProviderArgs(
         'app-server',
         ...providerMcpConfigArgs,
         '--listen', 'stdio://',
-        ...(model ? ['--model', model] : []),
+        // `codex app-server` has no --model flag (passing one fails at spawn);
+        // the model is a -c config override, whose value Codex parses as TOML.
+        ...(model ? ['-c', `model=${codexModelTomlString(model)}`] : []),
       ];
     case 'gemini-cli':
       return ['--acp'];
@@ -894,9 +929,15 @@ export class SessionManager {
     agentSessionRowId: number;
   } | null = null;
   private durableFailureError: unknown = null;
-  /** JSON-RPC request ID of the thread/start call when resuming a Codex thread.
-   *  Used to detect error responses and trigger fallback to a fresh thread. */
-  private codexResumeThreadStartReqId: string | null = null;
+  /** JSON-RPC request ID of the pending Codex thread/resume call. Only its
+   *  response decides whether the stored thread was resumed. */
+  private codexResumeRequestId: string | null = null;
+  /** The stored thread ID sent in that thread/resume call. */
+  private codexResumeStoredThreadId: string | null = null;
+  /** The stored thread ID whose failed resume started a fresh thread in this
+   *  child. The row's message_count still counts that thread's turns until
+   *  the fresh thread's init resets it. */
+  private codexAbandonedThreadId: string | null = null;
   /** Called instead of the crash message when a --resume attempt is rejected. */
   private readonly onResumeFailed: (() => void) | undefined;
   /** Called when the session crashes unexpectedly (not for resume failures). */
@@ -1791,11 +1832,27 @@ export class SessionManager {
       this.sessionId = event.sessionId;
       log.info({ provider: this.provider, chatJid: this.chatJid, sessionId: event.sessionId }, 'provider: captured sessionId');
       updateSessionId(this.db, this.dbRowId, event.sessionId);
+      if (
+        this.codexAbandonedThreadId !== null
+        && event.sessionId
+        && event.sessionId !== this.codexAbandonedThreadId
+      ) {
+        // The row now names the fresh thread that replaced a failed resume,
+        // but its message_count still counts the abandoned thread's turns, so
+        // a later "no rollout found" for this unused thread would report lost
+        // history. Reset once: a turn counted after this init must stay.
+        const abandonedThreadId = this.codexAbandonedThreadId;
+        this.codexAbandonedThreadId = null;
+        resetSessionTurnCount(this.db, this.dbRowId, event.sessionId, this.provider);
+        log.info({ chatJid: this.chatJid, rowId: this.dbRowId, abandonedThreadId, threadId: event.sessionId }, 'codex: replacement thread starts with no counted turns');
+      }
 
-      // Codex app-server: capture threadId from thread/started notification
+      // Codex app-server: capture the thread id from a thread/start or
+      // thread/resume response, or from a thread/started notification. A
+      // pending thread/resume stays tracked: only its response proves the
+      // stored thread was resumed, and a thread/started may arrive first.
       if (this.provider === 'codex-cli' && event.sessionId) {
         this.codexThreadId = event.sessionId;
-        this.codexResumeThreadStartReqId = null; // resume succeeded, clear tracking
         log.info({ chatJid: this.chatJid, codexThreadId: this.codexThreadId }, 'codex: captured threadId');
       }
 
@@ -2055,6 +2112,175 @@ export class SessionManager {
     }
 
     log.warn({ method, id, chatJid: this.chatJid }, 'codex: unhandled server request');
+  }
+
+  /**
+   * Decide the response to the pending Codex thread/resume. Every path that
+   * does not resume the stored thread logs the stored id and the reason.
+   * - 'resumed': the line goes on to the parser, whose init event stores the
+   *   returned thread id and resolves readiness.
+   * - 'restarted': a fresh thread/start was sent in the same child.
+   * - 'closed': a host-admitted session was closed rather than silently lose
+   *   its history.
+   */
+  private handleCodexResumeResponse(
+    child: ReturnType<typeof spawn>,
+    msg: Record<string, unknown>,
+    systemPrompt: string,
+  ): 'resumed' | 'restarted' | 'closed' {
+    const storedThreadId = this.codexResumeStoredThreadId;
+    const reqId = msg['id'];
+    this.codexResumeRequestId = null;
+    this.codexResumeStoredThreadId = null;
+
+    const error = msg['error'];
+    let failure: string;
+    if (error === undefined) {
+      const result = msg['result'];
+      const thread = isRecord(result) ? result['thread'] : undefined;
+      const resumedThreadId = isRecord(thread) && typeof thread['id'] === 'string' && thread['id'] !== ''
+        ? thread['id']
+        : null;
+      if (resumedThreadId !== null) {
+        if (resumedThreadId === storedThreadId) {
+          log.info({
+            chatJid: this.chatJid,
+            threadId: resumedThreadId,
+            model: isRecord(result) ? result['model'] ?? null : null,
+          }, 'codex: thread resumed');
+        } else {
+          log.warn({ chatJid: this.chatJid, storedThreadId, resumedThreadId }, 'codex: resume returned a different thread');
+        }
+        return 'resumed';
+      }
+      failure = 'thread/resume response carried no thread id';
+    } else {
+      failure = isRecord(error) ? String(error['message'] ?? 'unknown') : String(error);
+    }
+
+    // Observed on codex-cli 0.153.1: the app-server answers "no rollout found
+    // for thread id <id>" when the thread has no stored history. JSON-RPC
+    // codes are generic, so the message is the only signal for this case.
+    const noRollout = error !== undefined && /no rollout found/i.test(failure);
+    const rowId = this.dbRowId;
+    const turnCount = storedThreadId !== null
+      ? this.readCodexStoredThreadTurnCount(rowId, storedThreadId)
+      : null;
+    const fields = {
+      chatJid: this.chatJid,
+      reqId,
+      storedThreadId,
+      rowId,
+      turnCount,
+      error: failure,
+      errorCode: isRecord(error) && typeof error['code'] === 'number' ? error['code'] : null,
+    };
+
+    if (noRollout && turnCount === 0) {
+      // No turn was ever written to this thread: Codex has nothing to load and
+      // nothing is lost, in either admission mode.
+      log.warn(fields, 'codex: stored thread has no rollout - starting fresh');
+      this.startFreshCodexThreadAfterResume(child, systemPrompt, storedThreadId);
+      return 'restarted';
+    }
+
+    // The stored thread is abandoned on every path below. Only a known count of
+    // 0 proves that nothing is lost; an unknown count errs loud, because a
+    // silent loss of context is the defect this path exists to prevent.
+    const historyLost = turnCount !== 0;
+    const admitted = isHostWorkAdmissionEnabled();
+    if (historyLost) {
+      const reason = noRollout ? 'its rollout is missing' : 'thread/resume failed';
+      // An unknown count is treated as lost, but it does not prove the thread
+      // had turns; turnCount in the fields tells the two cases apart.
+      const turns = turnCount === null ? 'may have had turns' : 'had turns';
+      log.error(fields, `codex: stored thread ${turns} but ${reason} - ${admitted ? 'session closed' : 'starting fresh'}`);
+      this.sendCodexResumeNotice(admitted
+        ? '_Previous session could not be restored_ — your next message starts a fresh session.'
+        : '_Previous session could not be restored_ — starting fresh.');
+    } else if (admitted) {
+      // Nothing is lost, but the waiting admitted turn is rejected, so the user
+      // must learn that the message was not processed.
+      log.warn(fields, 'codex: host-admission thread resume rejected — session closed');
+      this.sendCodexResumeNotice('_Your message was not processed_ — please send it again.');
+    } else {
+      log.warn(fields, 'codex: thread resume rejected — retrying with fresh thread');
+    }
+    if (admitted) {
+      this.closeRejectedCodexResume(reqId);
+      return 'closed';
+    }
+    this.startFreshCodexThreadAfterResume(child, systemPrompt, storedThreadId);
+    return 'restarted';
+  }
+
+  /**
+   * A notifier throw would otherwise escape to the stdout intercept's catch,
+   * which skips the close or the fresh thread and hands the reply line to the
+   * parser, where it quarantines the child.
+   */
+  private sendCodexResumeNotice(message: string): void {
+    try {
+      this.emitUserNotice(message);
+    } catch (err) {
+      log.error({ err, chatJid: this.chatJid }, 'codex: resume notice could not be sent');
+    }
+  }
+
+  /** Turns written on the stored thread's exact row, or null when unknown. */
+  private readCodexStoredThreadTurnCount(rowId: number | null, threadId: string): number | null {
+    if (rowId === null) return null;
+    try {
+      return getSessionTurnCount(this.db, rowId, threadId, this.provider);
+    } catch (err) {
+      log.warn({ err, chatJid: this.chatJid, rowId }, 'codex: stored thread turn count unreadable - treating its history as lost');
+      return null;
+    }
+  }
+
+  /**
+   * Start a new thread in the same child after the stored thread was not
+   * resumed. The row, the checkpoint and resumeAttemptId keep the stored id
+   * until the new thread's init event replaces it in the row and the
+   * checkpoint, so an exit or shutdown before that init closes the exact
+   * identity the row still holds. That init also resets the row's turn count,
+   * which still counts the abandoned thread's turns. The spawn-time system
+   * prompt is passed in because the persistent path never sets
+   * this.systemPrompt.
+   */
+  private startFreshCodexThreadAfterResume(
+    child: ReturnType<typeof spawn>,
+    systemPrompt: string,
+    abandonedThreadId: string | null,
+  ): void {
+    this.sendCodexRequest(child, 'thread/start', codexThreadStartParams(this.admitConfiguredCwd(), systemPrompt));
+    this.codexAbandonedThreadId = abandonedThreadId;
+  }
+
+  /**
+   * Close a host-admitted child whose stored thread was not resumed, rather
+   * than start a silent fresh thread that would drop the conversation history.
+   * Only a thread with no rollout and no counted turns starts fresh instead.
+   * A resume reply whose thread names another thread is still accepted, with
+   * a warning (handleCodexResumeResponse), so the exact thread is not
+   * guaranteed. The row closes as 'resume_failed', which no resume selector
+   * returns, so the next spawn starts fresh instead of retrying this thread.
+   */
+  private closeRejectedCodexResume(reqId: unknown): void {
+    const failedSessionId = this.resumeAttemptId ?? this.sessionId;
+    const failedRowId = this.dbRowId;
+    const resumeError = new Error('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
+    this.providerReadyReject?.(resumeError);
+    this.providerReadyResolve = null;
+    this.providerReadyReject = null;
+    try {
+      this.closeDurableFailureLifecycle(failedSessionId, failedRowId, 'resume_failed');
+    } catch (closeErr) {
+      log.error({ err: closeErr, chatJid: this.chatJid, reqId }, 'codex: failed to close rejected host-admission resume');
+    }
+    void this.shutdown(false).catch((shutdownErr: unknown) => {
+      log.error({ err: shutdownErr, chatJid: this.chatJid, reqId }, 'codex: rejected host-admission resume cleanup failed');
+    });
   }
 
   private buildSpawnPerTurnPrompt(input: ProviderTurnInput): string {
@@ -2566,7 +2792,9 @@ export class SessionManager {
     this.providerReadyResolve = null;
     this.providerReadyReject = null;
     this.resumeAttemptId = null;
-    this.codexResumeThreadStartReqId = null;
+    this.codexResumeRequestId = null;
+    this.codexResumeStoredThreadId = null;
+    this.codexAbandonedThreadId = null;
   }
 
   private admitEvidenceGeneration(): void {
@@ -3161,32 +3389,43 @@ export class SessionManager {
         this.providerReadyResolve = resolve;
         this.providerReadyReject = reject;
       });
+      // A rejection can come when no turn waits on readiness (a turn throttled
+      // by the budget returns before it awaits), and main.ts shuts the process
+      // down on an unhandled rejection. Each waiting turn still gets the
+      // rejection through its own await.
+      void this.providerReadyPromise.catch(() => undefined);
     }
 
-    // Codex app-server: send initialize + thread/start after spawn
+    // Codex app-server: send initialize, then thread/resume for a stored
+    // thread or thread/start for a new one.
     if (this.provider === 'codex-cli') {
       this.codexThreadId = null;
       this.codexRequestSeq = 0;
+      this.codexResumeRequestId = null;
+      this.codexResumeStoredThreadId = null;
+      this.codexAbandonedThreadId = null;
       this.sendCodexRequest(child, 'initialize', {
         clientInfo: { name: 'WhatSoup', title: null, version: '1.0.0' },
         capabilities: { experimentalApi: true },
       });
-      const threadStartParams: Record<string, unknown> = {
-        cwd,
-        approvalPolicy: 'never' as const,
-        sandbox: 'danger-full-access' as const,
-        persistExtendedHistory: true,
-        ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
-      };
-      // Resume: if a stored thread ID was provided, include it in thread/start
-      // so the app-server resumes the existing conversation history.
       if (resumeSessionId) {
-        threadStartParams.threadId = resumeSessionId;
-        log.info({ chatJid: this.chatJid, resumeThreadId: resumeSessionId }, 'codex: attempting thread resume');
-      }
-      const threadStartId = this.sendCodexRequest(child, 'thread/start', threadStartParams);
-      if (resumeSessionId) {
-        this.codexResumeThreadStartReqId = threadStartId;
+        // Observed on codex-cli 0.153.1: the app-server ignores a threadId
+        // inside thread/start and starts a new thread without an error; only
+        // thread/resume loads the stored one. excludeTurns keeps the whole
+        // history out of the response line, which could otherwise pass
+        // MAX_STDOUT_LINE_BYTES and be dropped.
+        this.codexResumeStoredThreadId = resumeSessionId;
+        this.codexResumeRequestId = this.sendCodexRequest(child, 'thread/resume', {
+          threadId: resumeSessionId,
+          cwd,
+          approvalPolicy: 'never' as const,
+          sandbox: 'danger-full-access' as const,
+          excludeTurns: true,
+          ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
+        });
+        log.info({ chatJid: this.chatJid, storedThreadId: resumeSessionId }, 'codex: attempting thread resume');
+      } else {
+        this.sendCodexRequest(child, 'thread/start', codexThreadStartParams(cwd, systemPrompt));
       }
     }
 
@@ -3261,65 +3500,33 @@ export class SessionManager {
         ) return;
         // Codex app-server: intercept server-initiated requests (approval callbacks)
         // before they reach the parser. These have both 'id' and 'method'.
-        if (this.provider === 'codex-cli' && line[0] === '{' && line.includes('"jsonrpc"')) {
+        // While a thread/resume is pending, lines without a jsonrpc field are
+        // parsed here too: the app-server may omit that field on the wire.
+        if (
+          this.provider === 'codex-cli'
+          && line[0] === '{'
+          && (line.includes('"jsonrpc"') || this.codexResumeRequestId !== null)
+        ) {
           try {
             const msg = JSON.parse(line) as Record<string, unknown>;
             if (msg['jsonrpc'] === '2.0' && msg['id'] !== undefined && typeof msg['method'] === 'string') {
               this.handleCodexServerRequest(msg);
               continue;
             }
-            // Detect error response to a resume thread/start request.
-            // When the app-server rejects a threadId, it returns an error
-            // response instead of a result — clear the stale ID and retry fresh.
+            // Only the response to the pending thread/resume decides whether
+            // the stored thread was resumed. It is matched by its id alone,
+            // with or without the jsonrpc field. A resumed thread falls through
+            // to the parser, whose init event stores the id and resolves
+            // readiness.
             if (
-              msg['jsonrpc'] === '2.0' &&
               msg['id'] !== undefined &&
-              msg['error'] !== undefined &&
-              this.codexResumeThreadStartReqId !== null &&
-              String(msg['id']) === this.codexResumeThreadStartReqId
+              typeof msg['method'] !== 'string' &&
+              this.codexResumeRequestId !== null &&
+              String(msg['id']) === this.codexResumeRequestId
             ) {
-              const errorObj = msg['error'] as Record<string, unknown>;
-              const errorMsg = typeof errorObj === 'object' && errorObj !== null
-                ? String((errorObj as Record<string, unknown>)['message'] ?? 'unknown')
-                : String(errorObj);
-              if (isHostWorkAdmissionEnabled()) {
-                // A host-admitted child must resume its exact thread or close;
-                // a silent fresh thread would drop the conversation history.
-                const failedSessionId = this.resumeAttemptId ?? this.sessionId;
-                const failedRowId = this.dbRowId;
-                const resumeError = new Error('HOST_WORK_ADMISSION_CODEX_RESUME_REJECTED');
-                this.codexResumeThreadStartReqId = null;
-                this.providerReadyReject?.(resumeError);
-                this.providerReadyResolve = null;
-                this.providerReadyReject = null;
-                try {
-                  this.closeDurableFailureLifecycle(failedSessionId, failedRowId, 'resume_failed');
-                } catch (closeErr) {
-                  log.error({ err: closeErr, chatJid: this.chatJid, reqId: msg['id'] }, 'codex: failed to close rejected host-admission resume');
-                }
-                void this.shutdown(false).catch((shutdownErr: unknown) => {
-                  log.error({ err: shutdownErr, chatJid: this.chatJid, reqId: msg['id'] }, 'codex: rejected host-admission resume cleanup failed');
-                });
-                log.warn({ chatJid: this.chatJid, reqId: msg['id'], error: errorMsg }, 'codex: host-admission thread resume rejected — session closed');
-                return;
-              }
-              log.warn({ chatJid: this.chatJid, reqId: msg['id'], error: errorMsg }, 'codex: thread resume rejected — retrying with fresh thread');
-              this.codexResumeThreadStartReqId = null;
-              // Clear the stale thread ID so it won't be retried again
-              if (this.dbRowId !== null) {
-                updateSessionId(this.db, this.dbRowId, '');
-              }
-              // Send a fresh thread/start without threadId. It carries this
-              // spawn's composed prompt: the persistent branch never assigns
-              // this.systemPrompt, so that field would be empty or stale.
-              this.sendCodexRequest(child, 'thread/start', {
-                cwd: this.admitConfiguredCwd(),
-                approvalPolicy: 'never' as const,
-                sandbox: 'danger-full-access' as const,
-                persistExtendedHistory: true,
-                ...(systemPrompt ? { baseInstructions: systemPrompt } : {}),
-              });
-              continue;
+              const outcome = this.handleCodexResumeResponse(child, msg, systemPrompt);
+              if (outcome === 'closed') return;
+              if (outcome === 'restarted') continue;
             }
           } catch {
             // Intentional: messages that cannot be intercepted continue through
@@ -4112,6 +4319,7 @@ export class SessionManager {
 
     let persistentTurnChild: ReturnType<typeof spawn> | null = null;
     let persistentTurnGeneration: SessionGenerationIdentity | null = null;
+    let persistentTurnRowId: number | null = null;
     if (this.isSpawnPerTurn) {
       // Clear any partial JSON from the previous turn before spawning a new process.
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
@@ -4709,6 +4917,9 @@ export class SessionManager {
         throw err;
       }
 
+      // The row this write belongs to. By the time the write settles, a
+      // superseding generation may own this.dbRowId.
+      persistentTurnRowId = this.dbRowId;
       let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
       try {
         await Promise.race([
@@ -4744,15 +4955,22 @@ export class SessionManager {
       }
     }
 
+    const turnRowId = persistentTurnChild === null ? this.dbRowId : persistentTurnRowId;
     if (
       persistentTurnChild !== null &&
       !this.isCurrentPersistentChild(persistentTurnChild, persistentTurnGeneration)
     ) {
+      // The write succeeded, so the provider may hold this turn. Count it on
+      // its own row: a resume of that row reads the count to decide whether a
+      // missing history was lost.
+      if (turnRowId !== null) {
+        incrementMessageCount(this.db, turnRowId);
+      }
       throw new Error('Session generation was superseded before turn completion.');
     }
 
-    if (this.dbRowId !== null) {
-      incrementMessageCount(this.db, this.dbRowId);
+    if (turnRowId !== null) {
+      incrementMessageCount(this.db, turnRowId);
     }
     this.clearTurnWatchdog(); // clear any previous watchdog before arming a new one
     this.armWatchdog();
@@ -5160,7 +5378,9 @@ export class SessionManager {
     this.messageCount = 0;
     this.lastMessageAt = null;
     this.codexThreadId = null;
-    this.codexResumeThreadStartReqId = null;
+    this.codexResumeRequestId = null;
+    this.codexResumeStoredThreadId = null;
+    this.codexAbandonedThreadId = null;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
   }

@@ -156,6 +156,12 @@ import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { SessionManager } from '../../../src/runtimes/agent/session.ts';
+import {
+  NO_CHECKPOINT_ADOPTION,
+  lazyCheckpointAdoption,
+  spawnForAdoption,
+} from '../../../src/runtimes/agent/checkpoint-adoption.ts';
+import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 import { ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 
@@ -286,6 +292,49 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(rows().filter((r) => (r as { workspace_key: string }).workspace_key === SCHEDULED))
         .toEqual(before.filter((r) => (r as { workspace_key: string }).workspace_key === SCHEDULED));
+    });
+  });
+
+  // The lazy gate has no provider branch: a Codex row is chosen by the same
+  // checkpoint and row checks, and only its spawnSession(threadId, rowId) call
+  // reaches the session's thread/resume (covered in session.test.ts).
+  describe('codex-cli: the lazy gate hands the stored thread id to spawnSession', () => {
+    const CODEX_THREAD = '019a0000-0000-7000-8000-00000000c0de';
+    const codexManager = {
+      getDbRowId: () => null,
+      getProviderId: () => 'codex-cli',
+      getStatus: () => ({ startedAt: null, sessionId: null }),
+    };
+    function insertCodexRow(status: string): number {
+      const info = db.raw.prepare(`INSERT INTO agent_sessions(session_id,claude_pid,started_in_directory,chat_jid,workspace_key,started_at,status,provider)
+        VALUES (?,0,'/fixture',?,?,datetime('now'),?,'codex-cli')`).run(CODEX_THREAD, JID, PHONE, status);
+      return Number(info.lastInsertRowid);
+    }
+
+    it('resumes the chat\'s suspended Codex row with its stored thread id', async () => {
+      // Characterization: this also passes before the Codex thread/resume
+      // change. It proves the lazy gate reaches spawnSession(threadId, rowId)
+      // for codex-cli; it does not test the resume change itself.
+      const rowId = insertCodexRow('suspended');
+      engine.upsertSessionCheckpoint(PHONE, { sessionId: CODEX_THREAD, sessionStatus: 'suspended' });
+
+      const adoption = await lazyCheckpointAdoption(db, engine, codexManager, PHONE);
+      expect(adoption).toEqual({ kind: 'resume', rowId, sessionId: CODEX_THREAD, recoveredOwn: false });
+      const spawnSession = vi.fn(async (_threadId?: string, _rowId?: number) => {});
+      await expect(spawnForAdoption({ spawnSession }, adoption, vi.fn())).resolves.toEqual(adoption);
+      expect(spawnSession).toHaveBeenCalledExactlyOnceWith(CODEX_THREAD, rowId);
+    });
+
+    it('starts fresh when the checkpoint is ended, as the startup group-chat skip leaves it', async () => {
+      // Characterization: this also passes before the Codex thread/resume change.
+      insertCodexRow('suspended');
+      engine.upsertSessionCheckpoint(PHONE, { sessionId: CODEX_THREAD, sessionStatus: 'ended' });
+
+      const adoption = await lazyCheckpointAdoption(db, engine, codexManager, PHONE);
+      expect(adoption).toBe(NO_CHECKPOINT_ADOPTION);
+      const spawnSession = vi.fn(async (_threadId?: string, _rowId?: number) => {});
+      await spawnForAdoption({ spawnSession }, adoption, vi.fn());
+      expect(spawnSession).toHaveBeenCalledExactlyOnceWith();
     });
   });
 
@@ -1020,5 +1069,75 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       resumeFailedCallback(session)?.();
       expect(handle).toHaveBeenCalledExactlyOnceWith(JID, { mapKey: JID, session });
     });
+  });
+});
+
+// The startup gate (runtime.start) has no provider branch either: a DM
+// checkpoint with a per_chat completed identity under one hour old hands its
+// stored Codex thread id to a codex-cli session's spawnSession.
+describe('codex-cli proactive per_chat resume on startup', () => {
+  const CODEX_THREAD = '019a0000-0000-7000-8000-00000000beef';
+  let db: Database;
+  let engine: DurabilityEngine;
+  let runtime: AgentRuntime | undefined;
+  let messenger: Messenger;
+  const savedProvider = mockConfig.agentProvider;
+
+  beforeEach(() => {
+    vi.clearAllMocks(); vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn(() => { throw new Error('external fetch forbidden'); }));
+    db = new Database(':memory:'); db.open(); engine = new DurabilityEngine(db);
+    ensureAgentSchema(db);
+    messenger = { sendMessage: vi.fn(async () => { throw new Error('transport send forbidden'); }), sendMedia: vi.fn(async () => { throw new Error('transport media forbidden'); }) };
+    mockConfig.agentProvider = 'codex-cli';
+    mockConfig.proactiveResumeOnStartup = true;
+  });
+  afterEach(async () => {
+    const failures: unknown[] = [];
+    const step = async (run: () => unknown): Promise<void> => {
+      try { await run(); } catch (err) { failures.push(err); }
+    };
+    await step(async () => { if (runtime) await runtime.shutdown(); });
+    runtime = undefined;
+    await step(() => {
+      expect(spawn).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+      expect(messenger.sendMessage).not.toHaveBeenCalled(); expect(messenger.sendMedia).not.toHaveBeenCalled();
+    });
+    for (const cleanup of [() => db.close(), () => vi.useRealTimers(), () => vi.unstubAllGlobals(), () => vi.restoreAllMocks()]) {
+      await step(cleanup);
+    }
+    mockConfig.agentProvider = savedProvider;
+    mockConfig.proactiveResumeOnStartup = false;
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'codex proactive resume cleanup failed in several steps');
+  });
+
+  it('spawns the DM\'s codex-cli session with the stored thread id', async () => {
+    // Characterization: this also passes before the Codex thread/resume
+    // change. It proves the startup gate reaches spawnSession(threadId) for
+    // codex-cli; it does not test the resume change itself.
+    db.raw.prepare(`INSERT INTO agent_sessions(session_id,claude_pid,started_in_directory,chat_jid,workspace_key,started_at,status,provider)
+      VALUES (?,0,'/fixture',?,?,datetime('now'),'suspended','codex-cli')`).run(CODEX_THREAD, JID, PHONE);
+    const seq = engine.journalInbound('fixture-codex-proactive', PHONE, JID, 'agent');
+    engine.upsertSessionCheckpoint(PHONE, {
+      sessionId: CODEX_THREAD, sessionStatus: 'suspended', lastInboundSeq: seq,
+      completedInboundSeq: seq, completedDeliveryJid: JID, completedDeliveryNamespace: 's.whatsapp.net',
+      completedScope: 'per_chat', completedLogicalTurnId: 'turn-codex-proactive',
+      completedManagerId: 'manager-codex-proactive', completedGeneration: 1,
+    });
+    const spawnSpy = vi.spyOn(SessionManager.prototype, 'spawnSession').mockResolvedValue(undefined);
+    const cwd = await ownedRuntimeCwd('codex-proactive-resume');
+    runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat', cwd });
+    installFakePerChatMcpSocketManager(runtime); runtime.setDurability(engine);
+    const fallback = (runtime as unknown as RuntimeView).fallback;
+    vi.spyOn(fallback, 'schedulePrimaryModelUsabilityProbe').mockImplementation(() => {});
+    vi.spyOn(fallback, 'scheduleNextPeriodicUsabilityProbe').mockImplementation(() => {});
+    vi.spyOn(fallback, 'startChainCanary').mockImplementation(() => {});
+
+    await runtime.start();
+
+    expect(spawnSpy).toHaveBeenCalledExactlyOnceWith(CODEX_THREAD);
+    const resumed = spawnSpy.mock.contexts[0] as SessionManager;
+    expect(resumed.getProviderId()).toBe('codex-cli');
   });
 });
