@@ -3762,7 +3762,12 @@ state, not a registry publication or deployment acceptance.
 The verifier caps each JSON input at 32 MiB before parsing, including the archive root index,
 nested index, image config, manifests, and attestation statements. Descriptor sizes and
 bounded extraction enforce that cap before decoding archive JSON. Binary image layers keep
-their separate 96 MiB entry limit. It caps the OCI archive and aggregate
+their separate 96 MiB entry limit. Each layer is also streamed through its declared
+decompressor (none, gzip or zstd) in a child process, and the ordered SHA-256 values of the
+uncompressed layers must equal the image config's `rootfs.diff_ids` (type `layers`, same count,
+same order); a missing list, another type or an undecodable layer fails. The config digest, and
+so the loaded image ID the runtime step compares, therefore stands for the archived filesystem.
+A layer may expand to at most 4 GiB; memory use stays constant. It caps the OCI archive and aggregate
 extracted bytes at 2 GiB, each extracted entry at 96 MiB, each descriptor list at 128, and all
 extraction attempts at 256. A shared 120-second monotonic deadline bounds archive traversal
 and hashing; each tar process also has a 30-second cap within the remaining budget. The

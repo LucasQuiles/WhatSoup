@@ -3,11 +3,12 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, constants, fstatSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
 import { buildkitImageDigest, isBuildkitImageDependency } from './lib/buildkit-image-dependency.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
+import type { LayerDigestResult } from './lib/oci-layer-digest.ts';
 
 interface ContainerInputPolicy {
   schemaVersion: number;
@@ -153,6 +154,9 @@ function sha256(contents: Buffer): string {
 export const EVIDENCE_FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const JSON_MAX_BYTES = 32 * 1024 * 1024;
 const OCI_ENTRY_MAX_BYTES = 96 * 1024 * 1024;
+// Layers are decompressed as a stream, so this bounds work, not memory.
+const OCI_LAYER_UNCOMPRESSED_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+const LAYER_DIGEST_WORKER = fileURLToPath(new URL('./lib/oci-layer-digest.ts', import.meta.url));
 const DESCRIPTOR_LIST_MAX = 128;
 
 export interface OciVerificationLimits { maxBytes: number; maxEntries: number; timeoutMs: number }
@@ -379,6 +383,42 @@ function readVerifiedDescriptorBlob(archivePath: string, descriptor: OciDescript
   return bytes;
 }
 
+/**
+ * Verifies a layer blob's size and SHA-256 like any other descriptor and returns the SHA-256 of its
+ * uncompressed form, which the image config's rootfs.diff_ids must name. A child process streams the
+ * blob through the decompressor, so no layer is buffered whole.
+ */
+function verifyLayerBlob(archivePath: string, descriptor: OciDescriptor, label: string, budget: VerificationBudget): string {
+  const digest = descriptorDigest(descriptor, label);
+  const size = descriptorSize(descriptor, label);
+  if (size > OCI_ENTRY_MAX_BYTES) throw new Error(`${label} exceeds ${OCI_ENTRY_MAX_BYTES} byte limit`);
+  if (size > budget.remainingBytes()) throw new Error('OCI aggregate byte limit exceeded');
+  const entry = `blobs/sha256/${digest.slice('sha256:'.length)}`;
+  for (const candidate of [entry, `./${entry}`]) {
+    if (++budget.entries > budget.limits.maxEntries) throw new Error('OCI extraction count limit exceeded');
+    const maxBytes = Math.min(OCI_ENTRY_MAX_BYTES, budget.remainingBytes());
+    const output = execFileSync(process.execPath, [
+      '--experimental-strip-types', LAYER_DIGEST_WORKER,
+      archivePath, candidate, descriptor.mediaType as string, String(maxBytes), String(OCI_LAYER_UNCOMPRESSED_MAX_BYTES),
+    ], { stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(30_000, budget.remainingTime()), maxBuffer: 64 * 1024, encoding: 'utf8' });
+    budget.remainingTime();
+    const result = parseJsonBytes<LayerDigestResult>(Buffer.from(output, 'utf8'), `${label} digest result`);
+    if (!result.found) continue;
+    budget.bytes += result.compressedSize;
+    if (result.failure === 'compressed-limit') throw new Error(`OCI archive entry exceeds ${maxBytes} byte limit: ${entry}`);
+    if (result.failure === 'tar') throw new Error(`OCI archive entry could not be read: ${entry}`);
+    if (result.compressedSize !== size) throw new Error(`OCI descriptor size does not match blob: ${label}`);
+    if (result.compressedDigest !== digest) throw new Error(`OCI descriptor SHA-256 does not match blob: ${label}`);
+    if (result.failure === 'decode') throw new Error(`${label} cannot be decompressed as ${String(descriptor.mediaType)}`);
+    if (result.failure === 'uncompressed-limit') throw new Error(`${label} exceeds ${OCI_LAYER_UNCOMPRESSED_MAX_BYTES} uncompressed byte limit`);
+    if (typeof result.uncompressedDigest !== 'string' || !SHA256_PATTERN.test(result.uncompressedDigest)) {
+      throw new Error(`${label} has no uncompressed digest`);
+    }
+    return result.uncompressedDigest;
+  }
+  throw new Error(`OCI image archive is missing ${entry}: ${archivePath}`);
+}
+
 function assertStatementSubject(statement: InTotoStatement, imageDigest: string): void {
   if (statement._type !== IN_TOTO_STATEMENT_V1 || !Array.isArray(statement.subject) || statement.subject.length === 0) {
     throw new Error('OCI image archive attestation layer is not a complete in-toto Statement v1');
@@ -587,10 +627,22 @@ function verifyArchive(imagePath: string, expectedOutputDigest: string,
   if (config.os !== 'linux' || config.architecture !== 'amd64') throw new Error('runnable image config does not match linux/amd64');
   if (!Array.isArray(manifest.layers) || !manifest.layers.every(isRecord)) throw new Error('runnable image manifest has invalid layer descriptors');
   if (manifest.layers.length > DESCRIPTOR_LIST_MAX) throw new Error('runnable image exceeds OCI descriptor count limit');
-  for (const layer of manifest.layers) {
-    if (!OCI_IMAGE_LAYER_MEDIA_TYPES.has(layer.mediaType as string)) throw new Error('runnable image layer descriptor has an unexpected media type');
-    readVerifiedDescriptorBlob(imagePath, layer as OciDescriptor, 'runnable image layer descriptor', budget);
+  // The config names the uncompressed layers in order (rootfs.diff_ids). Binding them to the archived
+  // blobs makes the config digest, and so the loaded image ID, stand for this filesystem.
+  const rootfs = isRecord(config.rootfs) ? config.rootfs : undefined;
+  if (!rootfs || rootfs.type !== 'layers' || !Array.isArray(rootfs.diff_ids)) {
+    throw new Error('runnable image config must declare a layers rootfs with diff_ids');
   }
+  const diffIds: unknown[] = rootfs.diff_ids;
+  if (diffIds.length !== manifest.layers.length) throw new Error('runnable image config diff_ids do not match the archived layers');
+  manifest.layers.forEach((layer, index) => {
+    if (!OCI_IMAGE_LAYER_MEDIA_TYPES.has(layer.mediaType as string)) throw new Error('runnable image layer descriptor has an unexpected media type');
+    const diffId = diffIds[index];
+    if (typeof diffId !== 'string' || !SHA256_PATTERN.test(diffId)) throw new Error('runnable image config has an invalid diff_id');
+    if (verifyLayerBlob(imagePath, layer as OciDescriptor, 'runnable image layer descriptor', budget) !== diffId) {
+      throw new Error(`runnable image config diff_ids do not match the archived layers (layer ${index})`);
+    }
+  });
   if (expectedOutputDigest !== imageDigest && expectedOutputDigest !== imageIndexDigest) throw new Error('build metadata output digest does not match the verified OCI output');
   if (attestationDescriptors.length === 0) throw new Error(`OCI image archive has no BuildKit attestation manifest: ${imagePath}`);
 
