@@ -359,10 +359,11 @@ describe('bot-errors-dispatcher', () => {
     const queued = JSON.parse(readFileSync(join(tmpRoot, 'outbox', queuedFile), 'utf8')) as {
       delivery: Record<string, unknown>;
     };
+    // Missing settings are "not ready": held in the outbox, not counted as an attempt.
     expect(queued.delivery).toMatchObject({
-      incidentAuthorityAttempts: 1,
-      incidentAuthorityStatus: 'unavailable',
-      incidentAuthorityError: 'incident_authority_unavailable',
+      incidentAuthorityAttempts: 0,
+      incidentAuthorityStatus: 'not_ready',
+      incidentAuthorityError: 'incident_authority_not_configured',
     });
   });
 
