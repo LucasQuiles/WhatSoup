@@ -185,6 +185,7 @@ def _assert_held_in_outbox(paths, reason: str, count: int = 1) -> None:
         ("credential_rejected", "authority_credential_rejected"),
         ("scope_denied", "authority_scope_denied"),
         ("rate_limited", "incident_authority_rate_limited"),
+        ("store_unavailable", "incident_authority_unavailable"),
     ],
 )
 def test_authority_not_ready_keeps_the_event_in_the_outbox(tmp_path, credential_root, case, reason):
@@ -205,7 +206,12 @@ def test_authority_not_ready_keeps_the_event_in_the_outbox(tmp_path, credential_
             "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(credential_root / "not-enrolled"),
         }
     elif case != "not_configured":
-        status = {"credential_rejected": 401, "scope_denied": 403, "rate_limited": 429}[case]
+        status = {
+            "credential_rejected": 401,
+            "scope_denied": 403,
+            "rate_limited": 429,
+            "store_unavailable": 503,
+        }[case]
         env = {
             "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _LOOPBACK_AUTHORITY,
             "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(_write_credential(credential_root)),
@@ -274,6 +280,36 @@ def test_a_rate_refusal_stops_asking_for_the_rest_of_the_cycle(tmp_path, credent
         assert len(requests) == 2, "the next cycle asks again"
 
     _assert_held_in_outbox(paths, "incident_authority_rate_limited", count=3)
+
+
+def test_an_outage_longer_than_the_attempt_cap_loses_no_event(tmp_path, credential_root):
+    # A cap of two attempts: under the old rule the third cycle of a fleet
+    # outage dead-lettered every waiting event.
+    os.environ["BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS"] = "2"
+    mod = _load(tmp_path / "long-outage")
+    paths = mod.setup_dirs()
+    for index in range(2):
+        _seed_outbox(paths, _event(f"evt-outage-{index}"))
+    requests: list = []
+    env = {
+        "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _LOOPBACK_AUTHORITY,
+        "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(_write_credential(credential_root)),
+    }
+    with patch.dict(os.environ, env), patch.object(
+        mod, "IncidentAuthorityClient", _authority_answering(mod, 503, requests)
+    ):
+        for _cycle in range(5):
+            # Each cycle finds the events due again, as the backoff expires.
+            for path in paths["outbox"].glob("*.json"):
+                record = json.loads(path.read_text())
+                record["delivery"]["nextAttemptAtEpoch"] = 0
+                path.write_text(json.dumps(record))
+            mod.begin_incident_authority_cycle()
+            counts = mod.authorize_ready_events(paths)
+            assert counts["not_ready"] == 2
+            assert counts["unavailable"] == 0
+    assert len(requests) == 10
+    _assert_held_in_outbox(paths, "incident_authority_unavailable", count=2)
 
 
 def test_the_not_ready_state_keeps_its_first_time_and_clears_on_acceptance(tmp_path):

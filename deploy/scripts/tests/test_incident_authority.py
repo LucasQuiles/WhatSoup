@@ -281,10 +281,19 @@ def test_refused_credential_scope_and_rate_are_not_ready(credential: Path):
             client.accept(CLAIM)
 
 
-def test_store_failure_stays_plain_unavailable(credential: Path):
-    client, _ = _client(
-        lambda _body: (503, {"Content-Type": "application/json"}, b"{}"), credential
-    )
-    with pytest.raises(AuthorityUnavailable) as raised:
+def test_store_and_transport_failures_are_not_ready(credential: Path):
+    # An outage of the authority holds the work; it must never dead-letter it.
+    for status_code in (500, 503, 507):
+        client, _ = _client(
+            lambda _body, code=status_code: (code, {"Content-Type": "application/json"}, b"{}"),
+            credential,
+        )
+        with pytest.raises(AuthorityNotReady, match=r"^incident_authority_unavailable$"):
+            client.accept(CLAIM)
+
+    def _refused(_body):
+        raise ConnectionRefusedError("authority down")
+
+    client, _ = _client(_refused, credential)
+    with pytest.raises(AuthorityNotReady, match=r"^incident_authority_unavailable$"):
         client.accept(CLAIM)
-    assert not isinstance(raised.value, AuthorityNotReady)
