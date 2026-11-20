@@ -13,6 +13,24 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const GUARD = path.join(REPO_ROOT, 'scripts/security-boundary-guard.ts');
 
+  it('passes the live tree with all required remote-memory boundaries present', () => {
+    const result = evaluateSecurityBoundaryGuard(REPO_ROOT);
+    expect(result.status).toBe('pass');
+    expect(result.scan.filesExamined).toBeGreaterThan(100);
+    expect(result.scan.counts).toEqual({
+      incidentAuthorityPreflights: 1,
+      dispatcherAuthorizedSends: 7,
+      dispatcherAuthorizedEmails: 3,
+      ownerRouteAuthorityChecks: 2,
+      qAuthorityChecks: 1,
+      phaseRouteInstallations: 1,
+      dispatcherCredentialReads: 1,
+      qCredentialReads: 1,
+      launchdAuthorityBindings: 2,
+    });
+    expect(result.scan.findings).toEqual([]);
+  });
+
 describe('security boundary guard — IncidentStore authority', () => {
   it('blocks a direct dispatcher notification bypass', () => {
     const findings = scanFileForSecurityBoundaryViolations(
@@ -133,36 +151,17 @@ describe('security boundary guard — IncidentStore authority', () => {
       code: 'security.incident-authority.dry-config-in-service',
     }));
   });
-
-  it('passes the live tree with every required authority boundary present', () => {
-    const result = evaluateSecurityBoundaryGuard(REPO_ROOT);
-    expect(result.scan.findings).toEqual([]);
-    expect(result.status).toBe('pass');
-    expect(result.scan.filesExamined).toBeGreaterThan(4);
-    expect(result.scan.counts).toEqual({
-      incidentAuthorityPreflights: 1,
-      dispatcherAuthorizedSends: 7,
-      dispatcherAuthorizedEmails: 3,
-      ownerRouteAuthorityChecks: 2,
-      qAuthorityChecks: 1,
-      phaseRouteInstallations: 1,
-      dispatcherCredentialReads: 1,
-      qCredentialReads: 1,
-      launchdAuthorityBindings: 2,
-    });
-  });
 });
 
 describe('security boundary guard — fail-closed inventory', () => {
   const temps: string[] = [];
   afterAll(() => temps.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
 
-  it('is inconclusive when no operational files can be examined', () => {
+  it('is inconclusive when no source files can be examined', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'security-boundary-empty-'));
     temps.push(root);
     execFileSync('git', ['init', '-q'], { cwd: root });
     mkdirSync(path.join(root, 'src'), { recursive: true });
-    mkdirSync(path.join(root, 'deploy'), { recursive: true });
     writeFileSync(path.join(root, 'package.json'), '{"name":"empty"}\n');
 
     const run = spawnSync(process.execPath, [

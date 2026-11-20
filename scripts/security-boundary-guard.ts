@@ -2,8 +2,8 @@
 /**
  * Mechanical security-boundary invariants that must hold independently of a
  * reviewer's memory. Each rule identifies a concrete bypass shape, scans the
- * complete operational inventory, and fails closed when that inventory is
- * unreadable or when a required canonical boundary disappears.
+ * complete production source inventory, and fails closed when that inventory
+ * is unreadable or when a required canonical boundary disappears.
  *
  * BOT ERRORS rules:
  * - raw notification and e-mail transports stay behind the authority wrapper;
@@ -30,6 +30,7 @@ import {
 } from './lib/guard-core.ts';
 
 export type SecurityBoundaryFindingCode =
+  | 'security.remote-memory.canonical-count-drift'
   | 'security.incident-authority.raw-dispatch-send'
   | 'security.incident-authority.raw-dispatch-email'
   | 'security.incident-authority.raw-owner-send'
@@ -76,11 +77,7 @@ export interface SecurityBoundaryEvaluation {
   scan: SecurityBoundaryScan;
 }
 
-const DISPATCHER = 'deploy/scripts/bot-errors-dispatcher.py';
-const Q_LOOP = 'deploy/scripts/bot-errors-q-loop.py';
-const OWNER_ROUTE = 'deploy/scripts/lib/owner_route.py';
-const LAUNCHD_INSTALLER = 'deploy/scripts/install-bot-errors-launchd.sh';
-const FLEET_SERVER = 'src/fleet/index.ts';
+const TS_EXT_RE = /\.ts$/;
 
 function emptyCounts(): SecurityBoundaryCounts {
   return {
@@ -102,10 +99,6 @@ export function scanFileForSecurityBoundaryViolations(
   counts: SecurityBoundaryCounts = emptyCounts(),
 ): SecurityBoundaryFinding[] {
   const file = relPath.split(path.sep).join('/');
-  if (file === FLEET_SERVER) {
-    counts.phaseRouteInstallations += (content.match(/pathname === '\/api\/incident-phases'/g) ?? []).length;
-    return [];
-  }
   if (
     file.endsWith('.py')
     || file.endsWith('.service')
@@ -114,7 +107,8 @@ export function scanFileForSecurityBoundaryViolations(
   ) {
     return scanOperationalSecurityBoundaries(file, content, counts);
   }
-  return [];
+  const findings: SecurityBoundaryFinding[] = [];
+  return findings;
 }
 
 function scanOperationalSecurityBoundaries(
@@ -129,19 +123,19 @@ function scanOperationalSecurityBoundaries(
     findings.push({ code, file, line, detail });
   };
   const addRawTransportReference = (name: string, line: number) => {
-    if (file === DISPATCHER && name === 'send_whatsapp') {
+    if (file === 'deploy/scripts/bot-errors-dispatcher.py' && name === 'send_whatsapp') {
       add('security.incident-authority.raw-dispatch-send', line,
         'dispatcher WhatsApp transport cannot be aliased or dynamically resolved');
-    } else if (file === DISPATCHER && name === 'email_fallback') {
+    } else if (file === 'deploy/scripts/bot-errors-dispatcher.py' && name === 'email_fallback') {
       add('security.incident-authority.raw-dispatch-email', line,
         'dispatcher e-mail transport cannot be aliased or dynamically resolved');
-    } else if (file === Q_LOOP && name === 'rpc_call') {
+    } else if (file === 'deploy/scripts/bot-errors-q-loop.py' && name === 'rpc_call') {
       add('security.incident-authority.raw-q-send', line,
         'Q-loop RPC transport cannot be aliased or dynamically resolved');
-    } else if (file === OWNER_ROUTE && name === 'json_rpc_call') {
+    } else if (file === 'deploy/scripts/lib/owner_route.py' && name === 'json_rpc_call') {
       add('security.incident-authority.raw-owner-send', line,
         'owner-route WhatsApp transport cannot be aliased or dynamically resolved');
-    } else if (file === OWNER_ROUTE && name === 'email_fallback') {
+    } else if (file === 'deploy/scripts/lib/owner_route.py' && name === 'email_fallback') {
       add('security.incident-authority.raw-owner-email', line,
         'owner-route e-mail transport cannot be aliased or dynamically resolved');
     }
@@ -154,7 +148,7 @@ function scanOperationalSecurityBoundaries(
     if (alias && alias[1] !== alias[2]) addRawTransportReference(alias[2]!, lineNumber);
     const dynamic = /(?:\b(?:globals|locals)\(\)\s*\[|\bgetattr\([^,]+,)\s*["'](send_whatsapp|email_fallback|rpc_call|json_rpc_call)["']/.exec(line);
     if (dynamic) addRawTransportReference(dynamic[1]!, lineNumber);
-    if (file === DISPATCHER) {
+    if (file === 'deploy/scripts/bot-errors-dispatcher.py') {
       if (/\bsend_authorized_whatsapp\s*\(/.test(line) && !definition) {
         counts.dispatcherAuthorizedSends += 1;
       }
@@ -176,7 +170,7 @@ function scanOperationalSecurityBoundaries(
           'dispatcher e-mail effects must pass through send_authorized_email');
       }
     }
-    if (file === Q_LOOP) {
+    if (file === 'deploy/scripts/bot-errors-q-loop.py') {
       if (/\b_authorize_notification\s*\(/.test(line) && !definition) counts.qAuthorityChecks += 1;
       if (/BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE/.test(line)) counts.qCredentialReads += 1;
       if (/\brpc_call\s*\(/.test(line) && !definition && currentFunction !== 'send_message') {
@@ -188,7 +182,7 @@ function scanOperationalSecurityBoundaries(
           'chat classification may record a receipt but cannot grant phase authority');
       }
     }
-    if (file === OWNER_ROUTE) {
+    if (file === 'deploy/scripts/lib/owner_route.py') {
       if (/\bgrant_from_record\s*\(/.test(line) && !definition) {
         counts.ownerRouteAuthorityChecks += 1;
       }
@@ -202,7 +196,7 @@ function scanOperationalSecurityBoundaries(
       }
     }
     if (
-      file === LAUNCHD_INSTALLER
+      file === 'deploy/scripts/install-bot-errors-launchd.sh'
       && /<key>BOT_ERRORS_(?:INCIDENT_AUTHORITY_URL|DISPATCHER_AUTHORITY_CREDENTIAL_FILE)<\/key>/.test(line)
     ) {
       counts.launchdAuthorityBindings += 1;
@@ -219,7 +213,7 @@ function scanOperationalSecurityBoundaries(
         'production service definitions must not enable test authority or notification seams');
     }
   }
-  if (file === DISPATCHER) {
+  if (file === 'deploy/scripts/bot-errors-dispatcher.py') {
     const runOnceStart = content.indexOf('\ndef run_once(');
     const runOnceEnd = runOnceStart < 0 ? -1 : content.indexOf('\ndef ', runOnceStart + 2);
     const runOnce = runOnceStart < 0
@@ -254,41 +248,33 @@ function scanOperationalSecurityBoundaries(
   return findings;
 }
 
-const EXPECTED_COUNTS: SecurityBoundaryCounts = {
-  incidentAuthorityPreflights: 1,
-  dispatcherAuthorizedSends: 7,
-  dispatcherAuthorizedEmails: 3,
-  ownerRouteAuthorityChecks: 2,
-  qAuthorityChecks: 1,
-  phaseRouteInstallations: 1,
-  dispatcherCredentialReads: 1,
-  qCredentialReads: 1,
-  launchdAuthorityBindings: 2,
-};
-
 function addCountFindings(scan: SecurityBoundaryScan): void {
-  for (const [name, value] of Object.entries(EXPECTED_COUNTS) as Array<[
+  const expected: SecurityBoundaryCounts = {
+    incidentAuthorityPreflights: 1,
+    dispatcherAuthorizedSends: 7,
+    dispatcherAuthorizedEmails: 3,
+    ownerRouteAuthorityChecks: 2,
+    qAuthorityChecks: 1,
+    phaseRouteInstallations: 1,
+    dispatcherCredentialReads: 1,
+    qCredentialReads: 1,
+    launchdAuthorityBindings: 2,
+  };
+  for (const [name, value] of Object.entries(expected) as Array<[
     keyof SecurityBoundaryCounts,
     number,
   ]>) {
     if (scan.counts[name] === value) continue;
     scan.findings.push({
-      code: 'security.incident-authority.canonical-count-drift',
-      file: 'deploy',
+      code: name.startsWith('incident') || name.startsWith('dispatcher') || name.startsWith('owner')
+        || name.startsWith('q') || name.startsWith('phase') || name.startsWith('launchd')
+        ? 'security.incident-authority.canonical-count-drift'
+        : 'security.remote-memory.canonical-count-drift',
+      file: 'src',
       line: 1,
       detail: `${name} expected ${value}, observed ${scan.counts[name]}`,
     });
   }
-}
-
-function isOperationalFile(file: string): boolean {
-  return file === DISPATCHER
-    || file === Q_LOOP
-    || file === OWNER_ROUTE
-    || file === LAUNCHD_INSTALLER
-    || file === FLEET_SERVER
-    || file.endsWith('.service')
-    || file.endsWith('.plist');
 }
 
 export function scanSecurityBoundaries(
@@ -298,7 +284,15 @@ export function scanSecurityBoundaries(
   const inventory = inventorySourceFiles({
     repoRoot: cwd,
     roots: ['src', 'deploy'],
-    includeFile: isOperationalFile,
+    includeFile: (file) => (
+      (TS_EXT_RE.test(file) && !file.endsWith('.test.ts'))
+      || file === 'deploy/scripts/bot-errors-dispatcher.py'
+      || file === 'deploy/scripts/bot-errors-q-loop.py'
+      || file === 'deploy/scripts/lib/owner_route.py'
+      || file === 'deploy/scripts/install-bot-errors-launchd.sh'
+      || file.endsWith('.service')
+      || file.endsWith('.plist')
+    ),
     excludeDirectory: (directory) => ['node_modules', '.git', 'dist'].includes(path.basename(directory)),
     fileSystem,
   });
@@ -306,6 +300,9 @@ export function scanSecurityBoundaries(
   const findings: SecurityBoundaryFinding[] = [];
   for (const file of inventory.files) {
     findings.push(...scanFileForSecurityBoundaryViolations(file.path, file.content, counts));
+    if (file.path === 'src/fleet/index.ts') {
+      counts.phaseRouteInstallations += (file.content.match(/pathname === '\/api\/incident-phases'/g) ?? []).length;
+    }
   }
   const scan: SecurityBoundaryScan = {
     findings,
@@ -367,13 +364,13 @@ function humanLines(evaluation: SecurityBoundaryEvaluation): string[] {
   const { scan } = evaluation;
   if (scan.scanIssueCount > 0 || scan.filesExamined === 0) {
     return [
-      `${TAG}: INCONCLUSIVE — operational inventory unavailable or empty; ` +
+      `${TAG}: INCONCLUSIVE — source inventory unavailable or empty; ` +
         'the security-boundary invariants were not certified.',
     ];
   }
   if (scan.findings.length === 0) {
     return [
-      `${TAG}: PASS — ${scan.filesExamined} file(s); ` +
+      `${TAG}: PASS — ${scan.filesExamined} source file(s); ` +
         `${scan.counts.incidentAuthorityPreflights} incident preflight, ` +
         `${scan.counts.ownerRouteAuthorityChecks} owner-route receipt checks, ` +
         `${scan.counts.phaseRouteInstallations} phase route.`,
