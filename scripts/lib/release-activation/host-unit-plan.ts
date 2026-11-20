@@ -71,6 +71,14 @@ const HOST_TIMER_LABELS = new Set(['com.whatsoup.harness-maintenance', 'com.what
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const INTERPRETER = /^(?:ba|z|da|k|fi)?sh$|^(?:env|node|nodejs|osascript|perl|ruby)$|^python(?:\d+(?:\.\d+)*)?$/;
 const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
+/**
+ * WhatSoup launchd jobs retired from the standard, each with the home-relative script it ran: no manifest entry and
+ * no template (docs/releases/2026-11-20-token-backup-job-retired.md). Planning refuses a host that still has one
+ * installed or loaded, by name and with the files to remove; it never loads, reloads or counts one as a member.
+ */
+const RETIRED_JOBS: ReadonlyMap<string, string> = new Map([
+  ['com.whatsoup.ms365-token-backup', path.join('.local', 'bin', 'ms365-token-backup')],
+]);
 
 function absolute(value: unknown): string | null {
   return typeof value === 'string' && path.isAbsolute(value) ? path.normalize(value).replace(/\/+$/, '') || '/' : null;
@@ -611,6 +619,11 @@ export async function buildHostUnitPlan(
   })();
   const unionLabels = new Set([...installedLabels, ...(inventory ?? []).map((entry) => entry.label)]);
   for (const label of unionLabels) {
+    const retiredScript = RETIRED_JOBS.get(label);
+    if (retiredScript !== undefined) {
+      check(`retired:${label}`, false, `retired from the standard; boot the job out if it is loaded, then remove ${path.join(launchAgentsDir, `${label}.plist`)} and ${path.join(os.homedir(), retiredScript)}`);
+      continue;
+    }
     // Each closed host auxiliary obtains its own exact loaded definition below:
     // the standard inventory intentionally filters external labels.
     if (declaration.hostAuxiliaries.some((auxiliary) => auxiliary.label === label) || declaration.outsideUnits.some((outsideUnit) => outsideUnit.label === label)) continue;
