@@ -1323,6 +1323,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(readLatestAuthBond()).toEqual(initialLatest);
 
     await vi.advanceTimersByTimeAsync(1);
+    // Drain: a capture started in a fake timer callback takes its first slice 1 ms later.
+    await vi.advanceTimersByTimeAsync(1);
     const refreshedLatest = readLatestAuthBond();
     expect(refreshedLatest.backupPath).not.toBe(initialLatest.backupPath);
     expect(refreshedLatest.reason).toBe('baileys-key-material-settled');
@@ -1360,6 +1362,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(scheduled).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(60_000);
+    // Drain: a capture started in a fake timer callback takes its first slice 1 ms later.
+    await vi.advanceTimersByTimeAsync(1);
     const firstSettled = readLatestAuthBond();
     expect(firstSettled.reason).toBe('baileys-key-material-settled');
 
@@ -1849,6 +1853,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       .map(event => event.note)).toEqual(['creds-update-settled', 'creds-update-settled']);
 
     await vi.advanceTimersByTimeAsync(60_000);
+    // Drain: a capture started in a fake timer callback takes its first slice 1 ms later.
+    await vi.advanceTimersByTimeAsync(1);
     const settled = readLatestAuthBond();
     expect(manager.getConnectionState().credentialLifecycle.recentEvents
       .map(event => `${event.event}:${event.note ?? ''}`)).toEqual(expect.arrayContaining([
@@ -2437,6 +2443,8 @@ describe('ConnectionManager — C8 auth-bond capture off the event loop', () => 
     writeFileSync(join(testAuthDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
     await vi.advanceTimersByTimeAsync(60_000);
+    // Drain: a capture started in a fake timer callback takes its first slice 1 ms later.
+    await vi.advanceTimersByTimeAsync(1);
     const firstSettled = readLatestAuthBond();
     expect(firstSettled.reason).toBe('baileys-key-material-settled');
 
@@ -2451,6 +2459,8 @@ describe('ConnectionManager — C8 auth-bond capture off the event loop', () => 
 
     // The floor ends five minutes after the first settled attempt.
     await vi.advanceTimersByTimeAsync(240_000);
+    // Drain: a capture started in a fake timer callback takes its first slice 1 ms later.
+    await vi.advanceTimersByTimeAsync(1);
     const rearmed = readLatestAuthBond();
     expect(rearmed.backupPath).not.toBe(firstSettled.backupPath);
     expect(rearmed.reason).toBe('baileys-key-material-settled');

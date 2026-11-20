@@ -206,6 +206,7 @@ async function establishRevokedGenerationWithBackup(): Promise<string> {
   const manager = new ConnectionManager();
   await manager.connect();
   await emit(openEvent());
+  await vi.advanceTimersByTimeAsync(0);
   const digest = computeCredentialTreeDigest(testAuthDir);
   if (!digest.ok) throw new Error('fixture digest unexpectedly failed');
   const latest = JSON.parse(
