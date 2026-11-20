@@ -1370,6 +1370,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     writeFileSync(join(testAuthDir, 'sender-key-c.json'), JSON.stringify({ keyData: 'c' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
     await vi.advanceTimersByTimeAsync(60_000);
+    // Drain: long enough for a capture started by the timer to finish all its attempts.
+    await vi.advanceTimersByTimeAsync(1_000);
 
     expect(readLatestAuthBond()).toEqual(firstSettled);
     expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(expect.arrayContaining([
@@ -1403,6 +1405,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     emit(closeEvent(401));
 
     await vi.advanceTimersByTimeAsync(60_000);
+    // Drain: long enough for a capture started by the timer to finish all its attempts.
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(readLatestAuthBond()).toEqual(initialLatest);
     expect(manager.getConnectionState().credentialLifecycle.recentEvents).not.toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -1739,6 +1743,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
     clearAlertSourceMock.mockClear();
 
     (manager as any).localAuthAlertEmitted = true;
@@ -1766,6 +1771,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const manager = new ConnectionManager();
     await manager.connect();
     emit(openEvent());
+    await vi.advanceTimersByTimeAsync(0);
     clearAlertSourceMock.mockClear();
 
     (manager as any).localAuthAlertEmitted = true;
@@ -2451,6 +2457,8 @@ describe('ConnectionManager — C8 auth-bond capture off the event loop', () => 
     writeFileSync(join(testAuthDir, 'sender-key-c.json'), JSON.stringify({ keyData: 'c' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
     await vi.advanceTimersByTimeAsync(60_000);
+    // Drain: long enough for a capture started by the timer to finish all its attempts.
+    await vi.advanceTimersByTimeAsync(1_000);
     // Inside the floor the request is refused for now, recorded as before.
     expect(readLatestAuthBond()).toEqual(firstSettled);
     expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(expect.arrayContaining([
