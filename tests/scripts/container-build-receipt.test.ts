@@ -530,7 +530,24 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('scripts/verify-container-build-receipt.ts');
     expect(qualityWorkflow).toContain('container-build-evidence-${{ github.sha }}');
     expect(qualityWorkflow).toContain('id: build-container');
-    expect(qualityWorkflow).toContain("if: ${{ always() && steps.build-container.outcome == 'success' }}");
+  });
+
+  it('uploads container evidence only after the receipt verified it for this commit', () => {
+    const workflow = parse(qualityWorkflow) as {
+      jobs: { quality: { steps: { name: string; id?: string; if?: string; uses?: string; with?: Record<string, unknown> }[] } };
+    };
+    const steps = workflow.jobs.quality.steps;
+    const receipt = steps.findIndex((step) => step.name === 'Verify container build receipt');
+    expect(steps[receipt]?.id).toBe('verify-container-receipt');
+    // A failed revision or receipt check must never publish an archive under this commit's name.
+    const uploads = steps.flatMap((step, index) => (
+      step.uses?.startsWith('actions/upload-artifact@') && String(step.with?.path ?? '').includes('whatsoup-container') ? [index] : []
+    ));
+    expect(uploads).toHaveLength(1);
+    for (const index of uploads) {
+      expect(index).toBeGreaterThan(receipt);
+      expect(steps[index]!.if).toBe("${{ always() && steps.verify-container-receipt.outcome == 'success' }}");
+    }
   });
 
   it('attests only the trusted main branch with a pinned action and isolated permissions', () => {
