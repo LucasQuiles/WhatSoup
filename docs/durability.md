@@ -1278,9 +1278,11 @@ publishes nothing new, and leaves its staging copy for the next sweep. A socket
 close without a logout does not abort a run.
 
 **Staging residue.** Each capture's sweep removes the `*.tmp-<pid>` staging
-entries of other processes, which is the same residue a crash leaves. An entry
-carrying the current process's PID stays until another process's sweep removes
-it.
+entries of other processes, which is the same residue a crash leaves. The sweep
+skips an entry carrying the current process's PID. Such an entry stays until
+another process's sweep removes it, unless a later capture in this process
+generates the same staging name (the same second, reason and tree hash) and
+removes it before its own copy.
 
 ---
 

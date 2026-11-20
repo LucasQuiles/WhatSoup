@@ -92,6 +92,9 @@ export const DEFAULT_CAPTURE_RETRY_DELAY_MS = 75;
  * attempts; any run that ends otherwise resets the count. Each deferred run
  * re-arms the settled snapshot, whose 5-minute floor spaces the runs, so a
  * persistent fault pages about half an hour after the first incomplete read.
+ * That assumes no credential-write churn: each successful creds.update
+ * replaces the 60 s settle timer, so updates less than 60 s apart keep
+ * postponing the next run, and with it the run that pages.
  */
 export const INCOMPLETE_READ_DEFERRED_RUNS = 6;
 export const INCOMPLETE_READ_DEFERRAL =

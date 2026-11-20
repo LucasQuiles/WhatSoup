@@ -806,16 +806,22 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
     count. The deferred re-arm and the 5-minute floor space the runs, so a
     tree that never reads completely pages about 30 minutes after its first
     incomplete read (about 26 minutes when that first read is the open
-    capture), and sooner if reconnects add open-path runs.
+    capture), and sooner if reconnects add open-path runs. These times assume
+    no credential-write churn: each successful `creds.update` replaces the
+    settle timer with a new 60 s one, so updates less than 60 s apart keep
+    postponing the next run, and with it the seventh.
   - A `blocked` run is recorded as `auth_snapshot_skipped` with note
     `capture-blocked:<reason>`. It does not page
     `whatsapp_auth_bond_local_failure`. The block holds from the close
     handler's logout decision, even when the logout alert could not be
     enqueued, until the next open.
   - Each capture's sweep removes the staging copies of other processes: a
-    killed process's, or the one a shutdown left. A staging entry carrying the
-    current process's PID, such as one an abort left during its cleanup, stays
-    until another process's sweep removes it, normally after a restart.
+    killed process's, or the one a shutdown left. The sweep skips a staging
+    entry carrying the current process's PID, such as one an abort left during
+    its cleanup. Such an entry stays until another process's sweep removes it,
+    normally after a restart, unless a later capture in this process generates
+    the same staging name (the same second, reason and tree hash) and removes
+    it first.
 
   The contract is in [Durability §5.9](durability.md#59-auth-bond-backups).
 - **Log.** The `degradation silence latch set` line carries `reasons`, the

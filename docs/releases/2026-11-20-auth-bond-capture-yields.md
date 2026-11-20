@@ -90,7 +90,10 @@
 - Six consecutive incomplete reads defer before the seventh pages. The deferred
   re-arm and the 5-minute floor space those runs, so a tree that never reads
   completely pages about 30 minutes after its first incomplete read, where it
-  used to page at once.
+  used to page at once. That time assumes no credential-write churn: each
+  successful `creds.update` replaces the 60-second settle timer, so updates
+  less than 60 seconds apart keep postponing the next run, and with it the
+  seventh.
 - With a data root set, some synchronous walks still run on the event loop and
   can add stalls on a large tree. The open handler pays three: the
   `connection_open` record's fields, its bond event and the persist. Just after
