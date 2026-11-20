@@ -21,8 +21,9 @@ from the repository's standard so that no install creates it again.
   `loaded:… not loaded`, and a loaded job passed as an unrelated job.
 - The BOT ERRORS health check reports the job when launchd has it loaded, idle
   or running, as `FAIL retired_service ms365-token-backup` in the daily summary.
-  Before this change, a running copy was skipped as a support service and an
-  idle copy was not seen.
+  It reads only the host that runs the check, and only when that host's health
+  profile does not set `allowUnprofiledInstances`. Before this change, a running
+  copy was skipped as a support service and an idle copy was not seen.
 
 ## What each Mac host must do before its next activation
 
