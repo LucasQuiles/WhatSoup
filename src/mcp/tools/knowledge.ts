@@ -683,8 +683,10 @@ export function registerKnowledgeTools(
         let ranked = orderHits(
           collapseConsolidationTwins(
             tierHits(hits, scope, isChatNamespace, deps.db),
+            // Only ids are read until both id kinds are present; the scope key
+            // below is built for legacy and source-set records only.
+            (hit) => hit.rawId,
             (hit) => ({
-              id: hit.rawId,
               text: hit.text,
               scope: JSON.stringify([hit.namespace ?? null, hit.tier, hit.entityType]),
               score: hit.score,

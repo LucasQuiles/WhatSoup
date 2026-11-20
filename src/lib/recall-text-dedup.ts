@@ -57,7 +57,6 @@ function recallTextKey(text: unknown): string | null {
 }
 
 export interface RecallTwinView {
-  id: unknown;
   text: unknown;
   /** Surface-defined scope: twins collapse only within one scope. */
   scope: string;
@@ -70,38 +69,58 @@ export interface RecallTwinView {
  * The source-set record survives at the earlier position of the two, carrying
  * the higher score of the two, so the fact keeps the best rank either twin
  * had. Every other item is returned unchanged, in order.
+ *
+ * Ids are scanned first. Unless both id kinds are present (never the case
+ * with consolidation off), or when no pair matches, the input array itself is
+ * returned and `view` is never called, so no text is read and no scope key is
+ * built. Otherwise `view` runs once per legacy or source-set record only.
  */
 export function collapseConsolidationTwins<T>(
-  items: readonly T[],
+  items: T[],
+  idOf: (item: T) => unknown,
   view: (item: T) => RecallTwinView,
   withScore: (item: T, score: number) => T,
 ): T[] {
+  let hasLegacy = false;
+  let hasSourceSet = false;
+  for (let index = 0; index < items.length && !(hasLegacy && hasSourceSet); index += 1) {
+    const id = idOf(items[index]!);
+    if (isLegacyClaimHashRecordId(id)) hasLegacy = true;
+    else if (isSourceSetRecordId(id)) hasSourceSet = true;
+  }
+  if (!hasLegacy || !hasSourceSet) return items;
+
   const legacyByKey = new Map<string, number>();
   const sourceSetByKey = new Map<string, number>();
-  items.forEach((item, index) => {
-    const { id, text, scope } = view(item);
-    const textKey = recallTextKey(text);
-    if (textKey === null) return;
+  const scoreAt = new Map<number, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const id = idOf(item);
     const byKey = isLegacyClaimHashRecordId(id)
       ? legacyByKey
       : isSourceSetRecordId(id) ? sourceSetByKey : null;
+    if (byKey === null) continue;
+    const { text, scope, score } = view(item);
+    const textKey = recallTextKey(text);
+    if (textKey === null) continue;
     const key = `${scope}\0${textKey}`;
-    if (byKey !== null && !byKey.has(key)) byKey.set(key, index);
-  });
+    if (byKey.has(key)) continue;
+    byKey.set(key, index);
+    scoreAt.set(index, score);
+  }
 
   const survivorAt = new Map<number, T>();
   const removed = new Set<number>();
   for (const [key, legacyIndex] of legacyByKey) {
     const sourceSetIndex = sourceSetByKey.get(key);
     if (sourceSetIndex === undefined) continue;
-    const legacy = items[legacyIndex]!;
-    const sourceSet = items[sourceSetIndex]!;
     survivorAt.set(
       Math.min(legacyIndex, sourceSetIndex),
-      withScore(sourceSet, Math.max(view(legacy).score, view(sourceSet).score)),
+      withScore(items[sourceSetIndex]!, Math.max(scoreAt.get(legacyIndex)!, scoreAt.get(sourceSetIndex)!)),
     );
     removed.add(Math.max(legacyIndex, sourceSetIndex));
   }
+  if (survivorAt.size === 0) return items;
   return items.flatMap((item, index) => {
     if (removed.has(index)) return [];
     return [survivorAt.has(index) ? survivorAt.get(index)! : item];

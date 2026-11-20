@@ -227,7 +227,8 @@ export async function loadContextDetailed(
   });
   const unique = collapseConsolidationTwins(
     candidates,
-    ({ result, leg }) => ({ id: result.id, text: result.record.text, scope: leg, score: result.score }),
+    ({ result }) => result.id,
+    ({ result, leg }) => ({ text: result.record.text, scope: leg, score: result.score }),
     (entry, score) => ({ ...entry, result: { ...entry.result, score } }),
   );
   const merged = unique.filter((entry) => entry.leg !== 'self').map((entry) => entry.result);
