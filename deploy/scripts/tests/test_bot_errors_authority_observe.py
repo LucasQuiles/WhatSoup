@@ -58,6 +58,7 @@ _ENV_KEYS = [
     "BOT_ERRORS_Q_LOOP_STATE_DIR",
     "BOT_ERRORS_OWNER_ROUTE_JID",
     "BOT_ERRORS_OWNER_ROUTE_SOCKET",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS",
     _MODE,
 ]
 
@@ -535,6 +536,22 @@ def test_observe_sends_a_credential_meta_alert(tmp_path, outcome):
         taken = mod.credential_meta_alert("credential_expired", "summary", time.monotonic() + 60)
     assert taken is not None
     assert len(messages) == 1
+
+
+@pytest.mark.parametrize("value", ["", "abc"])
+def test_an_unreadable_max_attempts_setting_never_stops_observe_mode(tmp_path, capsys, value):
+    os.environ["BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS"] = value
+    mod = _load_dispatcher(tmp_path / f"attempts-{value or 'empty'}")
+    assert mod.INCIDENT_AUTHORITY_MODE == "observe"
+    assert mod.INCIDENT_AUTHORITY_MAX_ATTEMPTS == 12
+    assert capsys.readouterr().err.count('"incident_authority_max_attempts_invalid"') == 1
+
+
+def test_an_unreadable_max_attempts_setting_still_stops_enforce_mode(tmp_path):
+    # Enforce mode is unchanged: the process stops before it can send.
+    os.environ["BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS"] = "abc"
+    with pytest.raises(ValueError):
+        _load_dispatcher(tmp_path / "attempts-enforce", mode="enforce")
 
 
 def _slow_authority(seconds: float):
