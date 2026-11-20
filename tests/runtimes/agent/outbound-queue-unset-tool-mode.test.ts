@@ -242,6 +242,75 @@ describe('unset tool update mode, tool batch effects on text', () => {
   });
 });
 
+/**
+ * One queue, two turns, a one-message status window. Turn 1 emits a thinking placeholder,
+ * then a tool batch flushes and the turn ends. Turn 2, without turn evidence, buffers A and
+ * starts a tool whose batch fires at 5 s; B arrives at 6 s with a 10 s aggregate delay.
+ * In full mode the placeholder takes the window's slot, turn 1's batch records the cap
+ * notice, and turn 2's batch leaves A buffered, so A and B arrive as one message.
+ */
+async function placeholderThenTwoTurns(mode: 'unset' | 'full'): Promise<Harness> {
+  instance.textAggregateDelayMs = 10_000;
+  const harness = await makeUnsetQueue();
+  const { queue } = harness;
+  if (mode === 'full') queue.setToolUpdateMode('full');
+  queue.setStatusMessageWindow(1, 600_000);
+  queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 10_000 }, 'bot-a');
+  queue.enqueueToolUpdate(harness.buildToolUpdate('Read', { file_path: TOOL_PATH }));
+  await vi.advanceTimersByTimeAsync(6_000);
+  queue.endTurn({ resultTextPending: false, recoverDeferredText: true });
+  const turnOneDrained = queue.flush();
+  await vi.advanceTimersByTimeAsync(10_000);
+  await turnOneDrained;
+
+  assistantText(harness, FIRST);
+  queue.discardPreToolAssistantText();
+  queue.enqueueToolUpdate(harness.buildToolUpdate('Write', { file_path: TOOL_PATH }));
+  await vi.advanceTimersByTimeAsync(6_000);
+  assistantText(harness, SECOND);
+  await vi.advanceTimersByTimeAsync(11_000);
+  queue.abortTurn();
+  return harness;
+}
+
+/** A per-turn status cap of zero, reached by one tool batch or one thinking placeholder. */
+async function reachStatusCap(mode: 'unset' | 'full', source: 'batch' | 'placeholder'): Promise<Harness> {
+  const harness = await makeUnsetQueue();
+  if (mode === 'full') harness.queue.setToolUpdateMode('full');
+  harness.queue.setMaxStatusMessagesPerTurn(0);
+  if (source === 'batch') {
+    harness.queue.enqueueToolUpdate(harness.buildToolUpdate('Read', { file_path: TOOL_PATH }));
+  } else {
+    harness.queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 10_000 }, 'bot-a');
+  }
+  await vi.advanceTimersByTimeAsync(6_000);
+  harness.queue.abortTurn();
+  return harness;
+}
+
+describe('unset tool update mode, status budget', () => {
+  it('charges a withheld placeholder to the status window as full mode does', async () => {
+    const full = await placeholderThenTwoTurns('full');
+    expect(full.sent.map((message) => message.text)).toEqual([
+      expect.stringContaining('thinking'),
+      expect.stringContaining('still working'),
+      `${FIRST}${SECOND}`,
+    ]);
+
+    const unset = await placeholderThenTwoTurns('unset');
+    expect(unset.sent).toEqual([{ jid: chatJid, text: `${FIRST}${SECOND}` }]);
+  });
+
+  it.each(['batch', 'placeholder'] as const)('withholds the status cap notice reached by a %s', async (source) => {
+    const full = await reachStatusCap('full', source);
+    expect(full.sent).toHaveLength(1);
+    expect(full.sent[0]?.text).toContain('still working');
+
+    const unset = await reachStatusCap('unset', source);
+    expect(unset.sent).toEqual([]);
+  });
+});
+
 /** One event for each mode branch of OutboundQueue.enqueueProgressUpdate. */
 const PROGRESS_EVENTS: ReadonlyArray<{ readonly name: string; readonly event: ProgressEvent }> = [
   { name: 'thinking_long', event: { type: 'thinking_long', gapMs: 10_000 } },
