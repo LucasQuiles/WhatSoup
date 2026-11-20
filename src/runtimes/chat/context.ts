@@ -21,6 +21,7 @@ import {
   type ChatRecallBoundary,
 } from '../../core/memory-scope.ts';
 import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
+import { collapseSameText } from '../../lib/recall-text-dedup.ts';
 
 const log = createChildLogger('conversation');
 
@@ -76,16 +77,6 @@ function contextStatus(scopes: ContextScopeOutcome[]): ContextLoadStatus {
   const successfulScopes = scopes.filter((scope) => scope.status === 'ok').length;
   if (successfulScopes === scopes.length) return 'complete';
   return successfulScopes > 0 ? 'partial' : 'unavailable';
-}
-
-/**
- * Recall text identity: trimmed, with whitespace runs collapsed. Null for a
- * record with no comparable text, which then de-duplicates by id alone.
- */
-function recallTextKey(text: unknown): string | null {
-  if (typeof text !== 'string') return null;
-  const key = text.trim().replace(/\s+/g, ' ');
-  return key.length > 0 ? key : null;
 }
 
 /**
@@ -218,23 +209,24 @@ export async function loadContextDetailed(
     scopeOutcome('self', selfDetails),
   ];
 
-  // Merge, deduplicate by id and by text, preserve insertion order (chat
-  // results first). The text key keeps one fact from showing twice when it
-  // exists under two ids, such as a consolidation promotion written under a
-  // legacy claim-hash id and again under its source-set id (durability §10.2).
+  // Merge, deduplicate by id, preserve insertion order (chat results first,
+  // then sender results, then self facts). Same-text records then collapse to
+  // one: a fact can exist under a legacy claim-hash id and again under its
+  // source-set id (durability §10.2).
   const seenIds = new Set<string>();
-  const seenTexts = new Set<string>();
-  const isFirstSighting = (result: SearchResult): boolean => {
-    const textKey = recallTextKey(result.record.text);
-    if (seenIds.has(result.id) || (textKey !== null && seenTexts.has(textKey))) return false;
+  const candidates: Array<{ result: SearchResult; self: boolean }> = [
+    ...[...chatResults, ...senderResults].map((result) => ({ result, self: false })),
+    ...selfResults.map((result) => ({ result, self: true })),
+  ].filter(({ result }) => {
+    if (seenIds.has(result.id)) return false;
     seenIds.add(result.id);
-    if (textKey !== null) seenTexts.add(textKey);
     return true;
-  };
-  const merged = [...chatResults, ...senderResults].filter(isFirstSighting);
+  });
+  const unique = collapseSameText(candidates, ({ result }) => ({ id: result.id, text: result.record.text }));
+  const merged = unique.filter((entry) => !entry.self).map((entry) => entry.result);
 
   // Self-facts go into a separate block
-  const selfFacts = selfResults.filter(isFirstSighting);
+  const selfFacts = unique.filter((entry) => entry.self).map((entry) => entry.result);
 
   const topResults = [...merged, ...selfFacts];
   log.info(

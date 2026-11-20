@@ -1991,9 +1991,12 @@ What source-set identity does and does not do:
 - **Legacy records are not reconciled.** Records written before source-set identity
   keep their claim-hash ids (`durable:<16 hex>`) and are never rewritten or migrated. A
   fact promoted again gets a source-set record beside its legacy record. Chat recall
-  (`loadContextDetailed`, `src/runtimes/chat/context.ts`) de-duplicates by text as well
-  as by id (text trimmed, whitespace runs collapsed), so a legacy record and a
-  source-set record with the same text show once; both still take a search result slot,
+  (`loadContextDetailed`, `src/runtimes/chat/context.ts`) and `knowledge_search`
+  (`src/mcp/tools/knowledge.ts`, before the rerank cap) collapse records with the same
+  text (trimmed, whitespace runs collapsed; `collapseSameText`,
+  `src/lib/recall-text-dedup.ts`) to one, keeping the source-set record when there is
+  one, else the first in that surface's result order. Both records still take a provider
+  search slot,
   and records whose text differs both show.
 
 These are live-safe defect fixes: no schema, store, or contract change.

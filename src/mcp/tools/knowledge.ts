@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
 import { truncateForRerank } from '../../lib/text-utils.ts';
+import { collapseSameText } from '../../lib/recall-text-dedup.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
@@ -673,9 +674,13 @@ export function registerKnowledgeTools(
 
         // Gate, dedup by id, then order: memories by tier (this chat -> other
         // chats -> untagged) and score, documents merged in by score. Outside the
-        // memory index every hit is tier 0.
-        let ranked = orderHits(tierHits(hits, scope, isChatNamespace, deps.db), false)
-          .slice(0, RERANK_CANDIDATE_CAP);
+        // memory index every hit is tier 0. Same-text records then collapse to
+        // one before the rerank cap: a fact can exist under a legacy claim-hash
+        // id and again under its source-set id (durability §10.2).
+        let ranked = collapseSameText(
+          orderHits(tierHits(hits, scope, isChatNamespace, deps.db), false),
+          (hit) => ({ id: hit.rawId, text: hit.text }),
+        ).slice(0, RERANK_CANDIDATE_CAP);
         let limit = MAX_RESULTS;
 
         // Client-side rerank if configured. It scores every candidate, then the
