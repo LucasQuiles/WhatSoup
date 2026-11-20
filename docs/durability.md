@@ -1970,9 +1970,10 @@ outside the cluster. Two output shapes drop one item instead and keep the cluste
 (`consolidateCluster`, `src/memory/consolidation.ts`): when two promotions cite the same
 source set (they would share one id), the first is kept and the later ones are dropped;
 when a source is both promoted and discarded, the discard entry is dropped, because
-discards are not persisted. Each drop logs one content-free warning with counts
-(`consolidation output items dropped`); it adds no failed count, so it neither turns the
-run `partial` or `failed` nor degrades `/health`, in dry runs as in live runs. The
+discards are not persisted. A cluster with any drop logs one content-free warning with
+the drop counts (`consolidation output items dropped`); a drop adds no failed count, so
+it neither turns the run `partial` or `failed` nor degrades `/health`, in dry runs as in
+live runs. The
 write site re-derives every lineage before its first write and rejects the cluster as
 `output_invalid` if any fails.
 
