@@ -36,9 +36,10 @@ jobs:
     # the re2 build on Node 25 (GCC 15), the GNU coreutils timeout the boundary-run
     # validator requires, and the Playwright Chromium install. Move back once those work.
     runs-on: ubuntu-24.04
-    # Bounds: coverage 45m, container 10m, browser deps/download 5m + 17m,
-    # remaining setup/checks allowance 15m (an estimate). The 100m cap
-    # retains 8m of margin over these explicit bounds and the estimate.
+    # Bounds: coverage 45m, container 10m, runtime export 5m, browser
+    # deps/download 5m + 17m, remaining setup/checks allowance 15m (an
+    # estimate that includes the 2m Linux policy probe). The 100m cap
+    # retains 3m of margin over these explicit bounds and the estimate.
     timeout-minutes: 100
     steps:
       - name: Checkout
@@ -262,7 +263,8 @@ jobs:
           trap 'rm -rf -- "$policy_scratch"' EXIT
           export TMPDIR="$policy_scratch"
           cc -static -Wall -Wextra -Werror tests/runtimes/agent/provider-policy-reader.integration.c -o "$policy_scratch/policy-reader"
-          docker run --rm --network none --read-only --user 0:0 \
+          # The verified runtime step above loaded whatsoup-ci; never fall back to a registry pull.
+          docker run --rm --network none --pull=never --read-only --user 0:0 \
             --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add FSETID --cap-add SETUID --cap-add SETGID --cap-add KILL \
             --tmpfs /opt/policy-probe:rw,nosuid,noexec,size=16m,mode=0755 \
             --env TMPDIR=/opt/policy-probe \
@@ -659,7 +661,7 @@ jobs:
   attest-container-build:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: quality
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read

@@ -3770,9 +3770,10 @@ with an independent parent-process output limit. Curl has
 a 30-second deadline; the parent stops it after 35 seconds.
 
 The authority job has a 100-minute deadline: 45 minutes for coverage, 10 for the container,
-5 for browser system dependencies, 17 for bounded browser download attempts and backoff,
-and a 15-minute estimate for the remaining setup and checks, with 8 minutes of margin.
-That remainder is a planning allowance, not a separate enforced timeout. Individual failure
+5 for the runtime export, 5 for browser system dependencies, 17 for bounded browser download
+attempts and backoff, and a 15-minute estimate for the remaining setup and checks, with 3 minutes
+of margin. The estimate includes the 2-minute Linux policy probe, which runs on the loaded runtime
+image. That remainder is a planning allowance, not a separate enforced timeout. Individual failure
 bounds remain enforced; an exhausted download bound fails the job.
 
 Successful container builds upload these files as
