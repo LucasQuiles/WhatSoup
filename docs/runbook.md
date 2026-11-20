@@ -3742,9 +3742,13 @@ Every event builds the commit the job checked out (`github.sha`) from the fixed
 later runs inside it come from the same tree. For a pull request that commit is the merge result.
 It is on no branch, so BuildKit fetches it through the pull request's merge ref, `refs/pull/<n>/merge`,
 and the verifier accepts that ref (`--source-ref`) only when both provenance records name the
-checked-out commit as the resolved revision. If GitHub moved the merge ref after checkout, the
-receipt step fails; a re-run reuses the old commit, so push again to start a new run. Push and merge-group builds fetch the
-event commit itself. The CLI's explicit `--source-repository` override for another GitHub
+checked-out commit as the resolved revision. GitHub moves the merge ref when `main` advances or the
+pull request changes, and a re-run reuses the old commit. Before each fetch of the merge ref (the
+build step and the load step), the job lists it with `git ls-remote` and stops if it no longer names
+the checked-out commit, with a message that the merge ref moved. A re-run cannot recover such a run:
+push a commit, or close and reopen the pull request, to start a new one. If the ref moves between
+that check and the fetch, the receipt's revision checks or the loaded image comparison still fail
+the job. Push and merge-group builds fetch the event commit itself and list no ref. The CLI's explicit `--source-repository` override for another GitHub
 repository remains supported but the workflow does not use it. The selected source must be an
 `https://github.com/<owner>/<repo>.git` clone URL and is recorded in the receipt,
 so BuildKit records a verified `configSource` revision rather than a local checkout hint. The receipt verifies OCI descriptor sizes

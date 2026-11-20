@@ -159,6 +159,14 @@ jobs:
             exit 1
           fi
           provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "$SOURCE_REF" != "$SOURCE_REVISION" ]; then
+            # GitHub moves a merge ref when main advances or the pull request changes; a rerun keeps the old commit.
+            merge_ref_listing="$(git ls-remote "$source_repository" "$SOURCE_REF")"
+            if [ "$merge_ref_listing" != "$(printf '%s\t%s' "$SOURCE_REVISION" "$SOURCE_REF")" ]; then
+              echo '::error::the pull request merge ref moved after this run started (main advanced or the pull request changed); a rerun reuses the old commit and cannot recover, so push a commit or close and reopen the pull request' >&2
+              exit 1
+            fi
+          fi
           docker buildx build \
             --builder "$builder_name" \
             --file docker/Dockerfile \
@@ -235,6 +243,14 @@ jobs:
           builder_name="$(node -e 'process.stdout.write(require("./docker/container-inputs.json").builder.name)')"
           platform="$(node -e 'process.stdout.write(require("./docker/container-inputs.json").platform)')"
           source_repository="$(node -e 'const fs = require("node:fs"); const receipt = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-container/container-build-receipt.json", "utf8")); process.stdout.write(receipt.sourceRepository)')"
+          if [ "$SOURCE_REF" != "$SOURCE_REVISION" ]; then
+            # GitHub moves a merge ref when main advances or the pull request changes; a rerun keeps the old commit.
+            merge_ref_listing="$(git ls-remote "$source_repository" "$SOURCE_REF")"
+            if [ "$merge_ref_listing" != "$(printf '%s\t%s' "$SOURCE_REVISION" "$SOURCE_REF")" ]; then
+              echo '::error::the pull request merge ref moved after this run started (main advanced or the pull request changed); a rerun reuses the old commit and cannot recover, so push a commit or close and reopen the pull request' >&2
+              exit 1
+            fi
+          fi
           # The OCI export retains attestations. A separate cached runtime copy
           # also works with classic Docker stores that cannot import attestations.
           docker buildx build \
