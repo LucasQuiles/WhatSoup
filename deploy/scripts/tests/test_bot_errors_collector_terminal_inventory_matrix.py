@@ -46,6 +46,7 @@ SCANNED_ENV = "scanned-env"  # scanned via the env-aware outbox entry
 EXEMPT_NON_RECORD = "exempt-non-record"  # directory holds no per-event records
 EXEMPT_FILE = "exempt-file"  # a state FILE, not a record directory
 EXEMPT_ROOT = "exempt-root"  # the state root itself
+EXEMPT_SYNTHESIZED = "exempt-synthesized"  # events the dispatcher mints itself; no remote carries them
 
 # The A5 disposition map. Adding a dispatcher directory without extending this
 # map (and, for record dirs, the collector inventory) is a test failure by
@@ -55,6 +56,11 @@ EXPECTED_DISPOSITIONS = {
     "outbox": SCANNED_ENV,
     "processing": SCANNED,
     "sent": SCANNED,
+    # The pending record of an event the dispatcher builds and sends itself
+    # (flap, stale, auto-close and meta alerts), written before the send. Its id
+    # is minted by the dispatcher, so no remote outbox can relay it, and the
+    # recovery pass moves it into sent/ (scanned) as unconfirmed.
+    "synthesized_pending": EXEMPT_SYNTHESIZED,
     "storm_collapsed": SCANNED,
     "storm_manifests": EXEMPT_NON_RECORD,  # storm manifest indexes, no event id
     # #2387 per-window digest receipts: bounded counts, the severity bucket, the

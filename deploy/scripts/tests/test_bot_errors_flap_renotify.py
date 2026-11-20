@@ -184,7 +184,8 @@ def test_resolve_states_persistent_handoff_when_underlying_still_open(tmp_path, 
     assert len(sends) == 1
     text = sends[0].lower()
     assert "still open" in text
-    assert "persistent" in text
+    assert "recovery is not confirmed" not in text
+    assert "persistent" not in text
     # and the entry is gone either way (the storm bookkeeping ends)
     reloaded = mod.load_incident_state(paths)
     assert KEY not in reloaded.get("flapState", {})
@@ -208,5 +209,5 @@ def test_resolve_keeps_stable_wording_when_underlying_cleared(tmp_path, monkeypa
     resolved, _ = mod.sweep_flap_storms(paths)
 
     assert resolved == 1
-    assert "stable after" in sends[0].lower()
+    assert "recovery is not confirmed" in sends[0].lower()
     assert "still open" not in sends[0].lower()

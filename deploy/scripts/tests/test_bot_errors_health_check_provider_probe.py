@@ -392,7 +392,7 @@ def test_required_credential_inventory_rejects_group_read_permissions(tmp_path):
     lines = _mod.required_credential_inventory({"requiredCredentialFiles": [str(credential)]})
 
     assert len(lines) == 1
-    assert lines[0].startswith("FAIL credential:")
+    assert lines[0].startswith("FAIL credential_check:")
     assert "mode=440" in lines[0]
 
 

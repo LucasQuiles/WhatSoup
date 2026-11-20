@@ -408,9 +408,20 @@ describe('bot-errors-health-check', () => {
     });
 
     expect(dispatch.status).toBe(0);
-    expect(readFileSync(capture, 'utf8')).toContain('BOT ERRORS daily health found issues');
-    expect(readFileSync(capture, 'utf8')).toContain('writefail_recovered');
-    expect(readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'))).toHaveLength(1);
+    // The public alert card shows no diagnostics: count the captured card (one
+    // JSON record per send) and read the recovery provenance from the archived
+    // .sent event instead.
+    const cards = readFileSync(capture, 'utf8').split('\n').filter((line) => line.trim())
+      .map((line) => String((JSON.parse(line) as { text?: unknown }).text ?? ''));
+    expect(cards.filter((card) => card.includes('BOT ERRORS daily health found issues'))).toHaveLength(1);
+    const sentNames = readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'));
+    expect(sentNames).toHaveLength(1);
+    const sent = JSON.parse(readFileSync(join(tmpRoot, 'sent', sentNames[0]!), 'utf8')) as Record<string, any>;
+    expect(sent.diagnostics?.writefailRecovery).toMatchObject({
+      failedTarget: join(blocked, 'outbox'),
+      harvest: null,
+      recordedAt: expect.any(String),
+    });
   });
 
   it('redacts phone numbers without masking version or timestamp diagnostics', () => {
@@ -2997,9 +3008,9 @@ print(m.probe_health(9092))
       evidence: string;
     };
     expect(event.severity).toBe('critical');
-    expect(event.evidence).toContain('OK credential: credential_requirement=fleet-token credential_path_redacted=true');
+    expect(event.evidence).toContain('OK credential_check: credential_requirement=fleet-token credential_path_redacted=true');
     expect(event.evidence).toContain('credential_path_basename=fleet-token');
-    expect(event.evidence).toContain('FAIL credential: credential_requirement_redacted=true');
+    expect(event.evidence).toContain('FAIL credential_check: credential_requirement_redacted=true');
     expect(event.evidence).toContain('credential_requirement_basename=tokens.env');
     expect(event.evidence).toContain('world_writable credential_path_redacted=true');
     expect(event.evidence).toContain('credential_path_basename=tokens.env');
@@ -3063,7 +3074,7 @@ print(m.probe_health(9092))
       evidence: string;
     };
     expect(event.severity).toBe('critical');
-    expect(event.evidence).toContain('FAIL credential: credential_requirement=bot-errors.env missing required');
+    expect(event.evidence).toContain('FAIL credential_check: credential_requirement=bot-errors.env missing required');
     expect(event.evidence).toContain('expected_path_redacted=true');
     expect(event.evidence).toContain('expected_path_basename=bot-errors.env');
     expect(event.evidence).not.toContain(credentialRoot);
@@ -3121,7 +3132,7 @@ print(m.probe_health(9092))
     };
     expect(event.severity).toBe('critical');
     expect(event.criticalAsset?.failure?.code).toBe('CREDENTIAL_FILE_INTEGRITY_DRIFT');
-    expect(event.evidence).toContain('FAIL credential: credential_requirement=fleet-token symlink credential_path_redacted=true');
+    expect(event.evidence).toContain('FAIL credential_check: credential_requirement=fleet-token symlink credential_path_redacted=true');
     expect(event.evidence).toContain('credential_path_basename=fleet-token');
     expect(event.evidence).toContain('parent_mode>700 parent_path_redacted=true');
     expect(event.evidence).toContain('credential_requirement_basename=tokens.env');

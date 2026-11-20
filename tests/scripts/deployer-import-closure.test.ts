@@ -261,10 +261,12 @@ describe('bot-errors deployer allowlist is closed under import', () => {
 
     it('reports members that a shrunken allowlist would leave unshipped', () => {
       // Negative control: seeded with the outbox alone, the walk must surface
-      // its five dependencies. If this returns nothing, the machinery cannot
-      // detect an open closure and every green result above is meaningless.
+      // its six dependencies (redaction-text.ts links redaction-patterns.ts).
+      // If this returns nothing, the machinery cannot detect an open closure
+      // and every green result above is meaningless.
       expect(shrunken.uncovered).toEqual([
         'src/lib/alert-evidence.ts',
+        'src/lib/clock.ts',
         'src/lib/private-fs.ts',
         'src/lib/redaction-patterns.ts',
         'src/lib/redaction-text.ts',

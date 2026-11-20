@@ -108,6 +108,51 @@ def test_identified_event_still_relays(tmp_state):
         assert _quarantine_files(state_dir) == []
 
 
+def test_uuid4_id_survives_relay_redaction_while_phone_and_token_redact(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    identifier = "3f7b863a-9212-4508-8692-ab7287860f47"
+    # Built at runtime so no phone-shaped literal is stored in the repository.
+    phone = "+" + "".join(("1", "415", "555", "0123"))
+    token = "relay-token-value"
+    event = _event(
+        id=identifier,
+        evidence=f"operator phone {phone} token={token}",
+    )
+
+    with _env(state_dir, outbox_dir):
+        path = mod.relay_event("rhost", "/remote/root", _record(event))
+
+    persisted = path.read_text()
+    assert json.loads(persisted)["id"] == identifier
+    assert phone not in persisted
+    assert token not in persisted
+
+
+def test_second_phone_shaped_uuid4_id_survives_relay_redaction(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    identifier = "01234567-1234-4567-8123-abcdef012345"
+
+    with _env(state_dir, outbox_dir):
+        path = mod.relay_event("rhost", "/remote/root", _record(_event(id=identifier)))
+
+    assert json.loads(path.read_text())["id"] == identifier
+
+
+def test_non_uuid4_phone_shaped_id_stays_on_redaction_path(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    identifier = "abcdefab-1234-1567-8123-abcdef012345"
+
+    with _env(state_dir, outbox_dir):
+        path = mod.relay_event("rhost", "/remote/root", _record(_event(id=identifier)))
+
+    persisted = json.loads(path.read_text())["id"]
+    assert persisted == "abcdefab-[REDACTED PHONE]-abcdef012345"
+    assert identifier not in persisted
+
+
 def test_writefail_crumb_empty_nested_id_is_poison(tmp_state):
     state_dir, outbox_dir = tmp_state
     mod = _load_mod_with_dirs(state_dir, outbox_dir)

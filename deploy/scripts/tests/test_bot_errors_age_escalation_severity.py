@@ -98,6 +98,10 @@ MACHINE = "host-a"
 INSTANCE = "instance-a"
 SEVERITY_LINE = "  > severity: {}"
 ESCALATED_PREFIX = "ESCALATED still open: "
+# Every send path renders the public alert card, which has no severity line. A
+# reminder card opens with the red reminder icon only at critical, so this icon
+# is how a delivered reminder shows it went out below critical.
+NON_CRITICAL_REMINDER_ICON = "🟡 ↻ "
 
 # The release-currency observer's alert, as scripts/live-release-currency-alert.ts
 # hands it to bot-errors-emit.py: severity warning, the observation as JSON
@@ -564,9 +568,8 @@ def test_a_retried_escalated_warning_is_raised_once_not_once_per_attempt(tmp_pat
     assert bench.attempts == [outcome, "ok"]
     assert len(bench.delivered) == 1
     delivered = bench.delivered[0].splitlines()
-    assert delivered[0] == "BOT ERROR - " + ESCALATED_PREFIX + RELEASE_SUMMARY
-    assert SEVERITY_LINE.format("error") in delivered
-    assert SEVERITY_LINE.format("critical") not in delivered
+    assert delivered[0] == NON_CRITICAL_REMINDER_ICON + "*Still open: " + RELEASE_SUMMARY + "*"
+    assert delivered[0].startswith(NON_CRITICAL_REMINDER_ICON), "sent at error, not critical"
     assert bench.archived(path)["severity"] == "error"
 
 
@@ -655,8 +658,7 @@ def test_a_released_held_reminder_keeps_its_recorded_severity(tmp_path):
     bench.cycle((released, "ok"))
     assert bench.attempts == ["ambiguous", "ok"]
     delivered = bench.delivered[0].splitlines()
-    assert SEVERITY_LINE.format("error") in delivered
-    assert SEVERITY_LINE.format("critical") not in delivered
+    assert delivered[0].startswith(NON_CRITICAL_REMINDER_ICON), "sent at error, not critical"
     assert bench.archived(path)["severity"] == "error"
 
 
@@ -683,8 +685,7 @@ def test_a_crash_reclaimed_reminder_keeps_its_recorded_severity(tmp_path):
     bench.cycle((bench.queued(path), "ok"))
     assert bench.attempts == ["fail", "ok"]
     delivered = bench.delivered[0].splitlines()
-    assert SEVERITY_LINE.format("error") in delivered
-    assert SEVERITY_LINE.format("critical") not in delivered
+    assert delivered[0].startswith(NON_CRITICAL_REMINDER_ICON), "sent at error, not critical"
     assert bench.archived(path)["severity"] == "error"
 
 
@@ -710,8 +711,7 @@ def test_a_dead_lettered_reminder_keeps_its_recorded_severity(tmp_path):
     bench.cycle((requeued, "ok"))
     assert bench.attempts == ["fail", "ok"]
     delivered = bench.delivered[0].splitlines()
-    assert SEVERITY_LINE.format("error") in delivered
-    assert SEVERITY_LINE.format("critical") not in delivered
+    assert delivered[0].startswith(NON_CRITICAL_REMINDER_ICON), "sent at error, not critical"
     assert bench.archived(requeued)["severity"] == "error"
 
 
@@ -958,6 +958,10 @@ def _escalated_transient_owner_reminder(bench: _Bench, machine: str, created: in
 
 def _requeue(bench: _Bench, event: dict[str, Any]) -> None:
     """The send failed: the event goes back to outbox/ as the decision left it."""
+    # The dispatcher never writes its in-process card tokens back to a queue record.
+    for marker in ("_publicCardKnownOpenReminder", "_publicCardVerifiedRecovery",
+                   "_publicCardVerifiedPhysicalAction"):
+        event.pop(marker, None)
     event["delivery"].update({"status": "queued", "attempts": 1, "nextAttemptAtEpoch": bench.clock.now - 1,
                               "lastError": "the remote rejected the message"})
     bench.put(event)

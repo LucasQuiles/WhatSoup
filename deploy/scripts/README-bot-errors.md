@@ -818,6 +818,310 @@ cannot reach the dispatcher backstop. Adding a producer without a provenance
 stamp re-opens that hole silently, so stamp it at the shared event builder
 rather than per call site.
 
+### TypeScript outbox crash-orphan temp recovery
+
+`writeBotErrorsEvent` (`src/lib/bot-errors-outbox.ts`) publishes through a
+hidden temp `.<fileName>.<pid>.tmp` and then renames it to `<fileName>`. A
+producer killed between the durable temp write and the rename leaves the only
+copy of the alert in that temp. The dispatcher reads only non-hidden `*.json`,
+so it never sees it. The writer sweeps these orphans itself. The sweep runs
+after a successful publish, on the first write in a process, then at most once
+every 60 s. It never throws into the alert path.
+
+- **Scope.** The sweep only considers outbox entries that match this writer's
+  shape: `.<created>_<ms>.<instance>.<source>.<uuid>.json.<pid>.tmp`, with a
+  pid of 1 or more, optionally with a `.c<N>` claim segment before `.tmp` (a
+  sweep's claim, see Promote). Separately, it retires its own
+  `.<fileName>.<pid>.promote.tmp` scratch files once they are older than the
+  TTL (see Promote). It never touches temps from the post-tool-use hook,
+  which have no `_<ms>` and a non-UUID id. It never touches the Python
+  producers' durable-json temps, writefail-dir temps, or any other file.
+- **Candidate.** A temp is a candidate only if its mtime is older than
+  10 minutes and one of these holds:
+  - its pid is dead;
+  - its pid is alive but started after the temp's mtime, which means the pid
+    was reused.
+
+  On Linux the start time comes from `/proc/<pid>/stat` and `btime`. On macOS
+  it comes from `ps -o lstart=` with a 1 s timeout. If the start time cannot
+  be determined, the temp is not a candidate. The trade-off is deliberate: a
+  write that is still in progress is never stolen. The temp is reconsidered on
+  every later sweep, and is recovered once that pid exits. Each distinct pid
+  is probed at most once per sweep, so on macOS a sweep spawns `ps` once per
+  distinct live pid, not once per temp. The cache lasts one sweep only.
+- **Promote.** A candidate is promoted only if all of these hold: it parses
+  as JSON; it has a v2 envelope that `buildBotErrorsEvent` can produce; its
+  `createdAt`, `instance`, `source` and `id` re-derive exactly its file name;
+  no final file with that name or id exists; and it is inside the 24 h TTL.
+  Promotion is bound to the object that was validated, never to a path:
+  1. The sweep refreshes the validated file's mtime through its open
+     descriptor, so concurrent sweeps treat it as in flight.
+  2. It claims the temp with an atomic rename to a fresh claim name,
+     `.<fileName>.<sweeper pid>.c<N>.tmp`, where `N` is a per-process counter
+     and any name that already exists is skipped. So a claim never overwrites
+     a file retained under an earlier claim name. Only one process can win
+     the rename; a sweep in another process that validated the same temp gets
+     ENOENT, counts a sweep error, and publishes nothing.
+  3. It checks that the claim is the validated file (the claim's device and
+     inode equal the open descriptor's). If not, something else was swapped
+     in at the temp path, for example after a peer already claimed the
+     validated file (that peer publishes it). The sweep then publishes
+     nothing, counts a sweep error, and leaves the claim for a later sweep to
+     classify on its own (for example as torn, with a breadcrumb and a
+     summary). If the open descriptor's link count is 0, no name holds the
+     validated file any more, so its event is lost. The sweep then writes a
+     content-free `.templost` breadcrumb in the writefail directory, named
+     `<stamp>.<id>.<pid>.swapped-after-validation.templost` and recording
+     kind `outbox_temp_lost`, class `swapped-after-validation`, the event
+     id, the temp name and the pid. It counts `lost-after-validation`, and
+     the summary names the event id (see Visibility). It still publishes
+     nothing.
+  4. It publishes the exact bytes it read and validated, through the
+     writer's durable path: an exclusive-create `.<fileName>.<pid>.promote.tmp`
+     scratch file, fsync, rename to the final name, chmod 0600 and a directory
+     fsync.
+  5. It unlinks the claim, only if the claim is still the validated file.
+  6. Sibling cleanup. If the validated file has other names, the sweep
+     unlinks every other writer-shaped temp or claim name for the same final
+     name that is still that file (same device and inode). It does this
+     twice: right after the claim check in step 3 and before step 4, sparing
+     its own claim, so that no other sweep can claim one of those names while
+     this one publishes; and again after step 5, in case the first pass
+     failed. Such a name is left when a restore linked the temp name back
+     but could not unlink the claim. Without this step a later sweep would
+     publish that name again once the dispatcher has consumed the final. A
+     name this sweep unlinked that is still ahead in its own listing is not
+     counted as a sweep error when its turn comes and it is gone.
+
+  If publishing throws before the final rename (for example EEXIST on a
+  leftover scratch file, ENOSPC or EMFILE), nothing was published: the claim
+  is put back at the temp path, so the next sweep retries it. The restore
+  runs in this order: a `link` of the claim back to the temp path (which
+  refuses rather than overwrite anything now there), then an
+  identity-checked unlink of the claim, and only then the original mtime is
+  set again through the descriptor. While both names exist the file still
+  carries the fresh mtime from step 1, so neither name is past the grace
+  period and no sweep takes either one. If the restore finds its own claim
+  gone (or replaced), no name holds the validated file any more, and no
+  final with the event's name or id exists (as for a swap before the open:
+  the sweep that removed the claim may have published the event, which is
+  then not a loss), there is nothing to put back: the event is lost. The sweep then writes a
+  `.templost` breadcrumb of class `restore-unheld` with the event id, counts
+  `lost-after-validation` and names the id in the summary (see W2 below). It
+  does not rewrite the bytes to a new temp: in the race that causes this,
+  two sweeps reach the same state for the same event, and both rewriting
+  would deliver it twice. A
+  failed publish never deletes a scratch file it did not create, and always
+  removes one it did create, even when writing it failed after it was
+  created. If a step
+  throws after the final rename (chmod, the directory fsync, the claim
+  unlink), the event is published: the claim and any sibling names are still
+  unlinked, so no later sweep can publish it again unless one of those
+  unlinks fails (see Known limits). Either way the sweep counts an error.
+
+  A `.promote.tmp` scratch file older than the 24 h TTL (left by a crash
+  while publishing) is retired with a content-free breadcrumb of class
+  `stale-promote-scratch` and then unlinked; without a breadcrumb it is kept.
+  It is litter, not a lost alert (the claim it came from is recovered on its
+  own), so it does not trigger a summary.
+- **Retire.** Any other candidate gets a content-free breadcrumb in the
+  writefail directory, named `<stamp>.<id>.<pid>.<class>.tempretire`. The
+  breadcrumb records the class, temp name, size, mtime and pid, never the
+  payload. The temp is unlinked only after that breadcrumb is written, and
+  only if the path still names the classified file (same device and inode);
+  a file swapped in there is left for a later sweep. If no
+  writefail directory accepts the breadcrumb, the temp is kept, counted as
+  `retire-deferred`, and retried on the next sweep. The classes are `torn`
+  (unparseable or partial), `schema-invalid`, `unsafe-content`, `stale-ttl`
+  and `already-published`. `unsafe-content` is a valid event that carries a
+  capability: a URL with a `#` fragment (any `scheme://`, a scheme-relative
+  `//host` or a bare `www.` host), or a protected `#v3.` (managed
+  delivery) or `#i1.` (intake) fragment, in any string or key at any depth.
+  An orphaned temp need not come from the production builder, so recovery
+  never publishes such a capability to the group. A torn, invalid or unsafe
+  temp is never published into the outbox. The dispatcher's writefail recovery reads only `*.writefail`, so it
+  ignores these breadcrumbs.
+- **Failures.** A temp whose processing throws is counted as a sweep error
+  and the sweep continues with the next temp. The temp is normally left in
+  place for a later sweep. The exception is a race with a concurrent sweep in
+  another process: the loser's rename or unlink fails because the winner
+  already took the temp, so it counts a sweep error for a temp that is gone.
+  A name this same sweep removed in its sibling cleanup (Promote step 6) is
+  the one ENOENT that is not counted.
+- **Only regular files are read, and only the file that was checked.** An
+  entry with the temp name that `lstat` does not report as a regular file (a
+  symlink, directory or FIFO) is skipped without being opened. The read then
+  opens with `O_NOFOLLOW | O_NONBLOCK` and `fstat`s the descriptor. It
+  refuses, as a sweep error, anything that is not a regular file, and any
+  regular file whose device and inode differ from the `lstat`'s. So an entry
+  swapped between the `lstat` and the `open`, for a symlink, a FIFO or a
+  different regular file, is neither read, promoted, retired nor unlinked.
+  The open never blocks on a FIFO. The bytes then read from that descriptor
+  are the only bytes that can be published (see Promote).
+- **A swap between the `lstat` and the `open` that destroys the original is
+  a reported loss.** After such a refusal (a different regular file, a
+  non-regular file, or a symlink that `O_NOFOLLOW` refuses with ELOOP), the
+  sweep lists the outbox. If no name there is still the original (same
+  device and inode, for example a peer's claim) and no final with that name
+  or id exists, the event is lost. The sweep then writes a `.templost`
+  breadcrumb of class `swapped-before-open`, counts `lost-after-validation`
+  and names the event in the summary, as in Promote step 3. The event id
+  comes from the temp's file name, the `<uuid>` segment: the contents were
+  never read, and a descriptor would hold the swapped-in file. Nothing is
+  published. A plain ENOENT at the open (the path emptied, which is what a
+  peer's claim does) is not a swap and stays a plain sweep error, as does a
+  refusal when the outbox cannot be listed.
+- **Visibility.** A sweep emits one `observation` event from source
+  `bot-errors-outbox-temp-sweep` when it retires at least one `torn`,
+  `schema-invalid`, `unsafe-content` or `stale-ttl` temp (those retirements
+  lost an alert), when it defers one of those classes that this
+  process has not reported before, or when an event was lost
+  (`lost-after-validation`, which counts every `.templost` class: a swap
+  after validation, Promote step 3; a swap between the `lstat` and the
+  `open`; and a failed publish whose restore found no name left,
+  `restore-unheld`).
+  That holds
+  even when every loss count is 0, for example when every writefail
+  directory refuses. The counts are in `criticalAsset.evidenceRefs`, for
+  example `torn=1`, `schema-invalid=0`, `unsafe-content=0`, `stale-ttl=0`, `retire-deferred=0`,
+  `retire-deferred-new=0`, `lost-after-validation=0` and `sweep-error=0`,
+  because summary and evidence are confined to digests. `retire-deferred` is
+  every temp deferred in that sweep, of any class; `retire-deferred-new` is
+  the lost-alert ones reported for the first time. Each lost-after-validation
+  event is also named as `lost-event=<event id>`, for at most 10 events per
+  summary; the `.templost` breadcrumbs name every one. The
+  event carries no payload content. The summary is emitted even if the scan
+  stops early. `already-published` retirements lost nothing, so they get a
+  breadcrumb only. If the summary emit fails, the failure is swallowed and a
+  `.tempsweepfail` breadcrumb is written.
+- **Deferred temps are reported once per process.** Each deferred `torn`,
+  `schema-invalid`, `unsafe-content` or `stale-ttl` temp is remembered by device, inode and
+  temp name after a summary has carried it, so a temp that stays deferred
+  does not page on every sweep. A process restart forgets the set, so the
+  same temp is reported once more after each restart. Retiring or promoting
+  the temp frees its entry. After every sweep whose directory scan completed,
+  the set keeps only the keys deferred in that sweep, so an entry for a temp
+  that was removed some other way, or is no longer deferred, is dropped. A
+  still-deferred temp is seen again on every sweep, so this pruning can cause
+  at most one extra report (when that temp's processing throws once), never
+  a missed one. A sweep whose scan did not complete (the outbox could not be
+  read) prunes nothing. The set holds at most 1024 temps
+  (`OUTBOX_TEMP_DEFERRED_REPORT_CAP`); while it is full, further deferred
+  temps do not trigger a summary on their own, but they are still counted in
+  `retire-deferred` in any summary that is sent.
+- **A deferred `already-published` temp never triggers a summary.** It lost
+  nothing, and the summary reports an unrecoverable, confirmed loss. It still
+  counts in `retire-deferred` whenever a summary is sent.
+- **Sweep errors do not trigger a summary.** Their count rides along in any
+  summary that a loss or a newly deferred temp triggers.
+
+**Known limits.**
+
+- Recovery waits for the next TypeScript outbox write on the same host. An
+  orphan left by the last write before a host goes quiet stays in the outbox
+  until something writes there again. The Python and hook producers do not
+  run this sweep.
+- **Duplicate after a double failure.** When a writer's rename and its temp
+  cleanup both fail, it writes a `.writefail` breadcrumb carrying the event,
+  which the dispatcher replays. Once that writer's pid is dead, the sweep can
+  also promote the leftover temp, because dedupe checks only the outbox
+  listing, not the dispatcher's processing or sent state. The same event id
+  can then be delivered twice. This needs two filesystem failures in one
+  directory.
+- **Open until dispatcher-side dedupe: W2 and W3.** The two windows below
+  are known and open. Closing them needs event-id dedupe in the dispatcher,
+  which this sweep does not implement: the dispatcher has no event-id dedupe
+  for outbox events, and the sweep's own dedupe sees only the outbox
+  listing, not what the dispatcher has consumed or sent. Delivery is at most
+  once across concurrent sweeps and path swaps, except in W2 (including its
+  two-sweep race below).
+- **W1 (closed by the promotion intent): redelivery after the final
+  rename.** A promotion writes `.<fileName>.<pid>.promote.intent` (the claim
+  name and the claimed file's device and inode) once its scratch file is
+  complete and durable, and before the final rename. It removes the intent
+  only after the claim and every hard-linked sibling are unlinked; a failed
+  rename removes the intent before the scratch, and keeps the scratch if the
+  intent cannot go. So while an intent exists, its scratch disappears only
+  through the final rename. Each sweep first reads the intents of processes
+  that are gone (the temp orphan rule) and decides from the scratch: present
+  means the rename never happened, so the intent and the scratch go and the
+  claim is published once by the normal path; gone means the event was
+  published, so the claimed file's temp-shaped names go and nothing is
+  published again, even when the dispatcher has already consumed the final.
+  An intent still on disk holds every temp and scratch for its final. An
+  unreadable intent whose scratch is gone counts as a sweep error and keeps
+  holding, so that event is never published again. A crash while writing the
+  `.promote.tmp` scratch file (before any intent) leaves that file behind
+  until it is retired after the TTL; the claim is recovered normally.
+- **W2: a restore that leaves two names.** When publishing fails before the
+  final rename, the restore links the temp name back and then unlinks the
+  claim. If that unlink fails, both names hold the validated file. Whichever
+  name a later sweep claims first, it unlinks the other name before it
+  publishes, and tries again after (Promote step 6), so normally the event
+  is delivered once. It can still be delivered twice if both cleanup
+  unlinks fail; the leftover name is then promoted again once the
+  dispatcher has consumed the final. It can also be delivered twice when,
+  after the owner exits, two different sweeps (in two processes) each claim
+  one of the two names within milliseconds, before either one's cleanup
+  runs: both claims succeed, and both publish. A single sweep is safe,
+  because it claims one name and removes the other before it publishes.
+  In the same two-sweep race, if each sweep's early cleanup removes the
+  other's claim and then both publishes fail, neither restore has a name
+  to put back and the event is lost. That loss is reported, not silent:
+  each sweep writes a `restore-unheld` `.templost` breadcrumb naming the
+  event id (so there can be two for one event) and names the id in its
+  summary. If only one publish fails and the other sweep's publish
+  succeeds, the failing sweep finds the event's final and records no loss.
+  When the
+  `link` itself fails (it needs a directory entry, so ENOSPC can refuse it
+  too), the claim stays under this process's pid. That process is alive and
+  started before the claim's mtime, so no sweep takes the claim until the
+  process exits.
+- **W3: a swap loses the event.** If a different file replaces the temp
+  between the `lstat` and the claim (before the open, or after validation),
+  and nothing else holds the original, no sweep publishes it. The loss is
+  reported, not repaired: a `.templost` breadcrumb and a summary naming the
+  event id (see Promote step 3, and the `lstat`/`open` bullet above). That
+  is the same as a same-uid actor deleting the temp, which no design
+  survives. A loss found before the open names the id its file name
+  carries; that id was never checked against the contents. An original
+  moved out of the outbox, rather than destroyed, is also reported as lost.
+- **Path checks are not atomic with unlink.** The unlink of a claim, a
+  retired temp or a stale scratch file re-checks device and inode with
+  `lstat`, and then unlinks by path. A same-uid actor could swap the path in
+  that instant. The outbox directory is 0700, so only the owning user can do
+  this.
+- **Claim names are checked, then used.** A claim name is chosen only if no
+  file has it, and then used by rename, which would replace a file a
+  same-uid actor created in between. The outbox directory is 0700, so only
+  the owning user can do this.
+- **Single uid.** The sweep sets the validated file's mtime explicitly,
+  which requires the sweeping uid to own the file. A temp owned by another
+  uid would count a sweep error on every sweep and never be promoted. The
+  outbox is a single-uid 0700 directory, so this does not arise.
+- **Deferred reports are per process.** The once-only memory is in each
+  process, so on a host where several writer processes sweep the same
+  outbox, each of them reports the same deferred temp once (and once more
+  after each of its restarts).
+- **Breadcrumbs are not pruned.** `.tempretire`, `.templost` and `.tempsweepfail` files
+  accumulate in the writefail directory; nothing removes them. Two processes
+  sweeping the same temp at once can each write a breadcrumb for it (only one
+  unlink succeeds, so the summary counts it once).
+- **Summary instance.** The summary's `instance` is the process that ran the
+  sweep, not the instance whose alert was lost. The orphan's own instance is
+  in its temp name in the `.tempretire` breadcrumb.
+- **Future mtime.** A temp whose mtime is ahead of the clock (after a
+  backward clock step) has a negative age, so it counts as inside the grace
+  period and is skipped until the clock passes mtime plus 10 minutes. It is
+  delayed, not lost.
+- **Linux clock steps.** Linux start times come from `btime`, which the
+  kernel derives from the current wall clock minus uptime. A forward
+  wall-clock step (an NTP step on a host without an RTC, for example) moves
+  every derived start time forward by the step. A live writer whose temp
+  predates the step can then read as a reused pid, and its temp becomes a
+  candidate. Only a writer frozen past the 10-minute grace (SIGSTOP, a cgroup
+  freezer) keeps a temp that long, so the exposure is small.
+
 ## Runtime-agent health signal dispositions
 
 The scheduled health checker reads

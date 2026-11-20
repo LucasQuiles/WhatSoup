@@ -1,0 +1,221 @@
+{
+  "description": "Inputs of the main-as-oracle redaction suites (owner ruling R78): deploy/scripts/tests/test_bot_errors_redaction_main_oracle.py (Python at rest, read side, raw read and structured values), deploy/scripts/tests/test_bot_errors_redaction_main_oracle_card.py (the public card helper and the whole delivered card) and tests/redaction-main-oracle.test.ts (TypeScript at rest, read side, logger and protected-message paths). The suites pin this file by its sha256, so a change here makes them INCONCLUSIVE. Templates only: each {NAME} placeholder is expanded at run time from the parts below, so no secret-shaped literal is stored here. Hosts are reserved .test names that only the test suites pin. The fuzz seed and size live in the suites; this file holds the grammar they draw from. The parity corpora are read at fixed git blob ids that the suites hold.",
+  "linkHosts": ["links.example.test", "delivery.example.test"],
+  "canaries": {
+    "C1": ["Zq7Kw2", "Vn8Tp4"],
+    "C2": ["Wq3Rt8", "Yp5Lm2"],
+    "B64": ["Qb4s", "XcR9", "Lm2P"],
+    "PH": ["202", "555", "0143"],
+    "KB": ["MIIE", "bodY", "Q7Kx9"],
+    "FR1": ["F1rg", "X9kq"],
+    "FR2": ["F2rg", "Zz77"]
+  },
+  "armour": {
+    "BEGIN": ["-----", "BEGIN", " ", "PRIVATE", " ", "KEY", "-----"],
+    "END": ["-----", "END", " ", "PRIVATE", " ", "KEY", "-----"]
+  },
+  "parityCorpora": ["redaction-parity-corpus.jsonl", "redaction-parity-corpus-authorization.jsonl"],
+  "trackedSecrets": "A parity row has no placeholders. Its tracked secrets on a path are the tokens of its input (runs of letters, digits and . _ ~ + / % -, with those seven punctuation characters trimmed from both ends, 4 or more characters long) that main's output on that path no longer contains, except key words, plus any declaredSecrets for the row. A token is a key word when every part of it, split at - _ . and at a lower-to-upper case change, is in keyWords, case ignored. So a key or scheme word that main swallows is never a secret, and a value that main keeps, such as a build number, is never tracked. declaredSecrets can only add secrets; nothing removes one.",
+  "keyWords": [
+    "access", "api", "apikey", "auth", "authorization", "aws", "basic", "bearer", "client", "cookie", "cookies",
+    "credential", "credentials", "digest", "hawk", "http", "https", "id", "key", "keys", "negotiate", "passphrase",
+    "passwd", "password", "passwords", "pat", "proxy", "pwd", "refresh", "secret", "secrets", "session", "sessions",
+    "set", "token", "tokens", "www", "x"
+  ],
+  "keyWordSamples": [
+    "password", "PASSWORD", "Password", "passwd", "api_key", "API-KEY", "apiKey", "ApiKey", "x-api-key", "client_secret",
+    "clientSecret", "access_token", "accessToken", "refresh_token", "auth_token", "authorization", "Authorization",
+    "Proxy-Authorization", "proxy_authorization", "proxyAuthorization", "HTTP_AUTHORIZATION", "HTTP_PROXY_AUTHORIZATION",
+    "token", "Token", "TOKEN", "sessionToken", "bearerToken", "idToken", "x-auth-token", "secret", "SECRET",
+    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "cookie", "Set-Cookie", "session", "credential", "credentials",
+    "passphrase", "Bearer", "bearer", "Basic", "Digest", "Negotiate", "Hawk", "https"
+  ],
+  "valueSamples": ["hunterPassword", "MyPassword", "mypassword", "rawHeaders", "Custom", "user", "pass", "refused", "description", "tokenless"],
+  "declaredSecrets": {},
+  "liveness": {
+    "id": "liveness-plain-protected-link",
+    "template": "see https://links.example.test/s/#v3.{FR1}.AAAA end",
+    "why": "Every main read, logger and protected-message floor replaces this pinned link, so its fragment canary is hidden there. A floor that loaded without its pins or its link pass fails this check as INCONCLUSIVE instead of letting head match a weakened floor."
+  },
+  "shapes": [
+    {
+      "id": "B1-overlapping-keyed-values",
+      "review": "B7 final review B1: stored text, both languages",
+      "template": "links.example.test/s#x;token: links.example.test/s#y=Authorization: {C1}"
+    },
+    {
+      "id": "B2-chained-key-space-before-value",
+      "review": "B7 final review B2: public card only",
+      "template": "\\\"token\\\" = \"api_key\": {C1}"
+    },
+    {
+      "id": "F1-bearer-plus-link",
+      "review": "B7 final review F1: a Bearer credential glued to a later pinned link",
+      "template": "x https://links.example.test/s/#v3.AAAA.BBBB;Bearer {C1}+https://links.example.test/s/#v3.CCCC.DDDD"
+    },
+    {
+      "id": "F2-key-in-value",
+      "review": "B7 final review F2: a credential that ends in a break and a key word",
+      "template": "token: \"{C1}-session\": refused"
+    },
+    {
+      "id": "F3-quote-closes-at-later-key",
+      "review": "B7 final review F3: a quoted value that closes at a later key's quote",
+      "template": "\"secret\": \"{C1}, retry api_key\": \"{C2}\""
+    }
+  ],
+  "named": [
+    {"id": "F2b-card-after-link", "template": "x https://links.example.test/s/#v3.AAAA.BBBB;token: {C1}-session: refused"},
+    {"id": "B1-overlap-password", "template": "links.example.test/s#x;password= links.example.test/s#y;secret: {C1}"},
+    {"id": "B1-overlap-bearer", "template": "links.example.test/s#x;token: links.example.test/s#y=Bearer {C1}"},
+    {"id": "B2-chained-key-tab", "template": "\\\"token\\\" = \"api_key\":\t{C1}"},
+    {"id": "B2-chained-key-plain", "template": "\"token\" = \"api_key\": {C1}"},
+    {"id": "F1-bearer-slash-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1}/https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F1-bearer-underscore-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1}_https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F1-bearer-tilde-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1}~https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F1-bearer-eq-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1}=https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F1-bearer-comma-slash-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA,Bearer {C1}/https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F1-bearer-plus-www", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1}+https://www.Links.Example.Test:443/setup/#v3.{FR2} end"},
+    {"id": "F1-bearer-slash-bare", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1}/links.example.test/s#v3.{FR2}.BBBB end"},
+    {"id": "F1-bearer-dot-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1}.https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F1-bearer-space-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Bearer {C1} https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F1-token-plus-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token: {C1}+https://links.example.test/s/#v3.{FR2}.BBBB end"},
+    {"id": "F2-dot-token", "template": "password=\"{C1}.token\": expired"},
+    {"id": "F2-dot-session-eq", "template": "token: {C1}.session= refused"},
+    {"id": "F2-dash-pat", "template": "api_key: {C1}-pat: denied"},
+    {"id": "F2-dash-secret-space", "template": "token: {C1}-secret = refused"},
+    {"id": "F2-underscore-session", "template": "token: \"{C1}_session\": refused"},
+    {"id": "F2-underscore-token-eq", "template": "token: {C1}_token= refused"},
+    {"id": "F2-proxy-authorization", "template": "cookie: \"{C1}-Proxy-Authorization\": refused"},
+    {"id": "F2-single-dot-password", "template": "secret='{C1}.password': refused"},
+    {"id": "F2-json-dash-api-key", "template": "\"password\":\"{C1}-api_key\":\"x\""},
+    {"id": "F2-link-comma-api-key", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA,api_key= {C1}.token= denied end"},
+    {"id": "F2-link-quoted-pat", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;secret: \"{C1}-pat\": refused end"},
+    {"id": "F3-no-final-quote", "template": "\"secret\": \"{C1}, retry api_key\": \"{C2}"},
+    {"id": "F3-single-quotes", "template": "secret='{C1} retry token': '{C2}'"},
+    {"id": "F3-unquoted-later-value", "template": "token: \"{C1} and password\": {C2}"},
+    {"id": "N-glued-key-in-fragment-middle", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token:{C1};more end"},
+    {"id": "N-key-after-fragment-crlf", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token:\r\n {C1} end"},
+    {"id": "N-auth-after-fragment-crlf-bearer", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Authorization:\r\n Bearer {C1} end"},
+    {"id": "N-bearer-after-fragment-tab", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA,Bearer\t{C1} end"},
+    {"id": "N-basic-after-fragment", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Basic {B64} end"},
+    {"id": "N-phone-after-fragment", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;phone: {PH} end"},
+    {"id": "N-block-after-fragment", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;{BEGIN}\n{KB}\n{END} end"},
+    {"id": "N-key-then-block-after-fragment", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token: {BEGIN}\n{KB}\n{END} end"},
+    {"id": "N-block-end-glued-key", "template": "{BEGIN}\n{KB}\n{END}token: {C1} end"},
+    {"id": "N-block-then-auth", "template": "{BEGIN}\n{KB}\n{END}\nAuthorization: Bearer {C1}"},
+    {"id": "N-chain-colon-colon", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token: password: {C1} end"},
+    {"id": "N-chain-eq-eq", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token= api_key= {C1} end"},
+    {"id": "N-chain-quoted", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;\"token\": \"api_key\":{C1} end"},
+    {"id": "N-chain-link2-key", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token: https://links.example.test/s/#v3.{FR2}.BBBB;password: {C1} end"},
+    {"id": "N-chain-two-secrets", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;token: {C1} https://links.example.test/s/#v3.{FR2}.BBBB;secret: {C2} end"},
+    {"id": "N-chain-triple-quoted", "template": "\"token\" = \"api_key\":\"secret\"={C1} end"},
+    {"id": "N-chain-hyphen-key-value", "template": "\"token\": \"Proxy-Authorization\": Bearer {C1} end"},
+    {"id": "N-json-url-then-token", "template": "{\"url\":\"https://links.example.test/s/#v3.{FR1}.AAAA;token: {C1}\"}"},
+    {"id": "N-quoted-value-holds-link", "template": "token: \"{C1} https://links.example.test/s/#v3.{FR1}.AAAA\" end"},
+    {"id": "N-value-ends-in-link2-quote", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;secret: '{C1} https://links.example.test/s/#v3.{FR2}.BBBB' end"},
+    {"id": "N-auth-whole-line-two-links", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA;Authorization: Token {C1} https://links.example.test/s/#v3.{FR2}.BBBB {C2}\nnext"},
+    {"id": "N-cookie-holds-link", "template": "Cookie: a=https://links.example.test/s/#v3.{FR1}.AAAA; session= {C1} end"},
+    {"id": "N-crlf-fold-auth", "template": "https://links.example.test/s/#v3.{FR1}.AAAA;Authorization: Token\r\n {C1}\r\nnext"},
+    {"id": "N-bearer-amp-http-link", "template": "x https://links.example.test/s/#v3.{FR1}.AAAA&Bearer {C1}+http://delivery.example.test/s#v3.{FR2}.BBBB end"}
+  ],
+  "acceptedResidual": {
+    "id": "accepted-residual-unknown-first-word",
+    "template": "'token': &Bearer {B64}",
+    "excludedPaths": ["at_rest", "read", "json"],
+    "ruling": "Lane LEDGER.md:2223 (ruling Q2): at rest, the value after an unknown first word that follows a secret key is accepted; the public card must remove the whole value.",
+    "why": "The paths derived from the stored text skip this one case: the read side shows the stored text with protected links replaced, and json applies the at-rest redactor to every string of a structured value, so a value accepted at rest is visible there too. Every other path compares it with main as usual. The card suite asserts it absolutely, on the card helper and on the whole delivered card, whatever main does."
+  },
+  "fuzz": {
+    "slots": {
+      "prefix": ["", "delivery failed ", "url=", "'", "\"", "(", "<", "[", "\\n", "\r\n", "{\"msg\": \"", "see "],
+      "link": [
+        "https://links.example.test/s/#v3.{FR1}.AAAA",
+        "links.example.test/s#v3.{FR1}.AAAA",
+        "https://links.example.test/setup#v3.{FR1}.AAAA",
+        "https://WWW.links.example.test/s/#v3.{FR1}.AAAA",
+        "https://links.example.test:443/s/#v3.{FR1}.AAAA",
+        "http://delivery.example.test/s#v3.{FR1}.AAAA"
+      ],
+      "link2": [
+        "https://links.example.test/s/#v3.{FR2}.BBBB",
+        "links.example.test/s#v3.{FR2}.BBBB",
+        "https://www.Links.Example.Test:443/setup/#v3.{FR2}",
+        "http://delivery.example.test/s#v3.{FR2}.BBBB"
+      ],
+      "linkOrNone": ["", "https://links.example.test/s/#v3.{FR1}.AAAA", "", "links.example.test/s#v3.{FR1}.AAAA", "", "http://delivery.example.test/s#v3.{FR1}.AAAA"],
+      "glue": [";", ",", "&", "'", "", ":", "=", "!", "(", ")", "*", "+", "$", "@", "~", "?", "/", "%", "-", ".", "_"],
+      "key": [
+        "token", "password", "api_key", "secret", "cookie", "session", "Authorization", "Proxy-Authorization",
+        "x-auth-token", "AWS_SECRET_ACCESS_KEY", "pat", "credential", "accessToken", "Token", "PASSWORD",
+        "client_secret", "refresh_token", "passphrase", "HTTP_AUTHORIZATION", "sessionToken"
+      ],
+      "sep": [": ", "= ", ":\n ", ":\r\n ", ":\\n ", " : ", "=\t", "\": \"", "':'", ": '", "=\"", ":", "=", ": \\\"", "\": ", "\\\": \\\"", "':", " = '"],
+      "value": [
+        "{C1}", "Bearer {C1}", "Token {C1}", "Basic {B64}", "Digest username=\"u\", response=\"{C1}\"",
+        "{C1}+https://links.example.test/s/#v3.{FR2}.BBBB", "{C1}/https://links.example.test/s/#v3.{FR2}.BBBB",
+        "{C1}_https://links.example.test/s/#v3.{FR2}.BBBB", "{C1}links.example.test/s#v3.{FR2}.BBBB",
+        "{C1}=https://links.example.test/s/#v3.{FR2}.BBBB", "{C1} https://links.example.test/s/#v3.{FR2}.BBBB",
+        "{C1}.https://links.example.test/s/#v3.{FR2}.BBBB", "{C1},https://links.example.test/s/#v3.{FR2}.BBBB",
+        "'{C1} https://links.example.test/s/#v3.{FR2}.BBBB'x", "{C1}-session: {C2}", "password: {C1}",
+        "{BEGIN}\n{KB}\n{END}", "+1{PH}", "{C1}-token= {C2}", "\"{C1}, retry api_key\": \"{C2}\"", "{C1}.secret: {C2}",
+        "Negotiate {C1}", "{C1}&{C2}", "{C1};{C2}", "\"{C1}\" {C2}", "Bearer {C1}~{C2}"
+      ],
+      "scheme": [
+        "Bearer {C1}", "bearer\t{C1}", "Basic {B64}", "Bearer {C1}+https://links.example.test/s/#v3.{FR2}.BBBB",
+        "Bearer {C1}/links.example.test/s#v3.{FR2}.BBBB", "Basic {B64}/https://links.example.test/s/#v3.{FR2}.BBBB",
+        "Basic {B64}+https://links.example.test/s/#v3.{FR2}.BBBB", "phone: {PH}", "for {PH}", "line {PH}", "msisdn={PH}",
+        "phone_number {PH}", "{BEGIN}\n{KB}\n{END}", "{BEGIN}\n{KB}", "Bearer {C1}~https://links.example.test/s/#v3.{FR2}.BBBB",
+        "Bearer {C1}=links.example.test/s#v3.{FR2}.BBBB", "Bearer {C1}_https://www.Links.Example.Test:443/setup/#v3.{FR2}",
+        "Bearer {C1},{C2}"
+      ],
+      "tail": [
+        " end", "", "\nnext line", " https://links.example.test/s/#v3.{FR2}.BBBB end", ";{C2} end",
+        "\\nhttps://links.example.test/s/#v3.{FR2}.BBBB", "'", "\"}", " {C2}", "+https://links.example.test/s/#v3.{FR2}.BBBB",
+        "/links.example.test/s#v3.{FR2}.BBBB"
+      ],
+      "quote": ["", "\"", "'", "\\\"", "\\\\\\\""],
+      "break": ["-", ".", "_", "", "-x-"],
+      "keyInValueSep": [": ", "= ", ":", "=", " = ", ":\t"],
+      "keyInValueTail": ["{C2}", "refused", "Bearer {C2}"],
+      "prose": [", retry ", " retry ", " and ", ". ", " then "],
+      "quoteSep": [": ", ":", "=", " = "],
+      "chainSep": [": ", "= ", "=", ":", " = ", "\": \"", "':'"],
+      "schemeSecret": ["Bearer {C1}", "bearer {C1}", "Basic {B64}", "Token {C1}"],
+      "bearerJoin": ["+", "/", "_", "~", "=", ".", "-", ",", ""],
+      "overlapLink1": ["links.example.test/s#v3.{FR1}.AAAA", "https://links.example.test/s/#v3.{FR1}.AAAA", "links.example.test/s#x"],
+      "overlapLink2": ["links.example.test/s#v3.{FR2}.BBBB", "https://links.example.test/s/#v3.{FR2}.BBBB", "links.example.test/s#y"],
+      "overlapSep": [": ", "=", ": "],
+      "overlapKey2": [
+        "token", "password", "api_key", "secret", "cookie", "session", "Authorization", "Proxy-Authorization",
+        "x-auth-token", "AWS_SECRET_ACCESS_KEY", "pat", "credential", "accessToken", "Token", "PASSWORD",
+        "client_secret", "refresh_token", "passphrase", "HTTP_AUTHORIZATION", "sessionToken", "Bearer"
+      ],
+      "overlapSep2": [": ", "=", " "],
+      "overlapTail": ["", " end", ";{C2}", " {C2}"],
+      "authPrefix": ["", "x ", "https://links.example.test/s/#v3.{FR1}.AAAA;", "links.example.test/s#v3.{FR1}.AAAA,", "https://links.example.test/s/#v3.{FR1}.AAAA&"],
+      "authOpen": [
+        "Authorization: ", "{\"authorization\": \"", "{\\\"Authorization\\\":\\\"", "rawHeaders: [ 'Authorization', '",
+        "[('Authorization', '", "Proxy-Authorization:\n ", "HTTP_AUTHORIZATION=", "proxyAuthorization: ",
+        "request refused\nAuthorization: "
+      ],
+      "authScheme": ["", "Bearer ", "Basic ", "Token ", "Negotiate ", "Hawk ", "Digest response=", "bearer\t"],
+      "authClose": ["", "\", \"accept\": \"json\"}", "\\\"}", "' ]", "')]", "\naccept: json"],
+      "authAfter": ["", " was refused", " https://links.example.test/s/#v3.{FR2}.BBBB", "+https://links.example.test/s/#v3.{FR2}.BBBB", ";{C2}", "\n {C2}", "\\n {C2}", ", {C2}"]
+    },
+    "families": [
+      {"name": "link-key", "weight": 7, "slots": ["prefix", "link", "glue", "key", "sep", "value", "tail"]},
+      {"name": "link-key-pair", "weight": 2, "slots": ["prefix", "link", "glue", "key", "sep", "value", "tail", [" "], "link", "glue", "key", "sep", ["{C2}"]]},
+      {"name": "link-scheme", "weight": 3, "slots": ["prefix", "link", "glue", "scheme", "tail"]},
+      {"name": "plain-key", "weight": 3, "slots": ["prefix", "key", "sep", "value", "tail"]},
+      {"name": "key-in-value", "weight": 3, "slots": ["key", "sep", "quote", ["{C1}"], "break", "key", "quote", "keyInValueSep", "keyInValueTail"]},
+      {"name": "quote-close-double", "weight": 1, "slots": [["\""], "key", ["\""], "quoteSep", ["\""], ["{C1}"], "prose", "key", ["\""], "quoteSep", ["\""], ["{C2}"], ["\"", ""]]},
+      {"name": "quote-close-single", "weight": 1, "slots": [["'"], "key", ["'"], "quoteSep", ["'"], ["{C1}"], "prose", "key", ["'"], "quoteSep", ["'"], ["{C2}"], ["'", ""]]},
+      {"name": "quote-close-escaped", "weight": 1, "slots": [["\\\""], "key", ["\\\""], "quoteSep", ["\\\""], ["{C1}"], "prose", "key", ["\\\""], "quoteSep", ["\\\""], ["{C2}"], ["\\\"", ""]]},
+      {"name": "chain", "weight": 2, "slots": ["linkOrNone", "glue", "key", "chainSep", "linkOrNone", "glue", "key", "chainSep", "linkOrNone", "key", "chainSep", ["{C1} end"]]},
+      {"name": "bearer-glue", "weight": 2, "slots": [["x "], "link", "glue", "schemeSecret", "bearerJoin", "link2", [" end"]]},
+      {"name": "overlap", "weight": 1, "slots": ["overlapLink1", "glue", "key", "overlapSep", "overlapLink2", "glue", "overlapKey2", "overlapSep2", ["{C1}"], "overlapTail"]},
+      {"name": "auth", "weight": 2, "slots": ["authPrefix", "authOpen", "authScheme", ["{C1}"], "authClose", "authAfter"]}
+    ]
+  }
+}

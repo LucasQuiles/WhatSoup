@@ -71,6 +71,10 @@ def reset_tailscale_cache() -> None:
 
 RELAY_BACKOFF_FAILURE_THRESHOLD: int = 3
 RELAY_BACKOFF_SCHEDULE_S: list[int] = [300, 900, 3600]
+EVENT_UUID4_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
 
 
 REMOTE_CLAIM_SCRIPT = r"""
@@ -3962,7 +3966,10 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     else:
         diagnostics["logHints"] = [str(state_root() / "logs/collector.jsonl")]
     event["delivery"] = relayed_delivery(event.get("delivery"))
-    event = redacted_collector_payload(event)
+    redacted_event = redacted_collector_payload(event)
+    if EVENT_UUID4_RE.fullmatch(event_id):
+        redacted_event["id"] = event_id
+    event = redacted_event
     path = local_outbox_path(event, remote_host)
     target = _durable_target(path)
     absent = JsonVersion(False, None, None, None)

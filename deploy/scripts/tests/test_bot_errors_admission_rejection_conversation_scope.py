@@ -1017,14 +1017,14 @@ def test_the_email_branch_calls_the_recorder_on_the_real_path(tmp_path):
     )
 
 
-def test_one_format_event_call_feeds_both_delivered_surfaces(tmp_path):
-    """TI: pin the "one format_event call" invariant on the REAL path.
+def test_one_public_card_call_feeds_both_delivered_surfaces(tmp_path):
+    """TI: pin the "one public-card call" invariant on the real path.
 
     The sibling test above hands one string to two mocks it installed, so it
     cannot see how many times the dispatcher formatted. This drives the real
     process_one down the email-fallback route with the primary transport
-    failing, counts format_event calls, and asserts the operator text handed
-    to WhatsApp and to email is the SAME string from a SINGLE call.
+    failing, counts public-card calls, and asserts the operator text handed
+    to WhatsApp and to email is the same string from one call.
     """
     from unittest.mock import patch
 
@@ -1043,7 +1043,7 @@ def test_one_format_event_call_feeds_both_delivered_surfaces(tmp_path):
     fallback.chmod(0o755)
 
     formatted: list[str] = []
-    real_format = mod.format_event
+    real_format = mod.format_public_message
 
     def _counting_format(evt):
         rendered = real_format(evt)
@@ -1051,7 +1051,7 @@ def test_one_format_event_call_feeds_both_delivered_surfaces(tmp_path):
         return rendered
 
     mailed: list[tuple[str, str]] = []
-    with patch.object(mod, "format_event", side_effect=_counting_format), \
+    with patch.object(mod, "format_public_message", side_effect=_counting_format), \
          patch.object(mod, "send_whatsapp", side_effect=RuntimeError("transport down")), \
          patch.object(mod, "email_fallback_blocked_reason", return_value=None), \
          patch.object(mod, "EMAIL_FALLBACK", str(fallback)), \
@@ -1061,7 +1061,7 @@ def test_one_format_event_call_feeds_both_delivered_surfaces(tmp_path):
 
     assert (ok, detail) == (True, "email_delivered"), (ok, detail)
     assert len(formatted) == 1, (
-        f"both surfaces must be fed from ONE format_event call: {len(formatted)}"
+        f"both surfaces must be fed from ONE public-card call: {len(formatted)}"
     )
     assert mailed and mailed[0][1] == formatted[0], (
         "the email body must be the same string the primary route was handed"

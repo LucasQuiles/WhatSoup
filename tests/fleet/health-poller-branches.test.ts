@@ -216,6 +216,22 @@ describe('recovery debt parser contract', () => {
     });
   });
 
+  // continuity.open counts unresolved + ambiguous gaps (the producer's
+  // definition): counts that disagree are a contradiction in either direction.
+  it.each([
+    ['below', recoveryDebt({ continuity: { readable: true, open: 0, unresolved: 1, ambiguous: 0 } })],
+    ['above', recoveryDebt({
+      reason: 'continuity_gap_open',
+      reasons: ['continuity_gap_open', 'historical_turn_catchup'],
+      continuity: { readable: true, open: 3, unresolved: 1, ambiguous: 1 },
+    })],
+  ])('rejects a continuity open count %s unresolved + ambiguous', (_label, debt) => {
+    expect(parseRecoveryDebtHealth({ recovery_debt: debt })).toEqual({
+      kind: 'invalid',
+      errors: ['recovery_debt.continuity.open_contradiction'],
+    });
+  });
+
   it('accepts the canonical blocking delivery projection and normalizes its aggregate total', () => {
     expect(parseRecoveryDebtHealth({
       recovery_debt: recoveryDebt({

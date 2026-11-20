@@ -325,6 +325,44 @@ print(state["awaiting_q_since"])
     expect(result).toBe('0');
   });
 
+  it('does not arm the awaiting-Q clock from public alert cards led by the warning, reminder or information icon', () => {
+    // The public alert card opens with 🟠 (warning), 🟡 (reminder) or ℹ/ℹ️
+    // (information or unproven clear); its remediation lines routinely say
+    // "reply". Each body is checked from a clean clock so one icon cannot mask
+    // another, and a plain ask in the same run must still arm the clock.
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+results = []
+for pk, body in enumerate((
+    "\\U0001f7e0 *reply queue is delayed*\\n_reply queue is delayed_\\n\\n*What you need to do:* reply if it persists.",
+    "\\U0001f7e1 \\u21bb *still open: reply queue is delayed*\\n*What you need to do:* reply when reviewed.",
+    "\\u2139 *Recovery not confirmed*\\n*What you need to do:* reply if the bot stays quiet.",
+    "\\u2139\\ufe0f *Recovery not confirmed*\\n*What you need to do:* reply if the bot stays quiet.",
+    "please reply",
+), start=10):
+    state = m.default_state()
+    state["phase"] = "monitoring"
+    state["awaiting_q_since"] = 0
+    m.classify_activity(state, [{
+      "pk": pk,
+      "body": body,
+      "timestamp": 9100 + pk,
+      "is_from_me": 1,
+      "sender_name": "personal",
+    }])
+    results.append(str(state["awaiting_q_since"]))
+print(",".join(results))
+`);
+    expect(result).toBe('0,0,0,0,9114');
+  });
+
   it('arms the awaiting-Q clock for a legitimate ask that extends a reminder header', () => {
     const root = tmpRoot();
     const result = python(`${importModulePrelude()}

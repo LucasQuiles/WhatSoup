@@ -2652,7 +2652,7 @@ def critical_asset_from_health_evidence(evidence: str) -> dict[str, Any] | None:
         recoverability = "operator_recoverable"
         confidence = "confirmed"
         operator_action = "Repair auth directory and creds permissions to private mode and verify no unauthorized process can read or mutate them."
-    elif "fail credential:" in lower or "fail credential_meta:" in lower:
+    elif "fail credential_check:" in lower or "fail credential_meta:" in lower:
         code = "CREDENTIAL_FILE_INTEGRITY_DRIFT"
         recoverability = "operator_recoverable"
         confidence = "confirmed"
@@ -7511,7 +7511,7 @@ def required_credential_inventory(profile: dict[str, Any]) -> list[str]:
         paths, expected = credential_requirement_paths(root, requirement)
         if not paths:
             lines.append(
-                f"FAIL credential: {requirement_ref} missing required "
+                f"FAIL credential_check: {requirement_ref} missing required "
                 f"{credential_path_ref(expected, prefix='expected_path')}"
             )
             continue
@@ -7519,31 +7519,33 @@ def required_credential_inventory(profile: dict[str, Any]) -> list[str]:
             path_ref = credential_path_ref(path)
             parent_issues = credential_parent_dir_issues(root, path)
             for issue in parent_issues:
-                lines.append(f"FAIL credential: {requirement_ref} {issue} {path_ref}")
+                lines.append(f"FAIL credential_check: {requirement_ref} {issue} {path_ref}")
             try:
                 st = path.lstat()
             except OSError as exc:
                 lines.append(
-                    f"FAIL credential: {requirement_ref} stat_failed "
+                    f"FAIL credential_check: {requirement_ref} stat_failed "
                     f"{path_ref} error={redact_evidence_string(str(exc), 160)}"
                 )
                 continue
             mode = stat.S_IMODE(st.st_mode)
             age_days = int((time.time() - st.st_mtime) / 86400)
             if stat.S_ISLNK(st.st_mode):
-                lines.append(f"FAIL credential: {requirement_ref} symlink {path_ref} mode={mode:o} age_days={age_days}")
+                lines.append(f"FAIL credential_check: {requirement_ref} symlink {path_ref} mode={mode:o} age_days={age_days}")
             elif not stat.S_ISREG(st.st_mode):
-                lines.append(f"FAIL credential: {requirement_ref} non_regular {path_ref} mode={mode:o} age_days={age_days}")
+                lines.append(f"FAIL credential_check: {requirement_ref} non_regular {path_ref} mode={mode:o} age_days={age_days}")
             elif not file_readable(path, mode):
-                lines.append(f"FAIL credential: {requirement_ref} unreadable {path_ref} mode={mode:o} age_days={age_days}")
+                lines.append(f"FAIL credential_check: {requirement_ref} unreadable {path_ref} mode={mode:o} age_days={age_days}")
             elif mode & 0o022:
-                lines.append(f"FAIL credential: {requirement_ref} world_writable {path_ref} mode={mode:o} age_days={age_days}")
+                lines.append(f"FAIL credential_check: {requirement_ref} world_writable {path_ref} mode={mode:o} age_days={age_days}")
             elif mode & 0o077:
-                lines.append(f"FAIL credential: {requirement_ref} non_private {path_ref} mode={mode:o} age_days={age_days}")
+                lines.append(f"FAIL credential_check: {requirement_ref} non_private {path_ref} mode={mode:o} age_days={age_days}")
             elif parent_issues:
                 continue
             else:
-                lines.append(f"OK credential: {requirement_ref} {path_ref} mode={mode:o} age_days={age_days}")
+                lines.append(f"OK credential_check: {requirement_ref} {path_ref} mode={mode:o} age_days={age_days}")
+    # The label is credential_check, not credential: "credential:" is a secret
+    # key to the shared redactors, which would hide the requirement name.
     return lines
 
 

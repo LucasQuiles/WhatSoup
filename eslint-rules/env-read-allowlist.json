@@ -93,8 +93,8 @@
     },
     {
       "file": "src/lib/bot-errors-outbox.ts",
-      "allowedUnmarkedSites": 18,
-      "reason": "outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by design: lib cannot import config, and config WRITES TMPDIR at load \u2014 the env var is the sanctioned lib-side channel). The DIR/test/identity vars stay env-late because their absence semantics feed vitest isolation and outbox provenance policy."
+      "allowedUnmarkedSites": 19,
+      "reason": "outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR + TZ (the stale-temp sweep passes TZ through to the darwin ps child so ps renders lstart in the zone Date parses it in; one site) (env-late by design: lib cannot import config, and config WRITES TMPDIR at load \u2014 the env var is the sanctioned lib-side channel). The DIR/test/identity vars stay env-late because their absence semantics feed vitest isolation and outbox provenance policy."
     },
     {
       "file": "src/lib/emit-alert.ts",

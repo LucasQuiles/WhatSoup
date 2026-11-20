@@ -42,7 +42,7 @@ def test_a_credential_timer_commit_does_not_record_a_failed_legacy_renotify(make
 
     after_state = rig.state()
     after = after_state["openIncidents"][key]
-    assert any(f"event: {repeated['id']}" in send["text"] for send in rig.group_attempts)
+    assert len(rig.group_attempts_for(repeated["id"])) == 1
     assert rig.group_for(repeated["id"]) == []
     assert rig.disposition(repeated["id"]) == ["outbox"]
     assert {field: after.get(field) for field in fields} == {

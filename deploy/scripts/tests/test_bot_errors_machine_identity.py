@@ -522,13 +522,13 @@ def test_dispatcher_poison_page_names_the_configured_machine(monkeypatch: pytest
     poison = paths["processing"] / "poison.json"
     poison.write_text("{not json", encoding="utf-8")
     rendered: list[dict[str, Any]] = []
-    real_format_event = dispatcher.format_event
+    real_format_public_message = dispatcher.format_public_message
 
     def capture(event: dict[str, Any]) -> str:
         rendered.append(dict(event))
-        return real_format_event(event)
+        return real_format_public_message(event)
 
-    monkeypatch.setattr(dispatcher, "format_event", capture)
+    monkeypatch.setattr(dispatcher, "format_public_message", capture)
     monkeypatch.setattr(dispatcher, "send_whatsapp", lambda *args, **kwargs: None)
     dispatcher.quarantine_poison(poison, paths["quarantine"], "probe")
     assert [event["machine"] for event in rendered] == [CONFIGURED]

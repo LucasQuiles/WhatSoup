@@ -202,7 +202,7 @@ def test_sweep_resolves_and_removes_stable_entry(tmp_path):
 
     assert resolved == 1 and errors == 0
     assert len(sends) == 1
-    assert "resolved" in sends[0].lower()
+    assert "Repeated alerts stopped. Recovery is not confirmed." in sends[0]
     reloaded = mod.load_incident_state(paths)
     assert KEY not in reloaded.get("flapState", {})
 
@@ -570,13 +570,12 @@ def test_rate_decay_resolve_never_claims_stable(tmp_path):
 
     assert (resolved, errors) == (1, 0)
     assert len(sends) == 1
-    assert "STILL OPEN" in sends[0], f"expected persistent-condition wording, got:\n{sends[0]}"
+    assert "the problem is still open" in sends[0].lower(), f"expected persistent-condition wording, got:\n{sends[0]}"
     assert "stable after" not in sends[0], f"must not claim recovery, got:\n{sends[0]}"
 
 
-def test_genuine_silence_still_reports_stable(tmp_path):
-    """The honest recovery wording must survive: a source that truly went quiet
-    still resolves as 'stable after N flaps'."""
+def test_genuine_silence_reports_unconfirmed_recovery(tmp_path):
+    """A quiet source does not prove recovery without the dispatcher proof gate."""
     mod = _load(tmp_path)
     paths = mod.state_paths()
     state = mod.load_incident_state(paths)
@@ -595,5 +594,6 @@ def test_genuine_silence_still_reports_stable(tmp_path):
     resolved, _ = mod.sweep_flap_storms(paths)
 
     assert resolved == 1
-    assert "stable after" in sends[0], f"expected recovery wording, got:\n{sends[0]}"
-    assert "STILL OPEN" not in sends[0]
+    assert "recovery is not confirmed" in sends[0].lower(), f"expected honest wording, got:\n{sends[0]}"
+    assert "stable after" not in sends[0].lower()
+    assert "the problem is still open" not in sends[0].lower()

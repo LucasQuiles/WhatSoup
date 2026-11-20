@@ -57,6 +57,16 @@ def _recovery_count(value: object) -> Optional[int]:
     return value if type(value) is int and 0 <= value <= MAX_SAFE_INTEGER else None
 
 
+def _continuity_counts_agree(counts: list) -> bool:
+    """Whether continuity open (counts[0]) is unresolved + ambiguous (counts[1] + counts[2]).
+
+    The producer defines open that way (src/core/continuity-gap-ledger.ts), so
+    counts that disagree are a contradiction, and a contradictory projection is
+    not valid evidence (docs/runbook.md).
+    """
+    return counts[0] == counts[1] + counts[2]
+
+
 def recovery_debt_issue(d: object) -> Optional[str]:
     """Validate the bounded recovery-debt fields used by operational gates."""
     if not isinstance(d, dict) or "recovery_debt" not in d:
@@ -67,6 +77,38 @@ def recovery_debt_issue(d: object) -> Optional[str]:
     if "reason" not in debt:
         return "recovery_debt_invalid"
     open_debt = debt.get("open")
+    extended_fields = (
+        "service_blocking", "attention", "reasons", "turn_recovery",
+        "completed_delivery_identity", "delivery",
+    )
+    # Older producers disclose continuity only. Any extended field commits
+    # the producer to the complete extended contract, including null fields.
+    if not any(field in debt for field in extended_fields):
+        continuity = debt.get("continuity")
+        if type(open_debt) is not bool or not isinstance(continuity, dict):
+            return "recovery_debt_invalid"
+        if type(continuity.get("readable")) is not bool:
+            return "recovery_debt_invalid"
+        counts = []
+        for field in ("open", "unresolved", "ambiguous"):
+            value = continuity.get(field)
+            # JSON 1.0 and 1e0 have the same integer value as 1 in JavaScript.
+            if type(value) is float and value.is_integer():
+                value = int(value)
+            counts.append(_recovery_count(value))
+        if any(value is None for value in counts):
+            return "recovery_debt_invalid"
+        if not _continuity_counts_agree(counts):
+            return "recovery_debt_invalid"
+        blocking = not continuity["readable"]
+        expected_reason = "continuity_gap_unreadable" if blocking else (
+            "continuity_gap_open" if counts[0] > 0 else None
+        )
+        if debt["reason"] != expected_reason or open_debt != (blocking or counts[0] > 0):
+            return "recovery_debt_invalid"
+        if d.get("status") == "healthy" and blocking:
+            return "recovery_debt_status_contradiction"
+        return None
     service_blocking = debt.get("service_blocking")
     attention = debt.get("attention")
     if type(open_debt) is not bool or type(service_blocking) is not bool:
@@ -107,6 +149,8 @@ def recovery_debt_issue(d: object) -> Optional[str]:
     )
     counts = [_recovery_count(section.get(field)) for section, field in count_fields]
     if any(value is None for value in counts):
+        return "recovery_debt_invalid"
+    if not _continuity_counts_agree(counts):
         return "recovery_debt_invalid"
     if "next_action" not in identity or "oldest_uncorroborated_at" not in delivery:
         return "recovery_debt_invalid"
