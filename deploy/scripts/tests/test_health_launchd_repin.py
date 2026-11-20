@@ -46,6 +46,8 @@ def job(tmp_path):
     raw = plistlib.dumps(original)
     plist.write_bytes(raw)
     plist.chmod(0o600)
+    # The shim's concurrent writer copies these bytes back into the plist.
+    (tmp_path / "original.plist").write_bytes(raw)
     state = tmp_path / "service.json"
     state.write_text(json.dumps(original))
     shim = tmp_path / "bin"
@@ -64,6 +66,12 @@ elif mode == "list":
     lists = count("list")
     if os.environ.get("EDIT_ON_LIST") == str(lists):
         with (h / "Library/LaunchAgents/com.bot-errors.health.plist").open("ab") as f: f.write(b"\\n")
+    # Concurrent writers that rewrite the plist in place: the original bytes, or the staged candidate's bytes.
+    if os.environ.get("RESTORE_ON_LIST") == str(lists):
+        (h / "Library/LaunchAgents/com.bot-errors.health.plist").write_bytes((h / "original.plist").read_bytes())
+    if os.environ.get("CANDIDATE_ON_LIST") == str(lists):
+        candidate = next((h / "Library/LaunchAgents").glob(".health-candidate-*"))
+        (h / "Library/LaunchAgents/com.bot-errors.health.plist").write_bytes(candidate.read_bytes())
     if os.environ.get("LIST_FAIL") or not state.exists(): sys.exit(113)
     busy = os.environ.get("BUSY") or os.environ.get("BUSY_ON_LIST") == str(lists)
     print('{ "Label" = "com.bot-errors.health"; ' + ('"PID" = 123;' if busy else '') + ' }')
@@ -225,6 +233,40 @@ def test_failed_check_after_a_failed_bootout_does_not_unload_the_original_job(jo
     verbs = [json.loads(line)[0] for line in (job["home"] / "calls.jsonl").read_text().splitlines()]
     assert verbs.count("bootout") == 1 and verbs.count("bootstrap") == 0
     assert job["plist"].read_bytes() == job["raw"]
+    assert json.loads(job["state"].read_text()) == job["original"]
+
+
+def launchctl_verbs(job):
+    return [json.loads(line)[0] for line in (job["home"] / "calls.jsonl").read_text().splitlines()]
+
+
+def test_original_bytes_put_back_after_the_candidate_loaded_still_roll_back(job):
+    # This run unloads the original and loads the candidate. A writer then puts
+    # the original bytes back during the check after the bootstrap (list call 4).
+    # Rollback must follow what the run did: unload the candidate and reload the original.
+    result = apply(job, RESTORE_ON_LIST="4")
+    assert result.returncode == 1, result.stdout
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "rolled_back"
+    assert Path(receipt["backup"]).read_bytes() == job["raw"]
+    verbs = launchctl_verbs(job)
+    assert verbs.count("bootout") == 2 and verbs.count("bootstrap") == 2
+    assert job["plist"].read_bytes() == job["raw"]
+    assert json.loads(job["state"].read_text()) == job["original"]
+
+
+def test_candidate_bytes_written_after_a_failed_bootout_do_not_unload_the_original(job):
+    # The bootout fails and the original stays loaded. A writer then copies the
+    # staged candidate's bytes into the plist (list call 4). This run unloaded and
+    # installed nothing, so it must not unload the original or overwrite the file.
+    result = apply(job, BOOTOUT_FAIL_ON="1", CANDIDATE_ON_LIST="4")
+    assert result.returncode == 3, result.stdout
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "rollback_unverified"
+    assert "nothing was unloaded" in receipt["reason"]
+    verbs = launchctl_verbs(job)
+    assert verbs.count("bootout") == 1 and verbs.count("bootstrap") == 0
+    assert plistlib.loads(job["plist"].read_bytes())["WorkingDirectory"] == str(job["new"])
     assert json.loads(job["state"].read_text()) == job["original"]
 
 
