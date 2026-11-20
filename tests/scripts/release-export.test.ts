@@ -216,6 +216,9 @@ describe('exportRelease', () => {
   it('never ships the retired job templates that .gitattributes marks export-ignore', () => {
     const fixture = makeGitFixture();
     const templates = ['deploy/templates/com.whatsoup.ms365-token-backup.plist', 'deploy/templates/ms365-token-backup.sh'];
+    // The lines themselves (they also keep the files out of GitHub source archives), not only the planner's list.
+    const attributes = readFileSync(path.join(REPO_ROOT, '.gitattributes'), 'utf8').split('\n').map((line) => line.trim().split(/\s+/));
+    expect(templates.filter((template) => !attributes.some(([file, ...attrs]) => file === template && attrs.includes('export-ignore')))).toEqual([]);
     writeFileSync(path.join(fixture.sourceRoot, '.gitattributes'), readFileSync(path.join(REPO_ROOT, '.gitattributes')));
     for (const template of templates) {
       mkdirSync(path.dirname(path.join(fixture.sourceRoot, template)), { recursive: true });
