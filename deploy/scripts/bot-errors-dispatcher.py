@@ -10173,11 +10173,18 @@ def send_meta_alert(meta: dict[str, Any], email_subject: str) -> tuple[str, str,
         # a successful email handoff is a delivered alert -- mirroring the
         # #3024 delivery-site semantics so the dispatch log never reports a
         # delivered meta-alert as unconfirmed/retryable.
-        email_status = (
-            "email_delivered"
-            if send_authorized_email(meta, email_subject, text)
-            else "failed"
-        )
+        try:
+            email_status = (
+                "email_delivered"
+                if send_authorized_email(meta, email_subject, text)
+                else "failed"
+            )
+        except AuthorityError as refusal:
+            # No grant for the meta-alert: nothing is sent, and the refusal is
+            # returned so the caller keeps and logs its own record (a poison
+            # event is already in quarantine) instead of aborting the cycle.
+            email_status = "authority_refused"
+            direct_error = f"{direct_error}; email: {refusal}" if direct_error else f"email: {refusal}"
     return direct_whatsapp, email_status, direct_error
 
 
