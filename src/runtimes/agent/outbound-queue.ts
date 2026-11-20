@@ -1115,7 +1115,7 @@ export class OutboundQueue implements IOutboundQueue {
 
     switch (event.type) {
       case 'thinking_long': {
-        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
+        if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
           return;
         }
@@ -1124,7 +1124,7 @@ export class OutboundQueue implements IOutboundQueue {
       }
 
       case 'thinking_stalled': {
-        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
+        if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
         } else {
           this.enqueueProgress(`_${name} has gone silent \u2014 checking..._`);
@@ -1137,7 +1137,7 @@ export class OutboundQueue implements IOutboundQueue {
           this.startTyping();
           return;
         }
-        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
+        if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
           return;
         }
@@ -1163,7 +1163,7 @@ export class OutboundQueue implements IOutboundQueue {
           return;
         }
         // One-shot slow timer fires once at the fixed threshold, so elapsed is constant \u2014 a threshold, not a live clock (#1843; mirrors #1777).
-        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
+        if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
           this.enqueueProgress(`_${name} is still working on it..._`);
@@ -1179,7 +1179,7 @@ export class OutboundQueue implements IOutboundQueue {
           return;
         }
         // One-shot stall timer fires once at the fixed threshold, so elapsed is constant \u2014 a threshold, not a live clock (#1777).
-        if (this.toolUpdateMode === 'minimal' || this.toolUpdateMode === 'unset') {
+        if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
         } else if (this.toolUpdateMode === 'friendly') {
           this.enqueueProgress(`_${name}: still working \u2014 this is taking a while..._`);
@@ -1247,12 +1247,15 @@ export class OutboundQueue implements IOutboundQueue {
     // already decided this placeholder WOULD emit; enforce the per-turn count
     // now so a single turn can't flood the chat with narration. Past the cap,
     // keep the liveness signal and drop the placeholder — content is never gated.
-    if (this.statusBudgetExhausted(attribution)) {
+    // No mode set: every step runs as in full mode; only the send and the cap notice are withheld (#3830).
+    const withholdStatus = this.toolUpdateMode === 'unset';
+    if (this.statusBudgetExhausted(attribution, !withholdStatus)) {
       return;
     }
     this.recentProgressTextAt.set(text, now);
     // Record the floor slot only on an ACTUAL emit (passed both floor and text window).
     this.lastProgressEmittedAt = now;
+    if (withholdStatus) { this.startTyping(); return; }
     this.enqueue(text, attribution);
   }
 
