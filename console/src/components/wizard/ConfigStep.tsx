@@ -824,7 +824,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           </Field>
 
           {/* Tool update verbosity */}
-          <Field label="Tool update verbosity" helper="Minimal suppresses technical agent lifecycle messages" confirmed>
+          <Field label="Tool update verbosity" helper="Default hides tool progress. Minimal also holds back text written before a tool call and turns off the admin back-online notice." confirmed>
             {(id) => (
               <SelectInput
                 id={id}

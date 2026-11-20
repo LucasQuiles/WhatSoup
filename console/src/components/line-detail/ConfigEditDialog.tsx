@@ -61,10 +61,14 @@ function fieldIdSegment(key: string): string {
 const CHAT_OPENAI_BASE_URL_KEY = 'chatOptions.openaiProviderConfig.baseUrl'
 const CHAT_OPENAI_API_KEY_SERVICE_KEY = 'chatOptions.openaiProviderConfig.apiKeyService'
 const CHAT_OPENAI_FIELD_KEYS = new Set([CHAT_OPENAI_BASE_URL_KEY, CHAT_OPENAI_API_KEY_SERVICE_KEY])
+const TOOL_UPDATE_MODE_KEY = 'toolUpdateMode'
 
 function enumOptionLabel(key: string, value: string): string {
   if (key === CHAT_OPENAI_API_KEY_SERVICE_KEY && value === '') {
     return '-- none --'
+  }
+  if (key === TOOL_UPDATE_MODE_KEY && value === '') {
+    return 'Default (hide tool progress)'
   }
   return value || '(default)'
 }
@@ -134,9 +138,17 @@ export function ConfigEditDialog({
         if (Object.keys(remaining).length > 0) {
           entries.push(['chatOptions (other)', remaining])
         }
+      } else if (k === TOOL_UPDATE_MODE_KEY && v === null) {
+        // A mode cleared to null is the default (no setting).
+        entries.push([k, ''])
       } else {
         entries.push([k, v])
       }
+    }
+
+    // Only agent instances read toolUpdateMode; an unset agent line shows the default choice.
+    if (config.type === 'agent' && config[TOOL_UPDATE_MODE_KEY] === undefined) {
+      entries.push([TOOL_UPDATE_MODE_KEY, ''])
     }
 
     if (config.type === 'chat') {
@@ -224,7 +236,9 @@ export function ConfigEditDialog({
       const hasChatOpenAIProviderPatch = Object.keys(patch).some(key => CHAT_OPENAI_FIELD_KEYS.has(key))
       for (const [key, value] of Object.entries(patch)) {
         if (hasChatOpenAIProviderPatch && CHAT_OPENAI_FIELD_KEYS.has(key)) continue
-        setValueAtPath(apiPatch, key, value)
+        // The config PATCH merges keys and cannot remove one, so the default choice
+        // clears toolUpdateMode with null, which the service reads as unset.
+        setValueAtPath(apiPatch, key, key === TOOL_UPDATE_MODE_KEY && value === '' ? null : value)
       }
       if (hasChatOpenAIProviderPatch) {
         setValueAtPath(
