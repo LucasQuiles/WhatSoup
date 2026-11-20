@@ -3806,8 +3806,9 @@ That remainder is a planning allowance, not a measured or enforced timeout, so t
 is arithmetic over an estimate, not measured headroom. Individual failure
 bounds remain enforced; an exhausted download bound fails the job.
 
-Successful container builds upload these files as
-`container-build-evidence-${{ github.sha }}` with a 14-day retention period.
+Once the receipt step has verified the build, the job uploads these files as
+`container-build-evidence-${{ github.sha }}` with a 14-day retention period, even if a later step
+fails. A run whose revision or receipt check failed uploads nothing.
 Retrieve the artifact from the corresponding Quality workflow run before it expires
 when release verification or an investigation requires the original evidence.
 The workflow artifact is not a durable evidence archive.

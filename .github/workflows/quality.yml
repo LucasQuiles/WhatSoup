@@ -179,6 +179,7 @@ jobs:
             "${source_repository}#${SOURCE_REF}"
 
       - name: Verify container build receipt
+        id: verify-container-receipt
         timeout-minutes: 5
         env:
           SOURCE_REVISION: ${{ github.sha }}
@@ -270,8 +271,10 @@ jobs:
             --experimental-strip-types --input-type=module \
             --eval "const { transcribeAudio } = await import('./src/runtimes/chat/providers/transcription/chain.ts'); if (typeof transcribeAudio !== 'function') throw new Error('transcription entrypoint missing');"
 
+      # Upload only what the receipt verified for this commit; a failed revision
+      # or receipt check must not publish an archive under github.sha.
       - name: Upload container build evidence
-        if: ${{ always() && steps.build-container.outcome == 'success' }}
+        if: ${{ always() && steps.verify-container-receipt.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: container-build-evidence-${{ github.sha }}
