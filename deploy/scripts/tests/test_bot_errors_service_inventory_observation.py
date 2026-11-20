@@ -345,3 +345,33 @@ def test_inventory_fail_line_exposes_only_status_backend_count_freshness(
     assert "backend=" in line
     assert "count=" in line
     assert "observed_age_s=" in line
+
+
+# ---------------------------------------------------------------------------
+# Retired launchd jobs -- a loaded one is a finding of its own
+# ---------------------------------------------------------------------------
+
+# Retired from the standard (docs/releases/2026-11-20-token-backup-job-retired.md).
+_RETIRED = "ms365-token-backup"
+
+
+@pytest.mark.parametrize("pid", ["-", "4242"])
+def test_loaded_retired_launchd_job_is_a_retired_finding(monkeypatch, tmp_path, pid):
+    """A retired job is reported idle or running, and never as an undeclared instance.
+
+    It ran on a daily calendar for seconds, so its normal loaded state is idle
+    (pid "-"); a reader that sees only running jobs would almost always miss
+    it. Other idle jobs stay unreported, as before.
+    """
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM", "darwin")
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM_RELEASE", "6.8.0-generic")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES", raising=False)
+    module = _load(f"bot_errors_health_check_retired_{pid}", _SCRIPT)
+    stdout = f"{pid}\t0\tcom.whatsoup.{_RETIRED}\n-\t0\tcom.whatsoup.idle-instance\n"
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path, set())
+    assert lines == [
+        f"FAIL retired_service {_RETIRED}: retired job is loaded "
+        f"service=com.whatsoup.{_RETIRED} remediation=boot_out_then_remove_plist_and_script"
+    ], lines
