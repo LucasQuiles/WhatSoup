@@ -72,13 +72,18 @@ import {
 } from './fallback-discovery.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import type { OpencodeProviderConfig } from './providers/mcp-bridge.ts';
-import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import {
+  createPrimaryModelProbeAdapters,
+  type PrimaryModelProbeAdapterDeps,
+} from './providers/primary-model-usability-adapters.ts';
+import {
+  nextPrimaryTurnRecoveryHold,
   primaryModelUsabilityRequiresAlert,
   probeIncompatibilityAlertAction,
   probePrimaryModelUsability,
   type PrimaryProbeServiceContext,
   type PrimaryModelUsabilityResult,
+  type PrimaryTurnRecoveryHold,
 } from './providers/primary-model-usability.ts';
 import { fallbackRequiresPrimaryProbe, isProviderFallbackReason } from './runtime-presentation.ts';
 import {
@@ -236,6 +241,8 @@ export interface RuntimeFallbackPort {
   /** Optional for older hand-built coordinator fixtures; production supplies it. */
   readonly primaryProbeServiceContext?: PrimaryProbeServiceContext | null;
   currentPrimaryProbeServiceContext?: () => PrimaryProbeServiceContext | null;
+  /** Lets a scheduled probe adopt an in-place CLI update; absent in older fixtures. */
+  primaryProbeRebindDeps?: () => Pick<PrimaryModelProbeAdapterDeps, 'rebindServiceContext' | 'providerCanaryAdmission'>;
   readonly controlSession: SessionManager | null;
   readonly fallbackWindow: FallbackWindowState;
   readonly fallbackMetrics: FallbackWindowMetrics;
@@ -1257,6 +1264,8 @@ export class RuntimeFallbackCoordinator {
   private chainCanarySweepInFlight = false;
   /** This process raised the alert for a CLI that cannot run an MCP-free model probe. */
   private probeIncompatibleAlertActive = false;
+  /** Why turn successes may not recover primary usability now; only probe results move it. */
+  private turnRecoveryHold: PrimaryTurnRecoveryHold = null;
   /**
    * `fallback_chain_entry_unhealthy` incident state. The dispatcher keys the
    * incident per instance+source, not per entry, so one field covers every
@@ -2226,6 +2235,8 @@ export class RuntimeFallbackCoordinator {
   }
 
   schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual' | 'periodic'): void {
+    // A restarted process cannot know why an earlier alert is open: turns wait for its startup probe.
+    if (trigger === 'startup' && this.turnRecoveryHold === null) this.turnRecoveryHold = 'startup';
     const target = {
       provider: this.host.agentProvider,
       model: this.host.model ?? null,
@@ -2241,17 +2252,20 @@ export class RuntimeFallbackCoordinator {
 
     const adapters = createPrimaryModelProbeAdapters(
       this.host.agentProviderConfig,
-      buildPrimaryProbeAdapterDeps(
-        this.host.agentProvider,
-        this.host.model,
-        this.host.cwd,
-        this.host.egressProxy?.port,
-        this.host.providerExecutionGate,
-        trigger,
-        this.host.primaryProbeServiceContext ?? undefined,
-        this.host.primaryProbeServiceContext !== undefined,
-        () => this.host.currentPrimaryProbeServiceContext?.() ?? null,
-      ),
+      {
+        ...buildPrimaryProbeAdapterDeps(
+          this.host.agentProvider,
+          this.host.model,
+          this.host.cwd,
+          this.host.egressProxy?.port,
+          this.host.providerExecutionGate,
+          trigger,
+          this.host.primaryProbeServiceContext ?? undefined,
+          this.host.primaryProbeServiceContext !== undefined,
+          () => this.host.currentPrimaryProbeServiceContext?.() ?? null,
+        ),
+        ...this.host.primaryProbeRebindDeps?.(),
+      },
     );
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
@@ -2290,14 +2304,20 @@ export class RuntimeFallbackCoordinator {
     result: PrimaryModelUsabilityResult,
     trigger: 'startup' | 'manual' | 'periodic',
     source: 'probe' | 'turn-success' = 'probe',
-  ): void {
+  ): boolean {
     if (this.host.shutdownRequested) {
       // A probe started before shutdown resolved after it. Drop the result
       // whole: no evidence mutation, no alert emission or clear, no timer —
       // shutdown() already cleared the periodic loop and health is torn down.
       log.debug({ trigger, status: result.status }, 'primary model usability result dropped after shutdown');
-      return;
+      return false;
     }
+    // A turn success is not a probe and says nothing about the probe's service
+    // context; an older child may still be serving. A service-context refusal,
+    // or an unsettled startup probe, keeps the record and alert until a probe
+    // result replaces them. Returns whether this evidence was recorded.
+    if (source === 'turn-success' && this.turnRecoveryHold !== null) return false;
+    if (source === 'probe') this.turnRecoveryHold = nextPrimaryTurnRecoveryHold(this.turnRecoveryHold, result);
     this.host.primaryModelUsability = {
       ...result,
       checkedAt: Date.now(),
@@ -2360,10 +2380,10 @@ export class RuntimeFallbackCoordinator {
         `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
       );
       this.host.primaryModelUsabilityAlertActive = false;
-      return;
+      return true;
     }
 
-    if (!primaryModelUsabilityRequiresAlert(result)) return;
+    if (!primaryModelUsabilityRequiresAlert(result)) return true;
 
     this.host.primaryModelUsabilityAlertActive = true;
     emitAlertChecked(
@@ -2373,6 +2393,7 @@ export class RuntimeFallbackCoordinator {
       this.primaryModelUsabilityEvidence(result, trigger),
       'warning',
     );
+    return true;
   }
 
   private primaryModelUsabilityEvidence(result: PrimaryModelUsabilityResult, trigger: 'startup' | 'manual' | 'periodic'): string {

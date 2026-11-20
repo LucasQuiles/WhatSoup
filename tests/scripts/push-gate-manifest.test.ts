@@ -135,6 +135,13 @@ describe('push-gate manifest registry (#2224)', () => {
     expect([...CURATED_TEST_PATHS]).toContain('tests/scripts/push-gate-manifest.test.ts');
   });
 
+  it('the curated list runs the public-boundary scan tests before a push', () => {
+    expect([...CURATED_TEST_PATHS]).toEqual(expect.arrayContaining([
+      'tests/scripts/repo-hygiene-guard.test.ts',
+      'tests/scripts/repo-hygiene-boundary.test.ts',
+    ]));
+  });
+
   it('curated list has no duplicates and no flags masquerading as paths', () => {
     expect(new Set(CURATED_TEST_PATHS).size).toBe(CURATED_TEST_PATHS.length);
     for (const path of CURATED_TEST_PATHS) {
