@@ -79,6 +79,16 @@ function contextStatus(scopes: ContextScopeOutcome[]): ContextLoadStatus {
 }
 
 /**
+ * Recall text identity: trimmed, with whitespace runs collapsed. Null for a
+ * record with no comparable text, which then de-duplicates by id alone.
+ */
+function recallTextKey(text: unknown): string | null {
+  if (typeof text !== 'string') return null;
+  const key = text.trim().replace(/\s+/g, ' ');
+  return key.length > 0 ? key : null;
+}
+
+/**
  * Format entity search results grouped by entity type into a WhatsApp-friendly
  * plaintext block. Returns an empty string when results is empty.
  *
@@ -208,25 +218,23 @@ export async function loadContextDetailed(
     scopeOutcome('self', selfDetails),
   ];
 
-  // Merge, deduplicate by id, preserve insertion order (chat results first)
-  const seen = new Set<string>();
-  const merged: SearchResult[] = [];
-
-  for (const result of [...chatResults, ...senderResults]) {
-    if (!seen.has(result.id)) {
-      seen.add(result.id);
-      merged.push(result);
-    }
-  }
+  // Merge, deduplicate by id and by text, preserve insertion order (chat
+  // results first). The text key keeps one fact from showing twice when it
+  // exists under two ids, such as a consolidation promotion written under a
+  // legacy claim-hash id and again under its source-set id (durability §10.2).
+  const seenIds = new Set<string>();
+  const seenTexts = new Set<string>();
+  const isFirstSighting = (result: SearchResult): boolean => {
+    const textKey = recallTextKey(result.record.text);
+    if (seenIds.has(result.id) || (textKey !== null && seenTexts.has(textKey))) return false;
+    seenIds.add(result.id);
+    if (textKey !== null) seenTexts.add(textKey);
+    return true;
+  };
+  const merged = [...chatResults, ...senderResults].filter(isFirstSighting);
 
   // Self-facts go into a separate block
-  const selfFacts: SearchResult[] = [];
-  for (const result of selfResults) {
-    if (!seen.has(result.id)) {
-      seen.add(result.id);
-      selfFacts.push(result);
-    }
-  }
+  const selfFacts = selfResults.filter(isFirstSighting);
 
   const topResults = [...merged, ...selfFacts];
   log.info(
