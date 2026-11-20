@@ -5646,8 +5646,12 @@ def accept_incident_authority(
     """Return a revalidated, content-free grant for this producer claim.
 
     A persisted grant wins after restart only when every request binding still
-    matches.  The dry branch is reachable solely with the dispatcher's existing
-    dry notification transport, so it cannot authorize a human-visible send.
+    matches; that is self-consistency on the same service user, not a remote
+    proof.  The dry branch is a test seam: with the dry notification transport
+    the send is captured too, but with ``BOT_ERRORS_TEST_MODE=1`` and a dry
+    authority capture alone it issues a local grant and the send then uses the
+    configured live transport.  Tracked service definitions must not set those
+    variables (the boundary guard checks them); a host env file is not checked.
     """
     delivery = event.setdefault("delivery", {})
     if not isinstance(delivery, dict):

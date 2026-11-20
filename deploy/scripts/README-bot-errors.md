@@ -66,8 +66,15 @@ notification for an eligible outbox event, it writes a canonical,
 content-free signal to `POST /api/signals` and durably records the bound
 receipt beside the event. A restart revalidates the producer, signal identity,
 payload digest, receipt identity, and disposition before reusing that receipt.
-The event body, summary, evidence, host name, chat identifier, delivery errors,
-and credential are absent from the signal and receipt. Delivery attempts and
+That check proves the stored receipt matches the event on the same service
+user; it is not a signature from the authority. A process that can write the
+outbox as that user can also write a matching receipt, so the boundary is as
+strong as the integrity of the outbox, the env file and the credential file.
+The event body, summary, evidence, chat identifier, delivery errors and
+credential are absent from the signal and receipt. Host names are not
+excluded: the signal id is derived from the event id, and the id of a derived
+notice (for example a flap storm) contains the sanitized incident key, which
+names the machine, instance and source. Delivery attempts and
 backoff therefore cannot change the signal bytes. A newly arrived event that
 races the cycle preflight is checked again in `process_one()`.
 
@@ -164,28 +171,60 @@ A `recovery_confirmed` fact needs a closed `evidenceClass` and a content-free
 `sha256:` evidence digest. Supported
 classes are `runtime_reverified`, `provider_acknowledged`, and
 `sustained_runtime_stability`; adding a class requires a reviewed source
-change. Missing or unsupported evidence, malformed digests, wrong actors,
-wrong occurrence or source bindings, stale/future evidence, self-approval,
-self-confirmation, conflicting identities, and extra repair attempts remain
-durable but state-inert. Per-producer admission counters live in the
+change. Missing or unsupported evidence, malformed digests, a wrong actor
+class, wrong occurrence or source bindings, stale/future evidence,
+self-approval, self-confirmation and extra repair attempts are stored but
+state-inert. Two refusals are not stored: a phase outside the producer's scope
+is refused before insertion, and a submission whose fact identity is already
+stored with different bytes is refused with 409. Per-producer admission counters live in the
 IncidentStore database, so handler recreation and concurrent processes do not
 reset the limit.
 
-Authority unavailability, timeout, rate limiting, disk-full, or store
-corruption stops the protected action. Dispatcher events retain bounded
-backoff state and retry up to the configured authority-attempt cap; a conflict
-or invalid receipt is quarantined. Notification ambiguity remains a separate
-delivery state and must be reconciled before replay. Revoking both producer
-credentials or removing the authority settings is the fail-closed rollback:
-new protected effects stop while the outbox, receipts, phase facts, and
-diagnostic evidence remain available for investigation. It does not undo a
-notification or action that already occurred.
+Every authority failure stops the protected action. How the dispatcher keeps
+the event depends on the failure:
+
+- **Not ready** (settings missing or invalid; credential missing, unreadable or
+  not private; credential refused with 401; scope refused with 403; rate limit
+  429): the event stays in the outbox with its own backoff (up to 15 minutes).
+  It is never quarantined or dead-lettered for this reason and the wait does
+  not count as an attempt. After one rate refusal the dispatcher asks nothing
+  more in that cycle. The dispatcher state records the reason and since when
+  (`incidentAuthorityNotReady`), the daily health report prints it, and the
+  deadman, which sends directly, reports `authority_not_ready` once it has
+  lasted 30 minutes while events wait.
+- **Unavailable** (connection failure, timeout, HTTP 5xx or 507): retried with
+  backoff up to the configured authority-attempt cap, then dead-lettered.
+- **Terminal** (identity conflict, malformed or mismatched receipt): the event
+  is quarantined.
+
+Notification ambiguity remains a separate delivery state and must be
+reconciled before replay. Revoking both producer credentials or removing the
+authority settings is the fail-closed rollback: new events wait in the outbox,
+and receipts, phase facts and diagnostic evidence remain available for
+investigation. An event that already holds a receipt is still delivered,
+because a stored receipt is reused without asking again. Rollback does not
+undo a notification or action that already occurred.
+
+### Upgrading a host to IncidentStore authority
+
+Enroll both producers (`bot-errors-dispatcher`, `bot-errors-q-loop`) and write
+their credential files before or with the upgrade, then set the three settings
+above in the private env file (`deploy/setup.sh` writes default paths when they
+are missing and prints this step). A host upgraded without them sends no new
+BOT ERRORS notice: every event waits in the outbox as not ready, nothing is
+lost, and the deadman reports `authority_not_ready` after 30 minutes. Once the
+credentials are in place the held events go out on the next cycles. The Q loop
+logs its refusals and sends nothing until its own credential is in place.
 
 Release rollback and the incident database: this release migrates the fleet
 incident database (`incidents.db`) to schema version 3, and an earlier release
 refuses to open a database above its own schema version. Before the first
-migration, the fleet server keeps a copy of the database at its old version
-beside it (`incidents.db.schema-v<N>.bak`). To roll back to an earlier release:
+migration, the fleet server writes a copy of the database at its old version
+beside it (`incidents.db.schema-v<N>.bak`). The copy is written under a
+temporary name, checked (regular file, opens read-only, `quick_check`, old
+schema version) and only then put in place; an existing entry at that name is
+kept only if it passes the same check, and otherwise the open fails and names
+the file to inspect. To roll back to an earlier release:
 stop the fleet server, move `incidents.db` and its `-wal` and `-shm` files
 aside, copy the `.bak` file to `incidents.db`, then start the earlier release.
 Signals, phase facts and admission counters recorded after the migration are
@@ -1005,7 +1044,9 @@ logged as `skippedQueueFull` and dropped (its group copy exists).
 The queued event carries its accepted IncidentStore receipt. The queue hook
 revalidates it, and `lib/owner_route.py` revalidates it again before recording
 the delivery floor or invoking either channel. A missing or mismatched receipt
-therefore cannot consume the interval or produce an owner copy.
+therefore cannot consume the interval or produce an owner copy. The check is
+local self-consistency on the same service user, not a remote proof (see the
+authority section above).
 
 **Inert by default.** Nothing is read, parsed or logged unless both
 `BOT_ERRORS_OWNER_ROUTE_JID` and `BOT_ERRORS_OWNER_ROUTE_SOCKET` are set, so an
