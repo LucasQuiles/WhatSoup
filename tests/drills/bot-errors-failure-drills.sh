@@ -40,6 +40,13 @@ CAPTURE_BYTES=0
 export BOT_ERRORS_STATE_DIR="$SANDBOX/state"
 export BOT_ERRORS_OUTBOX_DIR="$BOT_ERRORS_STATE_DIR/outbox"
 export BOT_ERRORS_DRY_SEND_CAPTURE="$CAPTURE"
+# Exercise the production authority boundary through its explicit test-only
+# receipt path. Some drills intentionally disable the dry send transport to
+# reach a real transport failure; they must still pass authority before effect.
+export BOT_ERRORS_TEST_MODE="1"
+export BOT_ERRORS_DRY_AUTHORITY_CAPTURE="$BOT_ERRORS_STATE_DIR/test-incident-authority.jsonl"
+export BOT_ERRORS_INCIDENT_AUTHORITY_URL=""
+export BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE=""
 # Deterministic platform string so logHints assertions are stable.
 export BOT_ERRORS_DRY_SYS_PLATFORM="linux"
 export BOT_ERRORS_DRY_PLATFORM_SYSTEM="Linux"
