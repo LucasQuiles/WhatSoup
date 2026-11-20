@@ -144,7 +144,9 @@ describe('required dependency patch installation', () => {
     expect(install).toBeGreaterThan(0);
     const beforeInstall = deps.slice(0, install).replace(/\\\n/g, ' ');
     expect(beforeInstall).toMatch(/^COPY patches\/ \.\/patches\/$/m);
-    expect(beforeInstall).toMatch(/apt-get install\b[^\n]*\bgit\b/);
+    // apt-get options (such as -o Acquire::Retries=3) may sit before the subcommand; what matters is that
+    // an install command names the git package.
+    expect(beforeInstall).toMatch(/\bapt-get(?:\s+-o\s+\S+)*\s+install\b[^\n]*\sgit(?:\s|$)/m);
     expect(deps.slice(install)).not.toContain('--ignore-scripts');
   });
 });
