@@ -735,6 +735,10 @@ export function createFleetServer(deps: FleetDeps) {
         await signalsHandlers.postSignal(req, res);
         return;
       }
+      if (pathname === '/api/incident-phases' && method === 'POST') {
+        await signalsHandlers.postPhaseFact(req, res);
+        return;
+      }
       if (pathname === '/api/producers' && method === 'POST') {
         await signalsHandlers.postProducer(req, res);
         return;

@@ -1,13 +1,14 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   defaultIncidentDbPath,
   openIncidentDb,
   IncidentStoreCorruptError,
 } from '../../../src/fleet/incidents/db.ts';
-import { INCIDENT_SCHEMA_VERSION } from '../../../src/fleet/incidents/schema.ts';
+import { INCIDENT_SCHEMA_VERSION, MIGRATIONS } from '../../../src/fleet/incidents/schema.ts';
 
 let dir: string;
 
@@ -79,7 +80,12 @@ describe('openIncidentDb', () => {
   });
 
   it('upgrades a lower-version database in place, preserving rows', () => {
-    const db1 = openIncidentDb(dbPath());
+    mkdirSync(join(dir, 'fleet'), { recursive: true });
+    const db1 = new DatabaseSync(dbPath());
+    for (const migration of MIGRATIONS.filter((entry) => entry.version <= 2)) {
+      for (const statement of migration.statements) db1.exec(statement);
+    }
+    db1.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', '2')`).run();
     db1
       .prepare(
         `INSERT INTO events (
@@ -89,9 +95,6 @@ describe('openIncidentDb', () => {
                  '2026-07-28T12:00:00.000Z', '2026-07-28T12:00:01.000Z', 'heartbeat_recorded')`,
       )
       .run();
-    // Simulate a v1 database: drop post-v1 artifacts and rewind the marker.
-    db1.exec('DROP TABLE IF EXISTS producers');
-    db1.prepare(`UPDATE meta SET value = '1' WHERE key = 'schema_version'`).run();
     db1.close();
 
     const db2 = openIncidentDb(dbPath());

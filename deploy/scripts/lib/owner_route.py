@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from lib.bot_errors_envelope import SEVERITIES
+from lib.incident_authority import grant_from_record
 from lib.send_acceptance import validate_send_acceptance
 
 DEFAULT_SOURCES = (
@@ -274,6 +275,8 @@ def _send_owner_message(
     line: str,
     email_body: str,
     *,
+    authority_grant: dict[str, Any],
+    authority_claim: dict[str, Any],
     json_rpc_call: Callable[..., dict[str, Any]],
     email_fallback: Callable[..., bool],
     deadline: float | None,
@@ -281,6 +284,11 @@ def _send_owner_message(
     """Send one line to the owner's chat and, when enabled, by e-mail, inside
     the caller's deadline. A channel's failure is that channel's False, never
     raised; the result is the channel fields of the caller's log record."""
+    grant_from_record(
+        authority_grant,
+        authority_claim,
+        expected_producer_id="bot-errors-dispatcher",
+    )
     whatsapp_accepted = False
     receipt: dict[str, str] = {}
     try:
@@ -320,6 +328,8 @@ def send_credential_page(
     body: str,
     *,
     counters: Mapping[str, int],
+    authority_grant: dict[str, Any],
+    authority_claim: dict[str, Any],
     json_rpc_call: Callable[..., dict[str, Any]],
     email_fallback: Callable[..., bool],
     log: Callable[[dict[str, Any]], None],
@@ -335,6 +345,8 @@ def send_credential_page(
     """
     sent = _send_owner_message(
         _cfg(), line, body,
+        authority_grant=authority_grant,
+        authority_claim=authority_claim,
         json_rpc_call=json_rpc_call, email_fallback=email_fallback, deadline=deadline,
     )
     del sent["auditReceipt"]
@@ -349,6 +361,7 @@ def route_owner_critical(
     is_alert: bool,
     group_text: str,
     state_dir: Path,
+    authority_grant: dict[str, Any],
     json_rpc_call: Callable[..., dict[str, Any]],
     email_fallback: Callable[..., bool],
     log: Callable[[dict[str, Any]], None],
@@ -359,6 +372,11 @@ def route_owner_critical(
     cfg = _cfg()
     if qualifies(event, cfg["sources"], is_alert):
         return
+    grant_from_record(
+        authority_grant,
+        event,
+        expected_producer_id="bot-errors-dispatcher",
+    )
 
     def skip(**flags: Any) -> None:
         log({"type": "owner_route_skipped", "eventId": event.get("id"), "incidentKey": key, **flags})
@@ -394,6 +412,8 @@ def route_owner_critical(
     line = owner_line(event)
     sent = _send_owner_message(
         cfg, line, f"{line}\n\n{group_text}",
+        authority_grant=authority_grant,
+        authority_claim=event,
         json_rpc_call=json_rpc_call, email_fallback=email_fallback, deadline=deadline,
     )
     log({"type": "owner_route_sent", "eventId": event.get("id"), "incidentKey": key,

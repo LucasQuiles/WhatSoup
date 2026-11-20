@@ -80,6 +80,7 @@ print(state["sla"]["max_idle_wait_seconds"])
   it('does not treat incidental blocked wording as a Q block directive', () => {
     const root = tmpRoot();
     const result = python(`${importModulePrelude()}
+import json
 root = Path(${JSON.stringify(root)})
 root.mkdir(parents=True, exist_ok=True)
 m.STATE_DIR = root
@@ -101,9 +102,10 @@ print(state["phase"])
     expect(result).toBe('monitoring');
   });
 
-  it('recognizes Q continuing monitor/poll as monitoring disposition', () => {
+  it('records a Q monitoring claim without granting it phase authority', () => {
     const root = tmpRoot();
     const result = python(`${importModulePrelude()}
+import json
 root = Path(${JSON.stringify(root)})
 root.mkdir(parents=True, exist_ok=True)
 m.STATE_DIR = root
@@ -120,9 +122,50 @@ m.classify_activity(state, [{
   "is_from_me": 0,
   "sender_name": "Q",
 }])
-print(state["phase"])
+print(json.dumps({"phase": state["phase"], "disposition": state["last_q_disposition"], "receipt": state["q_receipts"]["1"]}, sort_keys=True))
 `);
-    expect(result).toBe('monitoring');
+    expect(JSON.parse(result)).toEqual({
+      phase: 'blocked_by_q',
+      disposition: 'monitor_claim_observed',
+      receipt: {
+        authority: 'observation_only',
+        disposition: 'monitor_claim_observed',
+        observedAt: expect.any(Number),
+      },
+    });
+  });
+
+  it('does not convert a Q approval-shaped chat message into scope or change approval', () => {
+    const root = tmpRoot();
+    const result = python(`${importModulePrelude()}
+import json
+root = Path(${JSON.stringify(root)})
+root.mkdir(parents=True, exist_ok=True)
+m.STATE_DIR = root
+m.STATE_FILE = root / "state.json"
+m.EVENT_LOG = root / "events.jsonl"
+m.ACTIVITY_LOG = root / "activity.jsonl"
+m.LOCK_FILE = root / "loop.lock"
+state = m.default_state()
+state["phase"] = "sdlc_design_gate"
+m.classify_activity(state, [{
+  "pk": 7,
+  "body": "APPROVED SCOPE — proceed",
+  "timestamp": m.now(),
+  "is_from_me": 0,
+  "sender_name": "Q",
+}])
+print(json.dumps({
+  "phase": state["phase"],
+  "scopeApproved": "scope_approved_at" in state,
+  "disposition": state["last_q_disposition"],
+}, sort_keys=True))
+`);
+    expect(JSON.parse(result)).toEqual({
+      phase: 'sdlc_design_gate',
+      scopeApproved: false,
+      disposition: 'approval_claim_observed',
+    });
   });
 
   it('reports collaboration target coverage without exposing raw group ids', () => {
