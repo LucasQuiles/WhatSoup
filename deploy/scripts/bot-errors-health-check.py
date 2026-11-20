@@ -8043,12 +8043,16 @@ def unprofiled_service_inventory(
         lines.append(unusable_line)
     retired: set[str] = set()
     if reading.backend != "systemctl":
-        # The finding is for the retired launchd job only: a systemd unit, or a
-        # unit whose name a configured instance owns, is an instance.
+        # The finding is for the retired launchd job only. A systemd unit, a
+        # name the profile declares, or a name a configured instance owns (a
+        # regular config.json under the instance-config root that the drift
+        # check and host activation read: XDG_CONFIG_HOME, else ~/.config) is
+        # an instance.
+        owner_root = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "whatsoup" / "instances"
         retired = {
             name
             for name in (reading.names | reading.retired_loaded) & RETIRED_WHATSOUP_SERVICE_NAMES
-            if not (root / name / "config.json").exists()
+            if name not in expected_names and not (owner_root / name / "config.json").is_file()
         }
     for name in sorted(retired):
         lines.append(
