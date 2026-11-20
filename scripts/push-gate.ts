@@ -65,6 +65,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/claude-settings-guard.test.ts',
   'tests/scripts/agent-decision-polls-guard.test.ts',
   'tests/scripts/safeguard-diagnostics.test.ts',
+  'tests/scripts/safeguard-diagnostics-macos-lane.test.ts',
   'tests/scripts/check-fleet-bot-hardening-parity.test.ts',
   'tests/scripts/bot-errors-simulation-matrix.test.ts',
   'tests/scripts/check-bot-errors-runtime-manifest.test.ts',
