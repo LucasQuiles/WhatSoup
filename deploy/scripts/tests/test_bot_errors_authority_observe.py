@@ -594,6 +594,51 @@ def test_observe_sends_every_q_loop_notice(tmp_path, outcome):
     ]
 
 
+def _q_message(body: str, ts: int, pk: int = 10) -> dict:
+    return {"pk": pk, "body": body, "timestamp": ts, "sender_name": "q", "sender_jid": "", "is_from_me": 0}
+
+
+@pytest.mark.parametrize("mode", ["observe", "enforce"])
+def test_an_unmatched_q_reply_keeps_the_nudge_armed(tmp_path, mode):
+    # Main clears the wait only for a reply it recognises; an ordinary reply
+    # ("Investigating") leaves it armed and the nudge goes out when due.
+    q_loop = _load_q_loop(tmp_path / f"q-nudge-unmatched-{mode}", mode)
+    current = q_loop.now()
+    waiting_since = current - q_loop.NUDGE_AFTER_SECONDS - 60
+    state = q_loop.default_state()
+    state["awaiting_q_since"] = waiting_since
+    q_loop.classify_activity(state, [_q_message("Investigating the failing gate now", current - 30)])
+    assert state["awaiting_q_since"] == waiting_since
+    assert state["last_q_disposition"] == "received"
+    nudges: list = []
+    with patch.object(
+        q_loop, "send_message", side_effect=lambda *_a, **k: nudges.append(k["authority_event_id"]) or True
+    ):
+        assert q_loop.maybe_send_nudge(state, "socket.invalid") is True
+    assert nudges == [f"q-loop-nudge-{waiting_since}"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "APPROVED SCOPE for the gate",
+        "APPROVED",
+        "BLOCKED: missing evidence",
+        "Standing by",
+        "You've hit your session limit",
+    ],
+)
+def test_a_recognised_q_reply_still_clears_the_nudge(tmp_path, body):
+    q_loop = _load_q_loop(tmp_path / "q-nudge-matched")
+    current = q_loop.now()
+    state = q_loop.default_state()
+    state["awaiting_q_since"] = current - q_loop.NUDGE_AFTER_SECONDS - 60
+    q_loop.classify_activity(state, [_q_message(body, current - 30)])
+    assert state["awaiting_q_since"] == 0
+    with patch.object(q_loop, "send_message", side_effect=AssertionError("no nudge after a recognised reply")):
+        assert q_loop.maybe_send_nudge(state, "socket.invalid") is False
+
+
 def test_enforce_still_stops_a_q_loop_notice_without_a_grant(tmp_path):
     q_loop = _load_q_loop(tmp_path / "q-loop-enforce", "enforce")
     sends: list = []
