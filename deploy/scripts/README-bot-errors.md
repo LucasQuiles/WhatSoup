@@ -271,8 +271,9 @@ would have stopped is refused + not_ready + protocol_error + not_configured.
 
 1. Enroll both producers (`bot-errors-dispatcher`, `bot-errors-q-loop`), write
    their credential files and set the URL and both credential paths in the
-   private env file (`deploy/setup.sh` writes `observe` and the URL when they
-   are missing, and adds no credential path).
+   private env file. In an existing env file `deploy/setup.sh` adds `observe`
+   and the URL when they are missing and no credential path; a new env file
+   gets `observe`, the URL and default credential paths.
 2. Restart the BOT ERRORS services and let the host run in observe mode.
 3. Read the health report's `incident_authority_record` lines: switch only
    after a period in which `would_hold_or_refuse_in_enforce` is 0 and
