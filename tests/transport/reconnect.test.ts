@@ -2743,11 +2743,21 @@ describe('ConnectionManager — C8 FIX 2: logout block, vanished entries and the
     // One attempt per run, so each injected vanish decides how its run ends and
     // the connection's deferred re-arm runs.
     guardOf(manager).captureAttempts = 1;
-    const state: { armed: 'walk' | 'copy' | null; fired: string[] } = { armed: null, fired: [] };
+    const state: { armed: 'walk' | 'copy' | null; repairedSeen: boolean; fired: string[] } = {
+      armed: null,
+      repairedSeen: false,
+      fired: [],
+    };
     hookCaptureYield(manager, () => {
-      if (state.armed === 'walk' && sentinelRepaired()) {
-        // The capture's harden walk repaired the sentinel's mode, last of all
-        // entries, so the tree walk has listed the folder but not read it all.
+      if (state.armed === 'walk') {
+        // The capture's harden walk repairs the sentinel's mode last of all
+        // entries. The first yield that sees it repaired can still come before
+        // the tree walk lists the folder; at the yield after it the walk has
+        // listed the folder but not read it all.
+        if (!state.repairedSeen) {
+          state.repairedSeen = sentinelRepaired();
+          return;
+        }
         state.armed = null;
         state.fired.push('walk');
         unlinkSync(join(testAuthDir, 'pre-key-0100.json'));
@@ -2820,11 +2830,18 @@ describe('ConnectionManager — C8 FIX 2: logout block, vanished entries and the
     await vi.advanceTimersByTimeAsync(RUN_DRAIN_MS);
     expect(readLatestAuthBond().reason).toBe('connection-open');
     guardOf(manager).captureAttempts = 1;
-    const state: { victim: string | null } = { victim: null };
+    const state: { victim: string | null; repairedSeen: boolean } = { victim: null, repairedSeen: false };
     hookCaptureYield(manager, () => {
-      if (state.victim === null || !sentinelRepaired()) return;
+      if (state.victim === null) return;
+      // As in C7: delete at the yield after the first one that sees the
+      // sentinel repaired, once the tree walk has listed the folder.
+      if (!state.repairedSeen) {
+        state.repairedSeen = sentinelRepaired();
+        return;
+      }
       unlinkSync(state.victim);
       state.victim = null;
+      state.repairedSeen = false;
     });
     // Each run is started directly and drained well inside the 60 s settle
     // delay, so the re-arm that the first deferral arms never fires here.

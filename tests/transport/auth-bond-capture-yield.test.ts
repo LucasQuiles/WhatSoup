@@ -652,19 +652,25 @@ async function settledWithin<T>(promise: Promise<T>, turns = 200): Promise<T | t
 }
 
 /**
- * A yield hook that runs one pending mutation at the first yield after the
- * harden walk has repaired the sentinel's mode. The sentinel sorts after every
- * other entry, so the harden walk reaches it last; the next yield then falls
- * inside the tree walk, after the walk has listed the folder and before it has
- * read the files listed late.
+ * A yield hook that runs one pending mutation inside the tree walk, after the
+ * walk has listed the folder and before it has read the files listed late.
+ * The sentinel sorts after every other entry, so the harden walk repairs its
+ * mode last. The first yield that sees it repaired can still come before the
+ * walk lists the folder, so the mutation runs at the yield after that one.
  */
 function midWalkYield(sentinel: string, state: { pending: (() => void) | null; fired: number }) {
+  let repairedSeen = false;
   return async (): Promise<void> => {
-    if (state.pending !== null && modeOf(sentinel) === 0o600) {
-      const mutate = state.pending;
-      state.pending = null;
-      state.fired += 1;
-      mutate();
+    if (state.pending !== null) {
+      if (repairedSeen) {
+        const mutate = state.pending;
+        state.pending = null;
+        repairedSeen = false;
+        state.fired += 1;
+        mutate();
+      } else if (modeOf(sentinel) === 0o600) {
+        repairedSeen = true;
+      }
     }
     await macrotask();
   };
