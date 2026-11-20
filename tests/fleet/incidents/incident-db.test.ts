@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -114,5 +114,37 @@ describe('openIncidentDb', () => {
     );
     db.close();
     expect(() => openIncidentDb(dbPath())).toThrow(IncidentStoreCorruptError);
+  });
+
+  // An earlier release refuses a database above its own schema version, so a
+  // migration must leave a copy that release can open (the rollback path).
+  it('keeps a private copy at the old schema version before migrating', () => {
+    const previous = INCIDENT_SCHEMA_VERSION - 1;
+    mkdirSync(join(dir, 'fleet'), { recursive: true, mode: 0o700 });
+    const old = new DatabaseSync(dbPath());
+    for (const migration of MIGRATIONS.filter((entry) => entry.version <= previous)) {
+      for (const statement of migration.statements) old.exec(statement);
+    }
+    old.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`).run(String(previous));
+    old.prepare(`INSERT INTO meta (key, value) VALUES ('canary', 'kept')`).run();
+    old.close();
+
+    openIncidentDb(dbPath()).close();
+
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    const copy = new DatabaseSync(copyPath, { readOnly: true });
+    const rows = copy.prepare(`SELECT key, value FROM meta ORDER BY key`).all() as Array<{ key: string; value: string }>;
+    copy.close();
+    expect(rows).toEqual([
+      { key: 'canary', value: 'kept' },
+      { key: 'schema_version', value: String(previous) },
+    ]);
+    expect(statSync(copyPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('writes no schema copy for a fresh or already current database', () => {
+    openIncidentDb(dbPath()).close();
+    openIncidentDb(dbPath()).close();
+    expect(readdirSync(join(dir, 'fleet')).filter((name) => name.endsWith('.bak'))).toEqual([]);
   });
 });
