@@ -72,6 +72,7 @@ function makeReceiptInput(options: {
   buildxVersion?: string;
   buildkitVersion?: string;
   sourceRepository?: string;
+  sourceRef?: string;
   ociSourceRevision?: string;
   ociSourceRepository?: string;
   ociProvenanceBuilderId?: string;
@@ -95,6 +96,7 @@ function makeReceiptInput(options: {
   const oci = writeOciArchive(imagePath, {
     sourceRevision: options.ociSourceRevision ?? SOURCE_REVISION,
     sourceRepository: options.ociSourceRepository ?? options.sourceRepository,
+    sourceRef: options.sourceRef,
     provenanceBuilderId: options.ociProvenanceBuilderId,
     baseImageDependency: options.ociBaseImageDependency,
     baseImageDigest: options.ociBaseImageDigest,
@@ -121,6 +123,7 @@ function makeReceiptInput(options: {
     imagePath,
     sourceRevision: SOURCE_REVISION,
     sourceRepository: options.sourceRepository,
+    sourceRef: options.sourceRef,
     builder: options.builder ?? 'whatsoup-ci-builder|docker-container',
     buildxVersion: options.buildxVersion ?? 'v0.38.0',
     buildkitVersion: options.buildkitVersion ?? 'v0.33.1',
@@ -133,6 +136,7 @@ interface OciArchiveOptions {
   imageLayerBytes?: number;
   sourceRevision?: string;
   sourceRepository?: string;
+  sourceRef?: string;
   provenanceBuilderId?: string;
   baseImageDependency?: string;
   baseImageDigest?: string;
@@ -200,7 +204,7 @@ function writeOciArchive(
   const imageDigest = runnable.digest;
   const sourceRevision = options.sourceRevision ?? SOURCE_REVISION;
   const sourceRepository = options.sourceRepository ?? SOURCE_REPOSITORY;
-  const sourceUri = `${sourceRepository}#${sourceRevision}`;
+  const sourceUri = `${sourceRepository}#${options.sourceRef ?? sourceRevision}`;
   const provenanceBuilderId = options.provenanceBuilderId ?? PROVENANCE_BUILDER_ID;
   const resolvedDependencies = [{
     uri: options.baseImageDependency ?? BASE_IMAGE_DEPENDENCY,
@@ -418,6 +422,9 @@ describe('container build evidence CI contract', () => {
     expect(() => parseArgs([...argv, '--receipt', '/tmp/existing.json'], '/repo')).toThrow(
       'provide exactly one of --output or --receipt',
     );
+    expect(parseArgs([...argv, '--source-ref', 'refs/pull/7/merge'], '/repo')).toMatchObject({
+      sourceRef: 'refs/pull/7/merge',
+    });
   });
 
   it('builds pinned inputs and produces an independently checked evidence bundle', () => {
@@ -545,6 +552,57 @@ describe('container build evidence CI contract', () => {
       sourceRepository: 'https://github.example/contributor/WhatSoup.git',
       ociSourceRepository: 'https://github.example/contributor/WhatSoup.git',
     }))).toThrow('selected source repository must be a canonical GitHub HTTPS clone URL');
+  });
+
+  it('binds a pull-request merge ref to the merge commit the job checked out', () => {
+    const input = makeReceiptInput({ sourceRef: 'refs/pull/7/merge' });
+    const receipt = createContainerBuildReceipt(input);
+
+    expect(receipt.sourceRevision).toBe(SOURCE_REVISION);
+    expect(receipt.sourceRepository).toBe(SOURCE_REPOSITORY);
+    expect(() => verifyContainerBuildReceipt(receipt, input)).not.toThrow();
+  });
+
+  it('rejects a merge ref that resolved to a commit other than the checked-out merge result', () => {
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      sourceRef: 'refs/pull/7/merge',
+      ociSourceRevision: 'c'.repeat(40),
+    }))).toThrow('SLSA config source revision does not match requested source revision');
+  });
+
+  it.each(['refs/pull/7/head', 'refs/heads/main', 'refs/pull/0/merge', 'main'])(
+    'refuses source ref %s, which is neither the revision nor a pull-request merge ref', (sourceRef) => {
+      expect(() => createContainerBuildReceipt(makeReceiptInput({ sourceRef }))).toThrow(
+        'source ref must be the source revision or a pull request merge ref',
+      );
+    },
+  );
+
+  it('builds the pull-request merge result that the job checked out, not the pull-request head', () => {
+    const workflow = parse(qualityWorkflow) as {
+      jobs: { quality: { steps: { name: string; run?: string; env?: Record<string, string> }[] } };
+    };
+    const step = (name: string) => {
+      const found = workflow.jobs.quality.steps.find((entry) => entry.name === name);
+      expect(found, name).toBeDefined();
+      return found!;
+    };
+    const mergeRef = "${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}";
+    for (const name of [
+      'Build Docker deployment image',
+      'Verify container build receipt',
+      'Load verified deployment image and runtime providers',
+    ]) {
+      expect(step(name).env?.SOURCE_REVISION, name).toBe('${{ github.sha }}');
+      expect(step(name).env?.SOURCE_REF, name).toBe(mergeRef);
+    }
+    expect(qualityWorkflow).not.toContain('pull_request.head.sha');
+    expect(qualityWorkflow).not.toContain('pull_request.head.repo.clone_url');
+    const build = step('Build Docker deployment image').run ?? '';
+    expect(build).toContain('"$(git rev-parse HEAD)" != "$SOURCE_REVISION"');
+    expect(build).toContain('"${source_repository}#${SOURCE_REF}"');
+    expect(step('Load verified deployment image and runtime providers').run).toContain('"${source_repository}#${SOURCE_REF}"');
+    expect(step('Verify container build receipt').run?.match(/--source-ref "\$SOURCE_REF"/g)).toHaveLength(2);
   });
 
   it('selects the pull-request head clone URL while retaining policy input for other GitHub events', () => {

@@ -14,7 +14,7 @@ const tmp = trackTmpDirs('container-runtime-export-');
 const revision = 'b'.repeat(40);
 const imageId = `sha256:${'a'.repeat(64)}`;
 
-function runExport(options: { receipt?: Record<string, unknown>; loadedImage?: string; buildExit?: number } = {}) {
+function runExport(options: { receipt?: Record<string, unknown>; loadedImage?: string; buildExit?: number; sourceRef?: string } = {}) {
   const step = workflow.jobs.quality.steps.find((entry) => entry.name === 'Load verified deployment image and runtime providers');
   expect(step?.run).toBeTypeOf('string');
   const root = tmp.make('runtime');
@@ -53,6 +53,7 @@ process.exit(2);
       PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH}`,
       RUNNER_TEMP: root,
       SOURCE_REVISION: revision,
+      SOURCE_REF: options.sourceRef ?? revision,
       CALLS_PATH: callsPath,
       LOADED_IMAGE: options.loadedImage ?? imageId,
       BUILD_EXIT: String(options.buildExit ?? 0),
@@ -95,6 +96,20 @@ describe('verified container runtime export', () => {
     expect(result.stderr).toContain('loaded runtime image differs from verified OCI configuration');
     expect(calls.map((args) => args[0])).toEqual(['buildx', 'image']);
   });
+
+  it('exports a pull request through its merge ref, bound to the checked-out merge commit', () => {
+    const { result, calls } = runExport({ sourceRef: 'refs/pull/7/merge' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls[0]?.at(-1)).toBe('https://github.com/contributor/WhatSoup.git#refs/pull/7/merge');
+  });
+
+  it.each(['refs/pull/7/head', 'refs/heads/main', 'c'.repeat(40)])(
+    'refuses source ref %s before exporting', (sourceRef) => {
+      const { result, calls } = runExport({ sourceRef });
+      expect(result.status).not.toBe(0);
+      expect(calls).toEqual([]);
+    },
+  );
 
   it('does not inspect or execute an old image after the exact-source export fails', () => {
     const { result, calls } = runExport({ buildExit: 7 });
