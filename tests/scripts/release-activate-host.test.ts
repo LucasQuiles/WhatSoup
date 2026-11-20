@@ -451,6 +451,21 @@ describe('release:activate-host group transaction', () => {
     expect(plan.document.preconditions).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'loaded:com.whatsoup.rogue', ok: false })]));
   });
 
+  // A job retired from the standard (docs/releases/2026-11-20-token-backup-job-retired.md) refuses by name with the
+  // files to remove, whether only its plist is left or launchd still has it loaded; never as a missing load.
+  it.each([['installed but unloaded', false], ['installed and loaded', true]] as const)('refuses a retired job that is %s, by name, and says to remove it', async (_state, loaded) => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const contents = plist(label, [path.join(world.home, '.local', 'bin', 'ms365-token-backup')], world.home);
+    if (loaded) world.addJob(label, contents); else writeFileSync(path.join(world.launchAgents, `${label}.plist`), contents);
+    const plan = await planTwoMemberWorld(world);
+    expect(plan.ready).toBe(false);
+    const rows = (plan.document.preconditions as Array<{ id: string }>).filter((row) => row.id.endsWith(`:${label}`));
+    expect(rows).toEqual([
+      expect.objectContaining({ id: `retired:${label}`, ok: false, detail: expect.stringMatching(/retired from the standard.*remove/) }),
+    ]);
+  });
+
   it('refuses an external-label installed consumer of a member old release before any mutation', async () => {
     const world = twoMemberWorld();
     writeFileSync(path.join(world.launchAgents, 'com.bot-errors.health.plist'), plist('com.bot-errors.health', ['/bin/bash', `${world.oldRelease}/deploy/scripts/health-reader.sh`], world.oldRelease));
