@@ -1965,10 +1965,35 @@ enters it, so a wording variant of the same sources overwrites the same record. 
 record carries the lineage as structured `lineage_id`, `lineage_policy_version` and
 `source_record_ids` fields; the joined `evidence` string is no longer written.
 Validation fails a cluster closed, before any write, when a promotion cites a source
-outside the cluster or twice, when two promotions cite the same source set (they would
-share one id), or when a source is both promoted and discarded. The write site
-re-derives every lineage before its first write and rejects the cluster as
+outside the cluster or twice, or when a discard is listed twice or names a source
+outside the cluster. Two output shapes drop one item instead and keep the cluster
+(`consolidateCluster`, `src/memory/consolidation.ts`): when two promotions cite the same
+source set (they would share one id), the first is kept and the later ones are dropped;
+when a source is both promoted and discarded, the discard entry is dropped, because
+discards are not persisted. Each drop logs one content-free warning with counts
+(`consolidation output items dropped`); it adds no failed count, so it neither turns the
+run `partial` or `failed` nor degrades `/health`, in dry runs as in live runs. The
+write site re-derives every lineage before its first write and rejects the cluster as
 `output_invalid` if any fails.
+
+What source-set identity does and does not do:
+
+- **One record per cited source set.** Within a scope and lineage policy, one set of
+  cited sources maps to one remote record. A later run whose promotion cites the same
+  set replaces the earlier record's text, confidence and reason, even when the model
+  states a different fact from those sources; the earlier text is not kept.
+- **A changed source set is a new record.** When a later run cites a different set for
+  the same fact (a supporting record arrived, aged out of the lookback window or fell
+  out of the top-100 selection), it writes a new record with no link to the earlier one.
+  The earlier record stays until recall decay removes it; supersession belongs to the
+  ledger design in §10.3, which is not built.
+- **Legacy records are not reconciled.** Records written before source-set identity
+  keep their claim-hash ids (`durable:<16 hex>`) and are never rewritten or migrated. A
+  fact promoted again gets a source-set record beside its legacy record. Chat recall
+  (`loadContextDetailed`, `src/runtimes/chat/context.ts`) de-duplicates by text as well
+  as by id (text trimmed, whitespace runs collapsed), so a legacy record and a
+  source-set record with the same text show once; both still take a search result slot,
+  and records whose text differs both show.
 
 These are live-safe defect fixes: no schema, store, or contract change.
 
