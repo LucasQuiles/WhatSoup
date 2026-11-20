@@ -17,6 +17,8 @@ const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const TEST_DOCKER_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
 const TEST_SNAPSHOT = '20261001T000000Z';
 const CA_BOOTSTRAP = "RUN node -e \"require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\\n') + '\\n')\"";
+const RELEASE_CHECK = "RUN grep -qx 'VERSION_CODENAME=bookworm' /etc/os-release";
+const RELEASE_CHECK_REASON = 'Dockerfile must check that the base image is Debian bookworm right after the CA bootstrap and before APT';
 
 /**
  * Build a minimal repo fixture with the four pin surfaces (nvmrc, package.json,
@@ -96,6 +98,7 @@ function makeFixture(opts: {
     [
       `FROM node:${dockerVersion}-slim${dockerDigest === null ? '' : `@sha256:${dockerDigest}`} AS base`,
       CA_BOOTSTRAP,
+      RELEASE_CHECK,
       'RUN printf \'%s\\n\' \\',
       `  'deb [check-valid-until=no] ${sourceUrl} bookworm main' \\`,
       `  'deb [check-valid-until=no] ${securitySourceUrl} bookworm-security main' \\`,
@@ -344,6 +347,30 @@ describe('node-pin consistency check', () => {
     expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
       source: 'docker/Dockerfile', filePath,
       reason: 'Dockerfile must bootstrap the pinned Node CA roots before APT and preserve that trust store',
+    });
+  });
+
+  it('requires the base image Debian release check right after the CA bootstrap', () => {
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, readFileSync(filePath, 'utf8').replace(RELEASE_CHECK + '\n', ''));
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath, reason: RELEASE_CHECK_REASON,
+    });
+  });
+
+  it.each([
+    ['another release', (text: string) => text.replace('VERSION_CODENAME=bookworm', 'VERSION_CODENAME=trixie')],
+    ['a check after the source rewrite', (text: string) => text
+      .replace(RELEASE_CHECK + '\n', '')
+      .replace('FROM base AS deps', `${RELEASE_CHECK}\nFROM base AS deps`)],
+    ['a second release probe', (text: string) => `${text}RUN cat /etc/os-release\n`],
+  ])('rejects %s instead of the bookworm release check', (_name, mutate) => {
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, mutate(readFileSync(filePath, 'utf8')));
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath, reason: RELEASE_CHECK_REASON,
     });
   });
 
