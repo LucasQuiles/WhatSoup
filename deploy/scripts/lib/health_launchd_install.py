@@ -78,6 +78,8 @@ def candidate(raw: bytes, root: Path, label: str, manifest: str | None) -> tuple
     # Exit 1 means a verified rollback, so malformed input must be a refusal, not an AttributeError.
     if not isinstance(before, dict):
         raise Refused("expected a plist whose top level is a dict")
+    if not isinstance(before.get("EnvironmentVariables", {}), dict):
+        raise Refused("EnvironmentVariables must be a dict")
     if before.get("Label") != label or before.get("RunAtLoad") is not False or before.get("KeepAlive", False):
         raise Refused("expected an existing health job with RunAtLoad=false and no KeepAlive")
     if "Program" in before or not isinstance(before.get("StartCalendarInterval"), (dict, list)):
@@ -104,8 +106,6 @@ def candidate(raw: bytes, root: Path, label: str, manifest: str | None) -> tuple
         if not path.is_absolute() or not path.is_file() or not os.access(path, os.R_OK):
             raise Refused("runtime manifest must be an existing readable absolute path")
         env = after.setdefault("EnvironmentVariables", {})
-        if not isinstance(env, dict):
-            raise Refused("EnvironmentVariables must be a dict")
         env["BOT_ERRORS_RUNTIME_MANIFEST"] = str(path)
         changes.append("EnvironmentVariables.BOT_ERRORS_RUNTIME_MANIFEST")
     return plistlib.dumps(after, sort_keys=False), changes
@@ -166,10 +166,11 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
         current, current_info = read_original(path, sha(raw))
         same_permissions(current_info, info)
         supported_metadata(path, current_info)
+        # Before anything is staged: this refusal changes nothing and never reaches rollback.
+        idle_job(domain, label)
         staged = stage(path, data, info, ".health-candidate-")
-        backup = None
         try:
-            idle_job(domain, label)
+            # Every receipt below is written after this line, so each names a real backup.
             backup = stage(path, current, info, path.name + ".backup-")
             try:
                 _, current_info = read_original(path, sha(raw))
@@ -210,6 +211,11 @@ def apply(path: Path, raw: bytes, data: bytes, info: os.stat_result, domain: str
                         raise Refused("concurrent plist update; rollback would overwrite it")
                     loaded = command("launchctl", "list", label)
                     if loaded.returncode == 0:
+                        if found != data:
+                            # The original file is in place and its job is loaded: this run
+                            # neither wrote that file nor loaded that job, so it stops nothing.
+                            return 2, {"status": "unchanged", "backup": str(backup),
+                                       "reason": "original job still loaded; nothing was stopped"}
                         if command("launchctl", "bootout", domain, str(path)).returncode:
                             raise Refused("cannot unload candidate during rollback")
                     elif loaded.returncode != 113:
