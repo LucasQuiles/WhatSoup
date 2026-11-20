@@ -827,15 +827,24 @@ describe('retired surfaces', () => {
     expect(result.stdout).not.toContain('all managed launchd surfaces match');
   });
 
-  it('never opens a retired plist in the maintenance or collector scans', () => {
+  it('never opens a retired plist in the maintenance scan', () => {
     const f = makeFixture();
     installAllOk(f);
-    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`), 'not a plist; runs bot_errors_j1_collector\n');
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`), 'not a plist\n');
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`retired: ${RETIRED_STEM} plist is installed`);
     expect(result.stdout).toContain('ok: harness-maintenance');
-    expect(result.stdout).not.toContain('unmanaged collector job');
+  });
+
+  it('skips a retired plist in the collector scan only when its Label is the retired label', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const plist = join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`);
+    writeFileSync(plist, plistXml(`com.whatsoup.${RETIRED_STEM}`, '/opt/x/bot_errors_j1_collector.py'));
+    expect(run(f).stdout).not.toContain('unmanaged collector job');
+    writeFileSync(plist, plistXml('com.example.other', '/opt/x/bot_errors_j1_collector.py'));
+    expect(run(f).stdout).toContain(`warn: unmanaged collector job: com.whatsoup.${RETIRED_STEM}`);
   });
 
   it('checks a retired name that a configured instance owns as that instance', () => {
