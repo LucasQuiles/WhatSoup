@@ -497,6 +497,33 @@ describe('release:activate-host group transaction', () => {
     expect(ids).toContain(`loaded:${label}`);
   });
 
+  const retiredRows = async (world: TwoMemberWorld): Promise<Array<{ id: string; detail: string }>> =>
+    ((await planTwoMemberWorld(world)).document.preconditions as Array<{ id: string; detail: string }>).filter((row) => row.id.endsWith(':com.whatsoup.ms365-token-backup'));
+
+  it('says only to boot out a loaded retired job whose plist and script are gone and whose load path is unread', async () => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    unlinkSync(world.addJob(label, plist(label, [path.join(world.home, '.local', 'bin', 'ms365-token-backup')], world.home)));
+    const fake = world.host.exec;
+    world.host.exec = (file, args, options) => (file === '/bin/launchctl' && args[0] === 'print' && args[1] === `gui/501/${label}` ? Promise.resolve({ code: 113, stdout: '', stderr: '' }) : fake(file, args, options));
+    expect((await retiredRows(world)).map((row) => [row.id, row.detail])).toEqual([[`retired:${label}`, 'retired from the standard; boot the job out; no plist or script is left to remove']]);
+  });
+
+  it('gives no retired row for a plist with the retired file name whose Label is another job', async () => {
+    const world = twoMemberWorld();
+    writeFileSync(path.join(world.launchAgents, 'com.whatsoup.ms365-token-backup.plist'), plist('com.example.other', ['/usr/bin/true'], world.home));
+    const ids = (await retiredRows(world)).map((row) => row.id);
+    expect(ids).not.toContain('retired:com.whatsoup.ms365-token-backup');
+    expect(ids).toContain('installed:com.whatsoup.ms365-token-backup');
+  });
+
+  it('does not take a directory named config.json as an instance owning the retired name', async () => {
+    const world = twoMemberWorld();
+    mkdirSync(path.join(world.home, '.config', 'whatsoup', 'instances', 'ms365-token-backup', 'config.json'), { recursive: true });
+    writeFileSync(path.join(world.launchAgents, 'com.whatsoup.ms365-token-backup.plist'), plist('com.whatsoup.ms365-token-backup', ['/usr/bin/true'], world.home));
+    expect((await retiredRows(world)).map((row) => row.id)).toEqual(['retired:com.whatsoup.ms365-token-backup']);
+  });
+
   it('refuses an external-label installed consumer of a member old release before any mutation', async () => {
     const world = twoMemberWorld();
     writeFileSync(path.join(world.launchAgents, 'com.bot-errors.health.plist'), plist('com.bot-errors.health', ['/bin/bash', `${world.oldRelease}/deploy/scripts/health-reader.sh`], world.oldRelease));
