@@ -136,10 +136,14 @@ Review the plan, then repeat the same command with `--apply` and
 a changed plist, a running or disabled job, or another active re-pin; the
 running or disabled check comes before anything is staged. It validates a staged plist, keeps an original backup and
 restores the original configuration and service after a failed activation.
-Rollback unloads the job only when the plist on disk is the candidate this run
-wrote: when the bootout fails and the original plist and its job are still in
-place, the installer stops nothing and reports `unchanged` with exit `2`. Every
-receipt after the backup is staged names that backup. It never enables a disabled service or
+Rollback acts on what the run itself did, not on the bytes it finds on disk.
+Once this run has unloaded the original job or installed the candidate,
+rollback unloads whatever job is loaded, restores the original plist and
+reloads it; it does not overwrite a plist that is neither the original nor the
+candidate. If the first bootout fails and the original job stays loaded, the
+run unloads nothing: it reports `unchanged` (exit `2`) when the original plist
+is still in place, and `rollback_unverified` (exit `3`) with a reason when the
+plist has changed. It never enables a disabled service or
 restarts bot instances. A successful apply still requires live configuration and
 authenticated runtime verification.
 Immediately before applying, verify that the loaded definition still matches
@@ -147,7 +151,8 @@ the reviewed plist. The installer's label and idle checks do not prove that
 launchd loaded the current on-disk definition.
 
 Exit status: `0` means planned/applied as stated in JSON; `1` means activation
-failed and rollback was verified; `2` means refused or unchanged; `3` means
+failed and rollback was verified; `2` means refused or unchanged, with the live
+job untouched; `3` means
 rollback remains unverified and needs investigation. Preserve the reported backup
 until recovery is verified. Forced termination or host failure can interrupt
 restoration; the backup is the manual recovery source. Do not treat a successful
@@ -156,7 +161,9 @@ re-pin as permission to clear existing incidents or recovery debt.
 A refusal prints a JSON receipt with `"status": "refused"`, including for a plist
 whose top level or `EnvironmentVariables` is not a dictionary, with or without
 `--runtime-manifest`. A refusal before
-the bootout removes the backup it staged. Without `--repin-existing` the
+the bootout removes the backup it staged: the final re-read of the plist runs
+after the backup is staged, and its refusal deletes that backup and names none.
+Every receipt after the bootout names the backup. Without `--repin-existing` the
 installer takes no arguments: it renders a fresh installation only when called
 with none, and any other argument exits 2 before anything is written or loaded.
 Earlier versions ignored such arguments.
