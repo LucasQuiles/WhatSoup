@@ -1281,8 +1281,24 @@ describe('ConfigEditDialog — toolUpdateMode default', () => {
     const select = toolUpdateSelect()
     expect(select.tagName).toBe('SELECT')
     expect(select.value).toBe('')
-    expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'full', 'minimal'])
+    expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'full', 'friendly', 'minimal'])
     expect(select.options[select.selectedIndex]?.textContent).toMatch(/default/i)
+  })
+
+  it('shows a stored friendly mode and keeps it when another field is saved', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog open={true} config={{ ...BASE_CONFIG, toolUpdateMode: 'friendly' }} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const select = toolUpdateSelect()
+    expect(select.value).toBe('friendly')
+    expect(select.options[select.selectedIndex]?.textContent).toBe('friendly')
+
+    fireEvent.change(screen.getByLabelText('accessMode'), { target: { value: 'allowlist' } })
+    await save()
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, { accessMode: 'allowlist' })
   })
 
   it('shows the default for a line whose mode was cleared to null', () => {
@@ -1339,7 +1355,7 @@ describe('ConfigEditDialog — toolUpdateMode default', () => {
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — empty config', () => {
-  it('renders with no visible fields when all keys are excluded', () => {
+  it('opens an agent config of excluded keys unmodified, with Save disabled', () => {
     const excludedOnly: Record<string, unknown> = {
       name: 'test',
       type: 'agent',

@@ -284,7 +284,7 @@ describe('static config tables', () => {
 
   it('ENUM_OPTIONS pins the known UI dropdown sets', () => {
     expect(ENUM_OPTIONS.accessMode).toEqual(['self_only', 'allowlist', 'open_dm', 'groups_only']);
-    expect(ENUM_OPTIONS.toolUpdateMode).toEqual(['', 'full', 'minimal']);
+    expect(ENUM_OPTIONS.toolUpdateMode).toEqual(['', 'full', 'friendly', 'minimal']);
     expect(ENUM_OPTIONS['chatOptions.openaiProviderConfig.apiKeyService']).toEqual(['', ...CHAT_API_KEY_SERVICE_OPTIONS]);
     expect(ENUM_OPTIONS).not.toHaveProperty('model');
   });
