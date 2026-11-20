@@ -32,7 +32,13 @@ ALL_INSTANCES=()
 # Non-instance stems: parity with deploy/managed-components.json
 # protective_services (+ the fleet console). Enforced by
 # tests/scripts/launchd-drift.test.ts (manifest-parity test).
-NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check ms365-token-backup bot-errors-j1-collector whatsoup-fleet)
+NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check bot-errors-j1-collector whatsoup-fleet)
+
+# Retired stems: jobs removed from the standard (no manifest entry, no template).
+# A leftover plist ($LAUNCHD_DIR/com.whatsoup.<stem>.plist) or script
+# ($BIN_DIR/<stem>) is drift with a removal instruction; the stem is never
+# discovered as an instance. See docs/releases/2026-11-20-token-backup-job-retired.md.
+RETIRED_STEMS=(ms365-token-backup)
 
 usage() {
   cat <<'USAGE'
@@ -336,7 +342,7 @@ discover_instances() {
     stem="${stem#com.whatsoup.}"
     case "$stem" in *-watchdog) continue ;; esac
     known=0
-    for k in "${NON_INSTANCE_STEMS[@]}"; do
+    for k in "${NON_INSTANCE_STEMS[@]}" ${RETIRED_STEMS[@]+"${RETIRED_STEMS[@]}"}; do
       if [ "$stem" = "$k" ]; then known=1; fi
     done
     if [ "$known" -eq 1 ]; then continue; fi
@@ -403,21 +409,20 @@ check_watchdog_script() { # BOT
   fi
 }
 
-check_ms365_script() {
-  local script="$BIN_DIR/ms365-token-backup"
-  if [ ! -f "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist" ]; then
-    return 0 # host does not run this surface; plist skip already reported
-  fi
-  if [ ! -x "$script" ]; then
-    echo "missing installed ms365-token-backup script: $script" >&2
-    failures=$((failures + 1)); return 0
-  fi
-  if grep -qE '__[A-Z][A-Z_]*__' "$script"; then
-    echo "drift: ms365-token-backup script has surviving placeholders" >&2
-    failures=$((failures + 1))
-  else
-    echo "ok: ms365-token-backup script (no surviving placeholders)"
-  fi
+check_retired_surfaces() { # a retired job's leftover files are drift; contents are never read or printed
+  local stem plist script
+  for stem in ${RETIRED_STEMS[@]+"${RETIRED_STEMS[@]}"}; do
+    plist="$LAUNCHD_DIR/com.whatsoup.$stem.plist"
+    script="$BIN_DIR/$stem"
+    if [ -e "$plist" ] || [ -L "$plist" ]; then
+      echo "retired: $stem plist is installed (retired from the standard; boot the job out if it is loaded, then remove $plist)" >&2
+      failures=$((failures + 1))
+    fi
+    if [ -e "$script" ] || [ -L "$script" ]; then
+      echo "retired: $stem script is installed (retired from the standard; remove $script)" >&2
+      failures=$((failures + 1))
+    fi
+  done
 }
 
 check_j1_collector_script() { # optional surface; when its plist is installed the wrapper must be a readable regular
@@ -573,7 +578,7 @@ warn_unknown_surfaces() { # reported, NOT counted as drift in v1 (calibrate befo
     stem="$(basename "$f" .plist)"
     stem="${stem#com.whatsoup.}"
     covered=0
-    for k in "${NON_INSTANCE_STEMS[@]}"; do
+    for k in "${NON_INSTANCE_STEMS[@]}" ${RETIRED_STEMS[@]+"${RETIRED_STEMS[@]}"}; do
       if [ "$stem" = "$k" ]; then covered=1; fi
     done
     for k in ${ALL_INSTANCES[@]+"${ALL_INSTANCES[@]}"}; do
@@ -589,8 +594,7 @@ warn_unknown_surfaces() { # reported, NOT counted as drift in v1 (calibrate befo
 # --- main ---
 check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-maintenance.plist" "$LAUNCHD_DIR/com.whatsoup.harness-maintenance.plist"
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
-check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
-check_ms365_script
+check_retired_surfaces
 check_optional_template_surface "bot-errors-j1-collector" "deploy/templates/com.whatsoup.bot-errors-j1-collector.plist" "$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist"
 check_j1_collector_script
 warn_unmanaged_collector_jobs
