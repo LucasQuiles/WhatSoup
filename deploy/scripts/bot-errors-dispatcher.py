@@ -5592,7 +5592,8 @@ def producer_claim(
 # What this cycle learned about the authority: whether any grant was obtained,
 # the last not-ready reason, and whether a rate refusal stops further requests.
 # Observe mode also keeps the claim ids already asked this cycle and the
-# requests and request time spent, for its per-cycle bounds.
+# requests and request time spent, for its per-cycle bounds, and the wall time
+# its observations took, which the credential deadlines exclude.
 _AUTHORITY_CYCLE: dict[str, Any] = {
     "accepted": False,
     "not_ready": None,
@@ -5600,6 +5601,7 @@ _AUTHORITY_CYCLE: dict[str, Any] = {
     "observed": set(),
     "observe_requests": 0,
     "observe_seconds": 0.0,
+    "observe_wall_seconds": 0.0,
 }
 # The clock observe mode charges request time against; a test seam.
 _authority_clock = time.monotonic
@@ -5613,6 +5615,7 @@ def begin_incident_authority_cycle() -> None:
         observed=set(),
         observe_requests=0,
         observe_seconds=0.0,
+        observe_wall_seconds=0.0,
     )
 
 
@@ -5835,6 +5838,7 @@ def observe_incident_authority(
     Never raises and never writes to the event. Returns the recorded outcome,
     or None when this event was already asked this cycle.
     """
+    asked_at = time.monotonic()
     try:
         claim = _observe_claim(event, claimed_event)
         key = str(claim.get("id"))
@@ -5872,6 +5876,7 @@ def observe_incident_authority(
     except Exception:  # noqa: BLE001 - observation must never affect delivery
         outcome, reason = "protocol_error", "authority_client_error"
     record_incident_authority_outcome(event, outcome, reason)
+    _AUTHORITY_CYCLE["observe_wall_seconds"] += max(0.0, time.monotonic() - asked_at)
     return outcome
 
 
@@ -12084,6 +12089,12 @@ def credential_meta_alert(source: str, summary: str, deadline: float, *, log: An
         text = format_event(meta)
     except Exception:  # noqa: BLE001 - it is owed again in the next cycle
         return None
+    if INCIDENT_AUTHORITY_MODE != "enforce":
+        # Observe mode asks before either channel and moves the deadline by
+        # the time asking took; the sends below find the answer recorded.
+        spent = _AUTHORITY_CYCLE["observe_wall_seconds"]
+        observe_incident_authority(meta)
+        deadline += _AUTHORITY_CYCLE["observe_wall_seconds"] - spent
     taken = False
     try:
         send_authorized_whatsapp(
@@ -12294,7 +12305,10 @@ def send_credential_pages(paths: dict[str, Path]) -> None:
                         authority_event, authority_event
                     )
                 else:
+                    spent = _AUTHORITY_CYCLE["observe_wall_seconds"]
                     observe_incident_authority(authority_event, authority_event)
+                    # Time spent asking does not count against the class budget.
+                    deadline += _AUTHORITY_CYCLE["observe_wall_seconds"] - spent
 
             accepted = send_credential_page(
                 item["line"],
@@ -12340,7 +12354,10 @@ def send_credential_meta_alerts(paths: dict[str, Path]) -> None:
         for item in _credential_meta_alerts:
             if deadline - time.monotonic() < 1:
                 break
+            spent = _AUTHORITY_CYCLE["observe_wall_seconds"]
             day = credential_meta_alert(item["source"], item["line"], deadline, log=log)
+            # Observe mode: time spent asking does not count against the budget.
+            deadline += _AUTHORITY_CYCLE["observe_wall_seconds"] - spent
             if day is not None:
                 # Marked for the UTC day a channel first took it, not the day it was listed.
                 taken = {**item, "day": day} if "day" in item else item
