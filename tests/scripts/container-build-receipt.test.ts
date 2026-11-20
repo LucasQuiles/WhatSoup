@@ -68,8 +68,21 @@ function sha256(contents: string | Buffer): string {
   return createHash('sha256').update(contents).digest('hex');
 }
 
-// The default fixture layer is a real gzip blob whose uncompressed bytes the config names as its diff_id.
-const LAYER_CONTENT = 'uncompressed-layer-bytes';
+// A one-file POSIX tar stream, so a fixture layer is a real filesystem layer rather than arbitrary bytes.
+function tarLayer(name: string, contents: string): Buffer {
+  const body = Buffer.from(contents, 'utf8');
+  const header = Buffer.alloc(512);
+  header.write(name, 0);
+  header.write('0000644\0' + '0000000\0' + '0000000\0', 100);
+  header.write(`${body.length.toString(8).padStart(11, '0')}\0${'0'.repeat(11)}\0${' '.repeat(8)}0`, 124);
+  header.write('ustar\u000000', 257);
+  header.write(`${header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0')}\0 `, 148);
+  return Buffer.concat([header, body, Buffer.alloc((512 - (body.length % 512)) % 512), Buffer.alloc(1024)]);
+}
+
+// The default fixture layer is a real gzip blob of a tar stream whose uncompressed bytes the config names
+// as its diff_id.
+const LAYER_CONTENT = tarLayer('app/layer.txt', 'layer file contents\n');
 const LAYER_DIFF_ID = `sha256:${sha256(LAYER_CONTENT)}`;
 
 type Permissions = string | Record<string, string> | undefined;
@@ -155,7 +168,7 @@ function makeReceiptInput(options: {
 interface OciArchiveOptions {
   jsonBytes?: { kind: 'root index' | 'output index' | 'image manifest' | 'config' | 'attestation manifest' | 'provenance' | 'SBOM'; size: number };
   imageLayerBytes?: number;
-  layerContents?: string[];
+  layerContents?: (string | Buffer)[];
   undecodableLayer?: boolean;
   configRootfs?: 'mismatch' | 'reordered' | 'extra' | 'no diff_ids' | 'no rootfs' | 'wrong type';
   sourceRevision?: string;
@@ -214,7 +227,7 @@ function writeOciArchive(
       ? [{ mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip', bytes: Buffer.from('not gzip bytes'), diffId: `sha256:${sha256('not gzip bytes')}` }]
       : (options.layerContents ?? [LAYER_CONTENT]).map((content) => ({
         mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
-        bytes: gzipSync(Buffer.from(content, 'utf8')),
+        bytes: gzipSync(typeof content === 'string' ? Buffer.from(content, 'utf8') : content),
         diffId: `sha256:${sha256(content)}`,
       }));
   const layerDescriptors = layerBlobs.map((blob) => ({ mediaType: blob.mediaType, ...writeBlob(blob.bytes) }));
@@ -412,8 +425,14 @@ describe('container build evidence CI contract', () => {
 
   it('accepts an image whose config diff_ids name its archived layers in order', () => {
     const imagePath = path.join(tmp.make('diff-ids'), 'image.tar');
-    const oci = writeOciArchive(imagePath, { layerContents: ['layer-one', 'layer-two'] });
+    const oci = writeOciArchive(imagePath, { layerContents: [tarLayer('app/one.txt', 'one\n'), tarLayer('app/two.txt', 'two\n')] });
     expect(verifyOciArchiveAttestations(imagePath, oci.outputDigest).imageDigest).toBe(oci.imageDigest);
+  });
+
+  it('uses a real tar stream as the default fixture layer', () => {
+    const listing = spawnSync('tar', ['-tf', '-'], { input: LAYER_CONTENT, encoding: 'utf8' });
+    expect(listing.status, listing.stderr).toBe(0);
+    expect(listing.stdout.trim()).toBe('app/layer.txt');
   });
 
   it.each([
