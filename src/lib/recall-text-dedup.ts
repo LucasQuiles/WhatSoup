@@ -1,52 +1,109 @@
 /**
- * Same-text collapse for memory recall surfaces (chat recall and
- * knowledge_search).
+ * Consolidation promotion record ids, and the twin collapse that the recall
+ * surfaces (chat recall and knowledge_search) apply to them.
  *
- * One fact can be stored under two record ids: a consolidation promotion
- * written under its legacy claim-hash id (`durable:<16 hex>`) and again under
- * its source-set id (`durable:l<policy>:<hex>`, built by
- * `src/memory/consolidation-lineage.ts`). Nothing reconciles the two, so recall
- * collapses records by text instead.
+ * The id format is defined here once, and the writer
+ * (`src/memory/consolidation-lineage.ts`) builds its ids from it: memory may
+ * import lib, but lib and the recall surfaces may not import memory
+ * (`scripts/lib/fitness/registry.ts`, layer rules).
+ *
+ * One fact can be stored under two record ids: a promotion written before
+ * source-set identity keeps its legacy claim-hash id (`durable:<16 hex>`), and
+ * the same fact promoted again is written under its source-set id
+ * (`durable:l<policy>:<32 hex>`). Nothing reconciles the two, so recall
+ * collapses exactly that pair. Every other pair of hits is left alone,
+ * whatever their text.
  */
 
-const SOURCE_SET_RECORD_ID = /^durable:l\d+:/;
+const DURABLE_RECORD_ID_PREFIX = 'durable:';
+const LEGACY_CLAIM_HASH_HEX_LENGTH = 16;
+
+/** Lineage policy version: part of the source-set id and of its hash input. */
+export const CONSOLIDATION_LINEAGE_POLICY_VERSION = 1 as const;
+/** Lowercase hex digits of a source-set lineage digest. */
+export const SOURCE_SET_DIGEST_HEX_LENGTH = 32;
+
+/** Lineage id: `l<policy>:<digest>`. */
+export function sourceSetLineageId(digest: string): string {
+  return `l${CONSOLIDATION_LINEAGE_POLICY_VERSION}:${digest}`;
+}
+
+/** Remote record id of a source-set promotion: `durable:<lineageId>`. */
+export function sourceSetRecordId(lineageId: string): string {
+  return `${DURABLE_RECORD_ID_PREFIX}${lineageId}`;
+}
+
+// Built with the writer's own builders, so the recogniser cannot drift from them.
+const SOURCE_SET_RECORD_ID = new RegExp(
+  `^${sourceSetRecordId(sourceSetLineageId(`[0-9a-f]{${SOURCE_SET_DIGEST_HEX_LENGTH}}`))}$`,
+);
+const LEGACY_CLAIM_HASH_RECORD_ID = new RegExp(
+  `^${DURABLE_RECORD_ID_PREFIX}[0-9a-f]{${LEGACY_CLAIM_HASH_HEX_LENGTH}}$`,
+);
+
+export function isSourceSetRecordId(id: unknown): boolean {
+  return typeof id === 'string' && SOURCE_SET_RECORD_ID.test(id);
+}
+
+export function isLegacyClaimHashRecordId(id: unknown): boolean {
+  return typeof id === 'string' && LEGACY_CLAIM_HASH_RECORD_ID.test(id);
+}
 
 /** Text identity: trimmed, whitespace runs collapsed, case kept. Null when there is no text to compare. */
-export function recallTextKey(text: unknown): string | null {
+function recallTextKey(text: unknown): string | null {
   if (typeof text !== 'string') return null;
   const key = text.trim().replace(/\s+/g, ' ');
   return key.length > 0 ? key : null;
 }
 
-function isSourceSetRecordId(id: unknown): boolean {
-  return typeof id === 'string' && SOURCE_SET_RECORD_ID.test(id);
+export interface RecallTwinView {
+  id: unknown;
+  text: unknown;
+  /** Surface-defined scope: twins collapse only within one scope. */
+  scope: string;
+  score: number;
 }
 
 /**
- * Keeps one item per text key, in input order. The survivor is the first item
- * with a source-set record id, else the first item: the source-set record is
- * the one later consolidation runs keep writing. Items without comparable text
- * all pass through.
+ * Collapses each legacy/source-set twin pair: within one scope, the first
+ * legacy claim-hash record and the first source-set record whose texts match.
+ * The source-set record survives at the earlier position of the two, carrying
+ * the higher score of the two, so the fact keeps the best rank either twin
+ * had. Every other item is returned unchanged, in order.
  */
-export function collapseSameText<T>(
+export function collapseConsolidationTwins<T>(
   items: readonly T[],
-  view: (item: T) => { id: unknown; text: unknown },
+  view: (item: T) => RecallTwinView,
+  withScore: (item: T, score: number) => T,
 ): T[] {
-  const survivorByKey = new Map<string, number>();
+  const legacyByKey = new Map<string, number>();
+  const sourceSetByKey = new Map<string, number>();
   items.forEach((item, index) => {
-    const { id, text } = view(item);
-    const key = recallTextKey(text);
-    if (key === null) return;
-    const current = survivorByKey.get(key);
-    if (
-      current === undefined
-      || (isSourceSetRecordId(id) && !isSourceSetRecordId(view(items[current]!).id))
-    ) {
-      survivorByKey.set(key, index);
-    }
+    const { id, text, scope } = view(item);
+    const textKey = recallTextKey(text);
+    if (textKey === null) return;
+    const byKey = isLegacyClaimHashRecordId(id)
+      ? legacyByKey
+      : isSourceSetRecordId(id) ? sourceSetByKey : null;
+    const key = `${scope}\0${textKey}`;
+    if (byKey !== null && !byKey.has(key)) byKey.set(key, index);
   });
-  return items.filter((item, index) => {
-    const key = recallTextKey(view(item).text);
-    return key === null || survivorByKey.get(key) === index;
+
+  const survivorAt = new Map<number, T>();
+  const removed = new Set<number>();
+  for (const [key, legacyIndex] of legacyByKey) {
+    const sourceSetIndex = sourceSetByKey.get(key);
+    if (sourceSetIndex === undefined) continue;
+    const legacy = items[legacyIndex]!;
+    const sourceSet = items[sourceSetIndex]!;
+    survivorAt.set(
+      Math.min(legacyIndex, sourceSetIndex),
+      withScore(sourceSet, Math.max(view(legacy).score, view(sourceSet).score)),
+    );
+    removed.add(Math.max(legacyIndex, sourceSetIndex));
+  }
+  return items.flatMap((item, index) => {
+    if (removed.has(index)) return [];
+    return [survivorAt.has(index) ? survivorAt.get(index)! : item];
   });
 }

@@ -21,7 +21,7 @@ import {
   type ChatRecallBoundary,
 } from '../../core/memory-scope.ts';
 import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
-import { collapseSameText } from '../../lib/recall-text-dedup.ts';
+import { collapseConsolidationTwins } from '../../lib/recall-text-dedup.ts';
 
 const log = createChildLogger('conversation');
 
@@ -210,23 +210,30 @@ export async function loadContextDetailed(
   ];
 
   // Merge, deduplicate by id, preserve insertion order (chat results first,
-  // then sender results, then self facts). Same-text records then collapse to
-  // one: a fact can exist under a legacy claim-hash id and again under its
-  // source-set id (durability §10.2).
+  // then sender results, then self facts). Then, within one leg only, a
+  // consolidation fact stored under both its legacy claim-hash id and its
+  // source-set id collapses to the source-set record, in the earlier slot of
+  // the two (durability §10.2). Nothing is re-sorted, so every other record
+  // keeps its place.
   const seenIds = new Set<string>();
-  const candidates: Array<{ result: SearchResult; self: boolean }> = [
-    ...[...chatResults, ...senderResults].map((result) => ({ result, self: false })),
-    ...selfResults.map((result) => ({ result, self: true })),
+  const candidates: Array<{ result: SearchResult; leg: 'chat' | 'sender' | 'self' }> = [
+    ...chatResults.map((result) => ({ result, leg: 'chat' as const })),
+    ...senderResults.map((result) => ({ result, leg: 'sender' as const })),
+    ...selfResults.map((result) => ({ result, leg: 'self' as const })),
   ].filter(({ result }) => {
     if (seenIds.has(result.id)) return false;
     seenIds.add(result.id);
     return true;
   });
-  const unique = collapseSameText(candidates, ({ result }) => ({ id: result.id, text: result.record.text }));
-  const merged = unique.filter((entry) => !entry.self).map((entry) => entry.result);
+  const unique = collapseConsolidationTwins(
+    candidates,
+    ({ result, leg }) => ({ id: result.id, text: result.record.text, scope: leg, score: result.score }),
+    (entry, score) => ({ ...entry, result: { ...entry.result, score } }),
+  );
+  const merged = unique.filter((entry) => entry.leg !== 'self').map((entry) => entry.result);
 
   // Self-facts go into a separate block
-  const selfFacts = unique.filter((entry) => entry.self).map((entry) => entry.result);
+  const selfFacts = unique.filter((entry) => entry.leg === 'self').map((entry) => entry.result);
 
   const topResults = [...merged, ...selfFacts];
   log.info(

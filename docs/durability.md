@@ -1990,16 +1990,24 @@ What source-set identity does and does not do:
   ledger design in §10.3, which is not built.
 - **Legacy records are not reconciled.** Records written before source-set identity
   keep their claim-hash ids (`durable:<16 hex>`) and are never rewritten or migrated. A
-  fact promoted again gets a source-set record beside its legacy record. Chat recall
-  (`loadContextDetailed`, `src/runtimes/chat/context.ts`) and `knowledge_search`
-  (`src/mcp/tools/knowledge.ts`, before the rerank cap) collapse records with the same
-  text (trimmed, whitespace runs collapsed; `collapseSameText`,
-  `src/lib/recall-text-dedup.ts`) to one, keeping the source-set record when there is
-  one, else the first in that surface's result order. Both records still take a provider
-  search slot,
-  and records whose text differs both show.
+  fact promoted again gets a source-set record beside its legacy record. Recall
+  collapses exactly that pair (`collapseConsolidationTwins`,
+  `src/lib/recall-text-dedup.ts`): a legacy record (`durable:` + 16 lowercase hex) and a
+  source-set record (the exact id the writer builds) whose texts match after trimming
+  and collapsing whitespace, within one scope. The scope is one recall leg (chat,
+  sender or self) in chat recall (`loadContextDetailed`, `src/runtimes/chat/context.ts`),
+  and one namespace, memory tier and entity type in `knowledge_search`
+  (`src/mcp/tools/knowledge.ts`, before ordering and the rerank cap). The source-set
+  record survives with the better position and the higher score of the two, so the
+  fact is never ranked lower, or filtered by a minimum score, a candidate cap or a
+  result limit, where its legacy twin would have passed. Every other pair of records
+  is left alone, whatever its text: two documents or two ordinary memories with the
+  same text both show, and so does a pair split across recall legs. Both twins still
+  take a provider search slot.
 
-These are live-safe defect fixes: no schema, store, or contract change.
+No SQLite schema or migration change; the promoted record's id and fields change as
+described above, and both recall surfaces collapse a legacy and source-set pair of one
+fact.
 
 ### 10.3 Durable lineage contract (designed; ledger slices owner-gated)
 
@@ -2025,11 +2033,13 @@ designed contract mirrors the fact-export queue machinery (§9):
   promote-once guarantee lives in this replay, not in the happy path.
 - **Promotion identity.** Landed as source-set identity (§10.2): scope + the canonical
   source set + the lineage policy version, never claim wording. Because the policy
-  version is an identity input, a policy bump mints a new lineage; the ledger records
-  the prior lineage as superseded rather than leaving an unlinked sibling. A
-  claim-hash column distinguishes re-affirmation from wording drift. Truncated-hash
-  collisions (same id, different source-set) fail the write closed and count under a
-  stable `conflict` code — collision policy is an owner decision.
+  version is an identity input, a policy bump mints a new lineage. The rest of this
+  bullet is designed and **not built**: the ledger would record the prior lineage as
+  superseded rather than leaving an unlinked sibling; a claim-hash column would
+  distinguish re-affirmation from wording drift; and a truncated-hash collision (same
+  id, different source set) would fail the write closed under a stable `conflict` code
+  (collision policy is an owner decision). Today no `conflict` code exists, and a
+  collision would overwrite the record, because the write is an upsert by id.
 - **Legacy classification.** Existing `durable:*` records and unattributed sources get
   an explicit migration disposition (`legacy_unclassified`) and never become
   recursively eligible by default. Legacy claim-hash promotion ids match

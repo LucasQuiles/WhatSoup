@@ -1,4 +1,14 @@
 import { shortHash } from '../lib/short-hash.ts';
+import {
+  CONSOLIDATION_LINEAGE_POLICY_VERSION,
+  SOURCE_SET_DIGEST_HEX_LENGTH,
+  sourceSetLineageId,
+  sourceSetRecordId,
+} from '../lib/recall-text-dedup.ts';
+
+// The id format lives in lib so the recall surfaces can recognise these ids
+// without importing memory; this writer builds every id from it.
+export { CONSOLIDATION_LINEAGE_POLICY_VERSION };
 
 /**
  * Promotion lineage identity for memory consolidation (#2569 source-set identity).
@@ -8,11 +18,9 @@ import { shortHash } from '../lib/short-hash.ts';
  * enters it, so the same sources promoted again with different wording resolve
  * to the same remote record instead of an unlinked sibling.
  */
-export const CONSOLIDATION_LINEAGE_POLICY_VERSION = 1 as const;
 
 // Domain-separates this digest from every other shortHash input in the repo.
 const LINEAGE_HASH_DOMAIN = 'whatsoup.memory-consolidation.lineage';
-const LINEAGE_HASH_HEX_LENGTH = 32;
 
 export interface ConsolidationLineage {
   /** Opaque lineage id, `l<policy>:<hex>`. */
@@ -53,12 +61,12 @@ export function consolidationLineage(
       scope.senderJid,
       canonical,
     ]),
-    LINEAGE_HASH_HEX_LENGTH,
+    SOURCE_SET_DIGEST_HEX_LENGTH,
   );
-  const lineageId = `l${CONSOLIDATION_LINEAGE_POLICY_VERSION}:${digest}`;
+  const lineageId = sourceSetLineageId(digest);
   return {
     lineageId,
-    recordId: `durable:${lineageId}`,
+    recordId: sourceSetRecordId(lineageId),
     sourceRecordIds: canonical,
     policyVersion: CONSOLIDATION_LINEAGE_POLICY_VERSION,
   };

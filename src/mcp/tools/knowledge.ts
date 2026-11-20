@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { createChildLogger } from '../../logger.ts';
 import { truncateForRerank } from '../../lib/text-utils.ts';
-import { collapseSameText } from '../../lib/recall-text-dedup.ts';
+import { collapseConsolidationTwins } from '../../lib/recall-text-dedup.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
@@ -672,14 +672,26 @@ export function registerKnowledgeTools(
           });
         }
 
-        // Gate, dedup by id, then order: memories by tier (this chat -> other
-        // chats -> untagged) and score, documents merged in by score. Outside the
-        // memory index every hit is tier 0. Same-text records then collapse to
-        // one before the rerank cap: a fact can exist under a legacy claim-hash
-        // id and again under its source-set id (durability §10.2).
-        let ranked = collapseSameText(
-          orderHits(tierHits(hits, scope, isChatNamespace, deps.db), false),
-          (hit) => ({ id: hit.rawId, text: hit.text }),
+        // Gate, dedup by id, collapse consolidation twins, then order: memories
+        // by tier (this chat -> other chats -> untagged) and score, documents
+        // merged in by score. Outside the memory index every hit is tier 0.
+        // A twin pair is a legacy claim-hash record and a source-set record of
+        // one fact with the same text, namespace, tier and entity type
+        // (durability §10.2). The source-set survivor carries the pair's tier
+        // and higher score, so the stable tier-then-score order puts it where
+        // the better twin was, before the rerank cap, minimum score and limit.
+        let ranked = orderHits(
+          collapseConsolidationTwins(
+            tierHits(hits, scope, isChatNamespace, deps.db),
+            (hit) => ({
+              id: hit.rawId,
+              text: hit.text,
+              scope: JSON.stringify([hit.namespace ?? null, hit.tier, hit.entityType]),
+              score: hit.score,
+            }),
+            (hit, score) => ({ ...hit, score }),
+          ),
+          false,
         ).slice(0, RERANK_CANDIDATE_CAP);
         let limit = MAX_RESULTS;
 
