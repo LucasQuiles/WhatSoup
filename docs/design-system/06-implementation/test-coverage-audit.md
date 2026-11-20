@@ -336,3 +336,15 @@ rule is wired warn-level in `eslint.config.fitness.mjs:47`.
   mid-mutation snapshots; re-measure at those lanes' evidence acceptance.
 - The 13 suite failures are the wizard lane's untracked test file, not landed work.
 - `tests/browser/` additions are outside this jsdom coverage run by design (D7 lane).
+- The skip-categorization sweep ("Five live `it.skipIf` sites", "no uncategorized
+  skips") and its line references are true only at that snapshot. Re-count at
+  canonical main `6ad62499ee46ad2a5b23bf080d27b1c348c5f560` (checked 2026-11-18),
+  excluding the rule fixtures in `tests/eslint-rules/`: 25 `skipIf` lines across
+  13 test files. Two carry no adjacent `@skip-env` / `@skip-timing` comment, so
+  they remain uncategorized: `tests/core/provider-mcp-config-fs.test.ts:37` and
+  `tests/deploy/preflight-check.test.ts:1466`. The categorization rule is wired
+  at `eslint.config.fitness.mjs:51`; the other 23 `skipIf` lines carry a
+  category comment. The rule also covers `runIf`
+  (`eslint-rules/categorized-skips.mjs`), which this re-count does not
+  include; some `runIf` sites carry no category comment, for example
+  `tests/deploy/harness-maintenance-claude-e2e.test.ts:48`.

@@ -3409,21 +3409,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             holds: response.automationHolds,
           }, 'protected inbound automation held; no third-party notification sent');
         }
-        // Automation is created and bounded by the authority from authenticated
-        // ingress facts. Only exact approved WhatsApp operations are eligible;
-        // mail work remains solely with the protected mail executor.
-        await retryApprovedWhatsappOperations({
-          accountId,
-          inboundEventId: parsed.messageId,
-          operations: response.automationOperations,
-          send: async (recipient, content, options) => {
-            const socket = this.sock;
-            if (!socket) throw new Error('protected inbound automation cannot reply while disconnected');
-            return options === undefined
-              ? socket.sendMessage(recipient, content as any)
-              : socket.sendMessage(recipient, content as any, options as any);
-          },
-        });
+        // The approved-operation dispatcher owns automation delivery so a
+        // blocked or failed send cannot prevent this input reaching ingestion.
         await onMessage(parsed);
         return;
       }

@@ -120,6 +120,8 @@ def test_render_fleet_probe_uses_liveness_route_not_console_root():
     assert 'FLEET_HEALTH="http://127.0.0.1:9002/"' not in body
     assert 'request_path == "/livez" and not token' in body
     assert 'request_path == "/" and not token' not in body
+    assert 'loaded_service_pid()' in body
+    assert 'FLEET_LIVENESS_UNVERIFIED' in body
 
 
 def test_render_bad_port_exits_3():

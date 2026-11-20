@@ -47,6 +47,43 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 /**
+ * The paths declared in console/src/App.tsx, matched the way the installed
+ * React Router (8.x `compilePath`) matches them: case-insensitively, a `:param`
+ * as one non-empty segment, and any run of trailing slashes. The `*` catch-all
+ * is deliberately not mirrored, so an undeclared path gets a 404 instead of the
+ * SPA's redirect to `/`.
+ */
+const CONSOLE_SPA_ROUTES: readonly RegExp[] = [
+  /^\/\/*$/i,
+  /^\/welcome\/*$/i,
+  /^\/hatch\/*$/i,
+  /^\/lines\/[^/]+\/*$/i,
+  /^\/inbox\/*$/i,
+  /^\/ops\/*$/i,
+  /^\/operator\/*$/i,
+  /^\/metrics\/*$/i,
+  /^\/agents\/*$/i,
+  /^\/skills\/*$/i,
+  /^\/dream-lab\/*$/i,
+  /^\/deployments\/*$/i,
+  /^\/settings\/*$/i,
+];
+
+/** React Router's `decodePath`: decode each segment, keep an encoded `/` inside it, leave a malformed path as is. */
+function decodeRoutePath(pathname: string): string {
+  try {
+    return pathname.split('/').map((segment) => decodeURIComponent(segment).replace(/\//g, '%2F')).join('/');
+  } catch {
+    return pathname;
+  }
+}
+
+function isConsoleSpaRoute(url: string): boolean {
+  const pathname = decodeRoutePath(url);
+  return CONSOLE_SPA_ROUTES.some((route) => route.test(pathname));
+}
+
+/**
  * @param getVersion — function returning current version (called per-request so it stays fresh
  *   after git pull updates the code without restarting the fleet server).
  */
@@ -93,9 +130,8 @@ export function createStaticHandler(distDir: string, getVersion?: () => string) 
       return serveHtml(realDirIndex);
     }
 
-    // SPA fallback: non-API routes without file extensions → index.html
-    const ext = path.extname(safePath);
-    if (!ext && !url.startsWith('/api/')) {
+    // Only routes declared by console/src/App.tsx may fall through to the SPA.
+    if (!url.startsWith('/api/') && isConsoleSpaRoute(url)) {
       const realIndex = confineToRoot(path.join(distDir, 'index.html'), distDir);
       if (realIndex) {
         return serveHtml(realIndex);

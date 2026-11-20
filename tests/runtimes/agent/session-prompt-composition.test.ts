@@ -13,7 +13,9 @@ import type { ProtectedDeliveryService } from '../../../src/core/protected-deliv
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 4100;
+// Reserve 250 bytes for configured route identity and its uncertainty, retaining
+// the existing polling and delivery instructions. Model IDs have a separate bound.
+const BASE_TRANSPORT_PROMPT_BYTES = 4350;
 
 const tmp = trackTmpDirs('');
 
@@ -94,6 +96,24 @@ describe('SessionManager system prompt composition', () => {
     expect(normal.buildSystemPrompt()).not.toContain('DEGRADED CAPABILITIES');
   });
 
+  it('reads an absolute instructionsPath without prefixing the configured cwd', () => {
+    const cwd = makeTempRoot();
+    const instructionsRoot = makeTempRoot();
+    const instructionsPath = join(instructionsRoot, 'agent-instructions.md');
+    writeFileSync(instructionsPath, 'Absolute file instruction.\n', 'utf8');
+
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd,
+      instructionsPath,
+    });
+
+    expect(sm.buildSystemPrompt()).toContain('Absolute file instruction.');
+  });
+
   it('fails closed when a configured instructionsPath is missing', () => {
     const cwd = makeTempRoot();
     const instructionsPath = `no-such-instructions-${randomUUID()}.md`;
@@ -117,6 +137,35 @@ describe('SessionManager system prompt composition', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect(String(thrown)).toContain(expectedPath);
     expect(String(thrown)).toContain('ENOENT');
+  });
+
+  it('fails the read of a sandboxPerChat instructionsPath that is not lexically inside the chat workspace', () => {
+    const root = makeTempRoot();
+    const workspace = join(root, 'users', 'chat-key');
+    mkdirSync(join(workspace, 'notes'), { recursive: true });
+    // Every target is a readable file, so only the chat-workspace rule fails the read.
+    writeFileSync(join(root, 'users', 'x.md'), 'Outside instruction.\n', 'utf8');
+    writeFileSync(join(workspace, 'x.md'), 'Workspace root instruction.\n', 'utf8');
+    writeFileSync(join(workspace, 'notes', 'agent.md'), 'Workspace instruction.\n', 'utf8');
+    writeFileSync(join(workspace, 'CLAUDE.md'), 'Linked instruction.\n', 'utf8');
+    const prompt = (instructionsPath: string, sandboxPerChat = true): string => new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd: workspace,
+      instructionsPath,
+      sandboxPerChat,
+    }).buildSystemPrompt();
+
+    for (const outside of ['../x.md', 'notes/../../x.md', './../x.md', 'notes/..', './x.md', 'notes//agent.md']) {
+      expect(() => prompt(outside), outside).toThrow(/^Failed to read instructionsPath ".+": .*chat workspace/);
+    }
+    // Unchanged: a confined path and CLAUDE.md are read from the workspace, and without
+    // sandboxPerChat a `..` path is read as given.
+    expect(prompt('notes/agent.md')).toContain('Workspace instruction.');
+    expect(prompt('CLAUDE.md')).toContain('Linked instruction.');
+    expect(prompt('../x.md', false)).toContain('Outside instruction.');
   });
 
   it('boots without instructionsPath and leaves native CLAUDE.md discovery to the agent runtime', () => {

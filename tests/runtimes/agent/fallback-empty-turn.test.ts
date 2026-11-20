@@ -688,6 +688,10 @@ describe('fallback chain advance on structurally-empty entry', () => {
         getProviderId: () => 'opencode-cli',
         getStatus: () => ({ sessionId: 'opencode-cli-1' }),
         getDbRowId: () => null,
+        // A null model ref serves the active entry (the marking predicate), so
+        // a regressed gate would count these turns. The Proxy's fabricated
+        // () => undefined would read as another entry's session instead.
+        getModelRef: () => null,
       } as Record<string, unknown>,
       { get: (t, p) => (p in t ? t[p as string] : () => undefined) },
     );

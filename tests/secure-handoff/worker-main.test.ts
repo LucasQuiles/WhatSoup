@@ -262,7 +262,7 @@ describe('fixed consumer service launch configuration', () => {
     }
   });
 
-  it('starts against an empty schema-68 database and exits cleanly after SIGTERM without a network request', async () => {
+  it('starts against an empty database at the current schema and exits cleanly after SIGTERM without a network request', async () => {
     const files = privateWorkerFiles('current');
     const run = launchWorker(files);
     try {

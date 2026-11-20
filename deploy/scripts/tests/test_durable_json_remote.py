@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,48 @@ def test_remote_canonical_event_bytes_match_local(
         remote_root / "event.json"
     ).read_bytes()
     assert remote.public_projection() == local.public_projection()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+@pytest.mark.skipif(
+    not hasattr(os, "O_PATH"),
+    reason="search-only traversal needs O_PATH; the O_RDONLY fallback has its own test",
+)
+def test_remote_write_works_beneath_search_only_ancestor(tmp_path: Path) -> None:
+    searchonly = tmp_path / "searchonly"
+    searchonly.mkdir()
+    inner = searchonly / "inner"
+    inner.mkdir(mode=0o700)
+    searchonly.chmod(0o311)  # search-only for its owner too: no read bit
+    try:
+        _, target = _targets(inner)
+        result = _publish(durable_json_remote, target, {"kind": "ack"}, "remote.event")
+        assert result.advance_allowed, result
+        assert (inner / "event.json").exists()
+    finally:
+        searchonly.chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_remote_write_without_o_path_refuses_search_only_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The remote helper has the same O_RDONLY fallback where O_PATH is absent.
+    monkeypatch.delattr(os, "O_PATH", raising=False)
+    searchonly = tmp_path / "searchonly"
+    searchonly.mkdir()
+    inner = searchonly / "inner"
+    inner.mkdir(mode=0o700)
+    _, target = _targets(inner)
+    searchonly.chmod(0o311)  # search-only for its owner too: no read bit
+    try:
+        result = _publish(durable_json_remote, target, {"kind": "ack"}, "remote.event")
+    finally:
+        searchonly.chmod(0o700)
+    assert not result.advance_allowed
+    assert result.stage is durable_json_remote.WriteStage.PARENT_OPEN
+    assert result.error_class is durable_json_remote.ErrorClass.PERMISSION
+    assert not (inner / "event.json").exists()
 
 
 def test_remote_event_reconciles_identical_existing_bytes(tmp_path: Path) -> None:

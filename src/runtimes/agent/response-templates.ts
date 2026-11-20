@@ -21,9 +21,18 @@ export interface RenderContext {
   hasContinuation: boolean;
   /** Preformatted backup model card, e.g. "OpenCode / minimax", or null when none. */
   backupCard?: string | null;
-  /** Fallback-window expiry (epoch ms), used for an ETA when no parsed reset exists. */
+  /**
+   * Fallback-window expiry (epoch ms). Retained for callers composing notices;
+   * NOT an ETA source: the fallback window ending does not mean the quota
+   * resets, so it must never be presented as a quota expiry.
+   */
   activeUntil?: number | null;
-  /** Diagnostics gathered for this failure; drives the compact digest + reset ETA. */
+  /**
+   * Quota reset parsed from the PRIMARY provider's own failure (epoch ms), or
+   * null when unknown. The sole ETA source (see ProviderFallbackActivation.primaryResetAt).
+   */
+  primaryResetAt?: number | null;
+  /** Diagnostics gathered for this failure; drives the compact digest only. */
   bundle?: DiagnosticBundle | null;
   /** Injected, deterministic clock formatter (epoch ms → short local time). */
   formatClock: (epochMs: number) => string;
@@ -55,7 +64,10 @@ function toolActivityBlockedClause(): string {
 }
 
 function etaClause(ctx: RenderContext): string {
-  const reset = ctx.bundle?.resetAt ?? ctx.activeUntil ?? null;
+  // Only the primary's own parsed reset may carry an ETA. When it is unknown we
+  // say nothing rather than borrow the fallback-window expiry (activeUntil) or
+  // a diagnostics/fallback-entry reset, none of which is the primary's reset.
+  const reset = ctx.primaryResetAt ?? null;
   return reset !== null ? ` until about ${ctx.formatClock(reset)}` : '';
 }
 

@@ -4,13 +4,13 @@
  * the next run, and the identity checks catch a writer that ignored the lock.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { applyActivation, type ApplyOutcome } from '../../scripts/lib/release-activation/apply.ts';
+import { activationIdentityFailure, applyActivation, type ApplyOutcome } from '../../scripts/lib/release-activation/apply.ts';
 import { acquireActivationLock, activationLockPath } from '../../scripts/lib/release-activation/lock.ts';
-import { type ActivationContext, buildActivationContext } from '../../scripts/lib/release-activation/plan.ts';
+import { type ActivationContext, buildActivationContext, plistDigest } from '../../scripts/lib/release-activation/plan.ts';
 import { parseActivationArgs } from '../../scripts/release-activate.ts';
 import { acquireProcessLock, releaseProcessLock } from '../../src/lib/process-lock.ts';
 import {
@@ -191,5 +191,57 @@ describe('activation identity checks', () => {
     expect(outcome.rollback?.steps).toContainEqual(expect.objectContaining({ step: 'recheck-live-identity-before-restore', ok: false }));
     expect(readlinkSync(fixture.wrapperLink)).toBe(foreign);
     expect(world.releasesStarted().filter((root) => root === fixture.oldRelease)).toHaveLength(1);
+  });
+
+  it('accepts a plist the activation never writes only at its planned digest, on either side', () => {
+    const identity = { links: [], plists: [{ label: TIMER_LABEL, plistPath: timerPlist(), installedSha256: plistDigest(readFileSync(timerPlist(), 'utf8')), staged: null }] };
+    expect(activationIdentityFailure(identity, ['previous'])).toBeNull();
+    expect(activationIdentityFailure(identity, ['activated'])).toBeNull();
+    expect(activationIdentityFailure(identity, ['previous', 'activated'])).toBeNull();
+
+    writeFileSync(timerPlist(), FOREIGN_PLIST);
+
+    expect(activationIdentityFailure(identity, ['activated'])).toBe(`${TIMER_LABEL}: installed plist changed outside this activation`);
+    expect(activationIdentityFailure(identity, ['previous', 'activated'])).toBe(`${TIMER_LABEL}: installed plist changed outside this activation`);
+  });
+});
+
+describe('backup directory privacy', () => {
+  it('plans only with an absent or current-user private backup directory', async () => {
+    const world = new SimulatedLaunchd(fixture);
+    const args = parseActivationArgs(activationArgs(fixture, ['--apply']));
+    expect((await buildActivationContext(world.host(), args)).preconditions)
+      .toContainEqual(expect.objectContaining({ id: 'backup-dir-private-owned', ok: true }));
+
+    mkdirSync(fixture.backupDir);
+    chmodSync(fixture.backupDir, 0o755);
+
+    expect((await buildActivationContext(world.host(), args)).preconditions)
+      .toContainEqual(expect.objectContaining({ id: 'backup-dir-private-owned', ok: false, detail: 'backup directory grants group or other access' }));
+  });
+
+  it('refuses a backup directory opened to group or other access after planning, changing nothing', async () => {
+    const { world, context } = await planned();
+    mkdirSync(fixture.backupDir);
+    chmodSync(fixture.backupDir, 0o755);
+
+    const outcome = await applyActivation(world.host(), context);
+
+    expectNoLiveChange(world, outcome);
+    expect(outcome.failure).toBe('backup directory grants group or other access');
+    expect(outcome.backupPath).toBeNull();
+    expect(readdirSync(fixture.backupDir)).toEqual([]);
+    expect(readlinkSync(fixture.wrapperLink)).toBe(oldTarget());
+  });
+
+  it('accepts an existing current-user private backup directory', async () => {
+    mkdirSync(fixture.backupDir, { mode: 0o700 });
+    chmodSync(fixture.backupDir, 0o700);
+    const { world, context } = await planned();
+
+    const outcome = await applyActivation(world.host(), context);
+
+    expect(outcome.outcome).toBe('activated');
+    expect(path.dirname(outcome.backupPath!)).toBe(fixture.backupDir);
   });
 });

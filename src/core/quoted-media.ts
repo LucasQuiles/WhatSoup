@@ -1,6 +1,8 @@
 // src/core/quoted-media.ts
 // SP10 — Extract quoted message media from a WAMessage's contextInfo.
 
+import { isNonEmptyString } from '../lib/type-guards.ts';
+
 /**
  * Message type fields that can carry a contextInfo with a quotedMessage.
  */
@@ -68,7 +70,7 @@ function asPlainObject(value: unknown): Record<string, unknown> | null {
 
 /** Returns the value only when it is a non-empty string. */
 function asString(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  return isNonEmptyString(value) ? value : null;
 }
 
 // ---------------------------------------------------------------------------

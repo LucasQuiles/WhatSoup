@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -6,9 +6,11 @@ import {
   findConfigFiles,
   migrateMemoryConfigFile,
   parseArgs,
+  rollbackConfigFile,
   runMigration,
   runRollback,
 } from '../../scripts/migrate-memory-config.ts';
+import { withPrivateConfigLockSync } from '../../src/core/private-config-file.ts';
 
 const isWindows = process.platform === 'win32';
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
@@ -227,16 +229,22 @@ describe('migrate-memory-config rollback mode', () => {
       expect(results).toHaveLength(1);
       expect(results[0].configPath).toBe(configPath);
       expect(results[0].backupPath).toContain(backupStamp);
+      expect(results[0].safetySnapshotPath).toBeNull();
       expect(results[0].wouldRestore).toBe(true);
       expect(results[0].restored).toBe(false);
       expect(fs.readFileSync(configPath, 'utf-8')).toBe(currentContent);
+      expect(fs.existsSync(results[0].backupPath)).toBe(true);
+      expect(
+        fs.readdirSync(path.dirname(configPath)).filter((name) => name.includes('.rollback-')),
+      ).toEqual([]);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it('write mode restores the newest backup atomically', () => {
+  it('write mode restores the newest backup, keeps it, leaves no temp copy and prints both paths', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       const { configPath, backupPath } = makeRollbackFixture(tmp, 'test-bot');
 
@@ -246,7 +254,75 @@ describe('migrate-memory-config rollback mode', () => {
       expect(results[0].backupPath).toBe(backupPath);
       expect(results[0].restored).toBe(true);
       expect(fs.readFileSync(configPath, 'utf-8')).toBe(backupContent);
-      expect(fs.existsSync(backupPath)).toBe(false);
+      // Rollback no longer consumes the backup it restores from.
+      expect(fs.readFileSync(backupPath, 'utf-8')).toBe(backupContent);
+      const snapshotPath = results[0].safetySnapshotPath;
+      expect(snapshotPath).toMatch(/config\.json\.rollback-safety-/);
+      expect(fs.readFileSync(String(snapshotPath), 'utf-8')).toBe(currentContent);
+      expect(
+        fs.readdirSync(path.dirname(configPath)).filter((name) => name.includes('.rollback-tmp-')),
+      ).toEqual([]);
+      const printed = log.mock.calls.flat().join('\n');
+      expect(printed).toContain(backupPath);
+      expect(printed).toContain(String(snapshotPath));
+    } finally {
+      log.mockRestore();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // @skip-env Windows does not preserve POSIX file modes.
+  it.skipIf(isWindows)('write mode leaves the restored config and its safety snapshot owner-only', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath, backupPath } = makeRollbackFixture(tmp, 'test-bot');
+      fs.chmodSync(configPath, 0o644);
+      fs.chmodSync(backupPath, 0o644);
+
+      const result = rollbackConfigFile(configPath, { write: true });
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(String(result.safetySnapshotPath)).mode & 0o777).toBe(0o600);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('prints one JSON array that matches the returned results in JSON mode', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      makeRollbackFixture(tmp, 'test-bot');
+
+      const results = runRollback(['--root', tmp, '--instance', 'test-bot', '--json']);
+
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual(results);
+      expect(results[0].safetySnapshotPath).toBeNull();
+    } finally {
+      log.mockRestore();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('repeated rollback keeps every backup and never selects a safety snapshot', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath, backupPath: newestBackupPath } = makeRollbackFixture(tmp, 'test-bot');
+      const olderBackupPath = `${configPath}.bak-2026-04-25T11-00-00-000Z`;
+      fs.writeFileSync(olderBackupPath, '{"older":true}\n');
+      const older = new Date(Date.now() - 120_000);
+      fs.utimesSync(olderBackupPath, older, older);
+
+      const first = rollbackConfigFile(configPath, { write: true });
+      const second = rollbackConfigFile(configPath, { write: true });
+
+      expect(first.backupPath).toBe(newestBackupPath);
+      expect(second.backupPath).toBe(newestBackupPath);
+      expect(first.safetySnapshotPath).not.toBe(second.safetySnapshotPath);
+      expect(fs.existsSync(newestBackupPath)).toBe(true);
+      expect(fs.existsSync(olderBackupPath)).toBe(true);
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(backupContent);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -263,6 +339,73 @@ describe('migrate-memory-config rollback mode', () => {
         runRollback(['--root', tmp, '--instance', 'test-bot', '--write']),
       ).toThrowError(/backup.*newer.*config/i);
     } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // @skip-env Windows has no POSIX uid to compare with a file's owner.
+  it.skipIf(isWindows)('refuses a rollback run by another account before it writes any file', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath, backupPath } = makeRollbackFixture(tmp, 'test-bot');
+      const user = vi.spyOn(process, 'getuid').mockReturnValue(fs.statSync(configPath).uid + 1);
+      try {
+        const owners = /owned by uid \d+, but this rollback runs as uid \d+/i;
+        expect(() => rollbackConfigFile(configPath)).toThrowError(owners);
+        expect(() => rollbackConfigFile(configPath, { write: true })).toThrowError(owners);
+      } finally {
+        user.mockRestore();
+      }
+
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(currentContent);
+      expect(fs.readFileSync(backupPath, 'utf-8')).toBe(backupContent);
+      // No safety snapshot, temp copy or lock file: the refusal comes before any write.
+      expect(fs.readdirSync(path.dirname(configPath)).sort()).toEqual([
+        'config.json',
+        path.basename(backupPath),
+      ]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a write-mode rollback while another writer holds the config lock', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    try {
+      const { configPath, backupPath } = makeRollbackFixture(tmp, 'test-bot');
+
+      expect(() =>
+        withPrivateConfigLockSync(configPath, () => rollbackConfigFile(configPath, { write: true })),
+      ).toThrowError(/config lock is active/i);
+
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(currentContent);
+      expect(fs.readFileSync(backupPath, 'utf-8')).toBe(backupContent);
+      expect(
+        fs.readdirSync(path.dirname(configPath)).filter((name) => name.includes('.rollback-')),
+      ).toEqual([]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('prints the instances already restored when a later instance fails', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-test-'));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const { configPath, backupPath } = makeRollbackFixture(tmp, 'a-bot');
+      fs.mkdirSync(path.join(tmp, 'b-bot'));
+      fs.writeFileSync(path.join(tmp, 'b-bot', 'config.json'), currentContent);
+
+      expect(() =>
+        runRollback(['--root', tmp, '--instance', 'a-bot', '--instance', 'b-bot', '--write']),
+      ).toThrowError(/no backups found/i);
+
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(backupContent);
+      const printed = log.mock.calls.flat().join('\n');
+      expect(printed).toContain(`restored: ${configPath} <- ${backupPath}`);
+      expect(printed).toMatch(/safety snapshot: .*config\.json\.rollback-safety-/);
+    } finally {
+      log.mockRestore();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
@@ -361,9 +504,50 @@ describe('migrate-memory-config rollback operator errors', () => {
     }
   });
 
+  it('keeps the config, backup and safety snapshot, names the snapshot and removes its temp file when the replace fails', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-error-'));
+    try {
+      const dir = path.join(tmp, 'replace-failure-bot');
+      fs.mkdirSync(dir, { recursive: true });
+      const configPath = path.join(dir, 'config.json');
+      const backupPath = `${configPath}.bak-2026-04-25T12-00-00-000Z`;
+      fs.writeFileSync(configPath, currentContent);
+      fs.writeFileSync(backupPath, '{"restored":true}\n');
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(backupPath, past, past);
+      const failure = Object.assign(new Error('injected replace failure'), { code: 'EACCES' });
+
+      let failureMessage = '';
+      try {
+        rollbackConfigFile(
+          configPath,
+          { write: true },
+          {
+            replace: () => {
+              throw failure;
+            },
+          },
+        );
+      } catch (err) {
+        failureMessage = (err as Error).message;
+      }
+
+      expect(failureMessage).toMatch(/cannot restore backup \(permission denied\)/i);
+      const snapshots = fs.readdirSync(dir).filter((name) => name.includes('.rollback-safety-'));
+      expect(snapshots).toHaveLength(1);
+      expect(failureMessage).toContain(path.join(dir, snapshots[0]));
+      expect(fs.readFileSync(path.join(dir, snapshots[0]), 'utf-8')).toBe(currentContent);
+      expect(fs.readFileSync(configPath, 'utf-8')).toBe(currentContent);
+      expect(fs.readFileSync(backupPath, 'utf-8')).toBe('{"restored":true}\n');
+      expect(fs.readdirSync(dir).filter((name) => name.includes('.rollback-tmp-'))).toEqual([]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   // @skip-env Windows does not preserve POSIX chmod read-only-directory semantics;
   // root bypasses file-mode permission checks entirely.
-  it.skipIf(isWindows || isRoot)('reports EACCES with path context when backup rename fails', () => {
+  it.skipIf(isWindows || isRoot)('reports EACCES with path context when the rollback cannot write beside the config', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-error-'));
     try {
       const dir = path.join(tmp, 'perm-bot');

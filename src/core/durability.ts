@@ -388,6 +388,9 @@ const MAX_TEXT_OP_DEFERRAL_COUNT = 20;
  */
 const MAX_OUTBOUND_REPLAY_ATTEMPTS = 50;
 
+/** Rows per page, and per write transaction, in the pre-connect ambiguity repair. */
+const AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS = 200;
+
 /**
  * Module-level lock for {@link drainPendingOutboundLocked}. Prevents
  * concurrent drain invocations from overlapping on the same pending snapshot
@@ -729,6 +732,8 @@ type DurabilityStatements = {
   markEchoed: PreparedStatement;
   selectEchoedOutboundInbound: PreparedStatement;
   markMaybeSent: PreparedStatement;
+  preserveAmbiguousReplayPolicy: PreparedStatement;
+  getAmbiguousReplayRepairPage: PreparedStatement;
   markFailedPermanent: PreparedStatement;
   markDeferred: PreparedStatement;
   markQuarantined: PreparedStatement;
@@ -973,9 +978,29 @@ export class DurabilityEngine {
                ELSE datetime('now')
              END,
              error = ?, wa_message_id = COALESCE(?, wa_message_id),
-             retry_count = MAX(retry_count, ?)
+             retry_count = MAX(retry_count, ?),
+             replay_policy = CASE
+               WHEN ? = 'transport.send_ambiguous' THEN 'unsafe'
+               ELSE replay_policy
+             END
          WHERE id = ?
            AND status IN ('pending', 'sending', 'submitted', 'maybe_sent')`,
+      ),
+      preserveAmbiguousReplayPolicy: prepare(
+        `UPDATE outbound_ops SET replay_policy = 'unsafe'
+         WHERE id = ? AND status = 'maybe_sent' AND error = ?
+           AND replay_policy IN ('safe', 'read_only')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM turn_terminal_records t
+             JOIN turn_delivery_corroboration c ON c.terminal_record_id = t.id
+             WHERE t.delivery_op_id = outbound_ops.id
+           )`,
+      ),
+      getAmbiguousReplayRepairPage: prepare(
+        `SELECT id, error FROM outbound_ops
+         WHERE status = 'maybe_sent' AND replay_policy IN ('safe', 'read_only') AND id > ?
+         ORDER BY id ASC LIMIT ?`,
       ),
       markFailedPermanent: prepare(
         `UPDATE outbound_ops
@@ -2424,6 +2449,7 @@ export class DurabilityEngine {
       encodeOutboundFailureEvidence(evidence),
       waMessageId ?? null,
       evidence.logical_attempt_count,
+      evidence.failure_code,
       id,
     ).changes === 1;
   }
@@ -2819,6 +2845,35 @@ export class DurabilityEngine {
       'Pre-connect durability recovery',
     );
     const { receipt: recovery, stats } = recoveryRun;
+
+    // Persist the prohibition before reconnect so rollback cannot replay rows
+    // written by older binaries, including those outside the live sweep window.
+    // Pages read only ids and evidence after a strict id cursor; each page is
+    // one write transaction, so a backlog neither fills memory nor holds the
+    // writer lock for the whole scan. The update is idempotent, so a failed
+    // page leaves earlier pages repaired and the next recovery resumes.
+    try {
+      let afterId = 0;
+      let pageRows = AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS;
+      while (pageRows === AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS) {
+        pageRows = withImmediateTransaction(this.db, () => {
+          const page = allFromStatement<{ id: number; error: string | null }>(
+            this.statements.getAmbiguousReplayRepairPage, afterId, AMBIGUOUS_REPLAY_REPAIR_PAGE_ROWS,
+          );
+          for (const row of page) {
+            const evidence = decodeOutboundFailureEvidence(row.error);
+            if (evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA
+              && evidence.failure_code === 'transport.send_ambiguous') {
+              this.statements.preserveAmbiguousReplayPolicy.run(row.id, row.error);
+            }
+            afterId = row.id;
+          }
+          return page.length;
+        });
+      }
+    } catch (err) {
+      recoveryRun.failImmediately('preserve_ambiguous_replay_policy', err);
+    }
 
     // Settle recovery deliveries before generic stuck-inbound handling.
     try {
@@ -3310,6 +3365,11 @@ export class DurabilityEngine {
           continue;
         }
 
+        // A caller's replay label does not establish provider deduplication after an uncertain send.
+        const mayReplay = (op.replay_policy === 'safe' || op.replay_policy === 'read_only')
+          && !(op.failure_evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA
+            && op.failure_evidence.failure_code === 'transport.send_ambiguous');
+
         if (op.wa_message_id) {
           const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
             | { pk: number; is_from_me: number }
@@ -3323,7 +3383,7 @@ export class DurabilityEngine {
               { opId: op.id, waMessageId: op.wa_message_id },
               `${operation}: maybe_sent confirmed via messages table → echoed`,
             );
-          } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+          } else if (mayReplay) {
             const evidence = this.pendingReplayEvidence(op);
             const reset = this.statements.resetMaybeSentWithWaToPending.run(
               encodeOutboundFailureEvidence(evidence),
@@ -3339,7 +3399,7 @@ export class DurabilityEngine {
           } else {
             this.quarantineMaybeSent(op, recoveryRun, operation);
           }
-        } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+        } else if (mayReplay) {
           const evidence = this.pendingReplayEvidence(op);
           const reset = this.statements.resetMaybeSentWithoutWaToPending.run(
             encodeOutboundFailureEvidence(evidence),

@@ -200,6 +200,21 @@ describe('TwilioConnection bridge', () => {
       expect(port.sent[0]?.body).toBe('reply text');
       expect(port.sent[0]?.to).toBe('+14155550100');
     });
+
+    it('passes the core message id to the adapter as the idempotency key', async () => {
+      vi.useFakeTimers({ now: 0 });
+      const { bridge, adapter } = makeBridge();
+      await bridge.connect();
+      const sendText = vi.spyOn(adapter, 'sendText');
+
+      await bridge.sendMessage('+14155550100', 'keyed reply', { messageId: 'core-message-1' });
+
+      expect(sendText).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id: '+14155550100' }),
+        'keyed reply',
+        expect.objectContaining({ idempotencyKey: 'core-message-1' }),
+      );
+    });
   });
 
   describe('sendMedia()', () => {
