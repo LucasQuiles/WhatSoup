@@ -136,11 +136,14 @@ Review the plan, then repeat the same command with `--apply` and
 a changed plist, a running or disabled job, or another active re-pin; the
 running or disabled check comes before anything is staged. It validates a staged plist, keeps an original backup and
 restores the original configuration and service after a failed activation.
-Rollback acts on what the run itself did, not on the bytes it finds on disk.
-Once this run has unloaded the original job or installed the candidate,
+Rollback acts on what the run observed itself doing (a successful unload, an
+installed candidate, or a job it then found absent), not on the bytes it finds
+on disk. It cannot tell which definition is loaded under the label, so another
+actor that loads or unloads a job under that label during the run can make the
+receipt wrong. Once this run has unloaded the original job or installed the candidate,
 rollback unloads whatever job is loaded, restores the original plist and
-reloads it; it does not overwrite a plist that is neither the original nor the
-candidate. If the first bootout fails and the original job stays loaded, the
+reloads it; it does not overwrite a plist that it reads as neither the original
+nor the candidate. If the first bootout fails and the original job stays loaded, the
 run unloads nothing: it reports `unchanged` (exit `2`) when the original plist
 is still in place, and `rollback_unverified` (exit `3`) with a reason when the
 plist has changed. It never enables a disabled service or
@@ -151,19 +154,24 @@ the reviewed plist. The installer's label and idle checks do not prove that
 launchd loaded the current on-disk definition.
 
 Exit status: `0` means planned/applied as stated in JSON; `1` means activation
-failed and rollback was verified; `2` means refused or unchanged, with the live
-job untouched; `3` means
-rollback remains unverified and needs investigation. Preserve the reported backup
+failed and rollback was verified; `2` means refused, or unchanged as far as the
+run could observe; `3` means
+rollback remains unverified and needs investigation. Two exceptions can print
+`2` with the live job changed, an unload command that times out after taking
+effect and a failure while cleaning up after the job was already switched or
+unloaded, so check `launchctl list <label>` after any non-zero exit. Preserve the reported backup
 until recovery is verified. Forced termination or host failure can interrupt
 restoration; the backup is the manual recovery source. Do not treat a successful
 re-pin as permission to clear existing incidents or recovery debt.
 
 A refusal prints a JSON receipt with `"status": "refused"`, including for a plist
 whose top level or `EnvironmentVariables` is not a dictionary, with or without
-`--runtime-manifest`. A refusal before
-the bootout removes the backup it staged: the final re-read of the plist runs
-after the backup is staged, and its refusal deletes that backup and names none.
-Every receipt after the bootout names the backup. Without `--repin-existing` the
+`--runtime-manifest`. When cleanup succeeds, a refusal before the bootout
+removes the backup it staged (the final re-read of the plist runs after the
+backup is staged, and its refusal deletes that backup and names none), and
+every receipt after the bootout names the backup. A cleanup failure can instead
+print a refusal that names no backup while a backup file exists beside the
+plist. Without `--repin-existing` the
 installer takes no arguments: it renders a fresh installation only when called
 with none, and any other argument exits 2 before anything is written or loaded.
 Earlier versions ignored such arguments.
