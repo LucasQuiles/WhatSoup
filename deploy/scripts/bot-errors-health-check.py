@@ -7705,10 +7705,17 @@ SUPPORT_WHATSOUP_SERVICE_NAMES = {
     "bot-errors-j1-collector",
     "dashboard",
     "fleet",
-    "ms365-token-backup",
     "reply-guarantee",
     "whatsoup-fleet",
 }
+
+# launchd jobs retired from the standard: no managed-components entry and no
+# template (docs/releases/2026-11-20-token-backup-job-retired.md). One that is
+# loaded, idle or running, is a finding of its own, never an undeclared
+# instance and never a support service.
+RETIRED_WHATSOUP_SERVICE_NAMES = frozenset({
+    "ms365-token-backup",
+})
 
 
 # Typed active-service inventory read (#2486).
@@ -7757,6 +7764,10 @@ class ServiceInventoryObservation(NamedTuple):
     rogue service. It still cannot PROVE coverage, which is why the counts are
     carried separately -- a collapsing set cannot report that a record was
     unreadable or repeated.
+
+    `retired_loaded` carries every loaded retired job, idle or running. It
+    stays out of `names` and `count`: `names` is the running inventory, and a
+    retired job's normal loaded state is idle.
     """
 
     status: ServiceInventoryStatus
@@ -7766,6 +7777,7 @@ class ServiceInventoryObservation(NamedTuple):
     duplicate_labels: int
     observed_at_monotonic: float
     names: frozenset[str] = frozenset()
+    retired_loaded: frozenset[str] = frozenset()
 
     @property
     def is_observed(self) -> bool:
@@ -7831,7 +7843,11 @@ def _service_inventory_unavailable(
 
 
 def _service_inventory_observed(
-    backend: str, names: set[str], unreadable_lines: int, duplicate_labels: int
+    backend: str,
+    names: set[str],
+    unreadable_lines: int,
+    duplicate_labels: int,
+    retired_loaded: frozenset[str] = frozenset(),
 ) -> ServiceInventoryObservation:
     """Classify a completed rc=0 read.
 
@@ -7857,6 +7873,7 @@ def _service_inventory_observed(
         duplicate_labels=duplicate_labels,
         observed_at_monotonic=time.monotonic(),
         names=frozenset(names),
+        retired_loaded=retired_loaded,
     )
 
 
@@ -7880,6 +7897,7 @@ def _launchctl_service_observation() -> ServiceInventoryObservation:
     if proc.returncode != 0:
         return _service_inventory_unavailable("unavailable_nonzero_exit", backend)
     names: set[str] = set()
+    retired_loaded: set[str] = set()
     unreadable_lines = _unterminated_record_count(proc.stdout)
     duplicate_labels = 0
     for line in proc.stdout.splitlines():
@@ -7899,6 +7917,12 @@ def _launchctl_service_observation() -> ServiceInventoryObservation:
             # to another job. A skip here would read as a shorter inventory.
             unreadable_lines += 1
             continue
+        retired = label.removeprefix(_LAUNCHCTL_LABEL_PREFIX)
+        if label.startswith(_LAUNCHCTL_LABEL_PREFIX) and retired in RETIRED_WHATSOUP_SERVICE_NAMES:
+            # Checked before the idle skip: a retired job is loaded, and worth a
+            # finding, whether or not it is running at this moment.
+            retired_loaded.add(retired)
+            continue
         if pid == "-" or not label.startswith(_LAUNCHCTL_LABEL_PREFIX):
             continue
         name = label.removeprefix(_LAUNCHCTL_LABEL_PREFIX)
@@ -7906,7 +7930,9 @@ def _launchctl_service_observation() -> ServiceInventoryObservation:
             duplicate_labels += 1
             continue
         names.add(name)
-    return _service_inventory_observed(backend, names, unreadable_lines, duplicate_labels)
+    return _service_inventory_observed(
+        backend, names, unreadable_lines, duplicate_labels, frozenset(retired_loaded)
+    )
 
 
 def _systemctl_service_observation() -> ServiceInventoryObservation:
@@ -7996,7 +8022,8 @@ def unprofiled_service_inventory(
     A `partial` reading emits that line AND still compares the names it did
     observe: an incomplete read must not become a hiding place for a rogue
     service. A reading that is no longer current is refused outright, because
-    a stale name proves nothing about what is running now.
+    a stale name proves nothing about what is running now. A loaded retired
+    job gives its own `retired_service` line instead of a coverage line.
 
     `observation` lets a caller pass a reading it already holds. No production
     caller does, so the freshness gate is reachable in production only through
@@ -8013,8 +8040,13 @@ def unprofiled_service_inventory(
     lines: list[str] = []
     if not reading.can_report_coverage():
         lines.append(unusable_line)
+    for name in sorted((reading.names | reading.retired_loaded) & RETIRED_WHATSOUP_SERVICE_NAMES):
+        lines.append(
+            f"FAIL retired_service {name}: retired job is loaded "
+            f"service=com.whatsoup.{name} remediation=boot_out_then_remove_plist_and_script"
+        )
     for name in sorted(reading.names):
-        if name in expected_names:
+        if name in expected_names or name in RETIRED_WHATSOUP_SERVICE_NAMES:
             continue
         if (
             name in SUPPORT_WHATSOUP_SERVICE_NAMES

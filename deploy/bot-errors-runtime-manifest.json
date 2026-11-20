@@ -177,7 +177,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "6dd613813c1db15015e5595ee285ba25124b6038a5be28db907a0b2b796c1212",
+      "sha256": "acf2f4c02e51e273516ca68576f6463acb0211469bfc59afbc5f4a566f166e01",
       "mustContain": [
         "critical_file_problem",
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
