@@ -59,6 +59,24 @@ export function wholeMs(ms: number): number {
   return Math.max(0, Math.round(ms));
 }
 
+/**
+ * errorMessage(), except that it cannot throw.
+ *
+ * String() of a value with no usable conversion throws: a null-prototype
+ * object, or one whose toString or message getter throws. The capture's result
+ * builders run where one more throw would leave the run unsettled and
+ * shutdownCaptures() waiting, so they format thrown values through this.
+ */
+export function captureErrorText(err: unknown): string {
+  try {
+    // String() again: an Error's message is typed string but can hold any value.
+    return String(errorMessage(err));
+  } catch {
+    // Intentional: a thrown value with no string form is recorded as this fixed text.
+    return 'thrown value has no string form';
+  }
+}
+
 export const DEFAULT_KEEP_BACKUPS = 96;
 export const DEFAULT_MAX_HISTORY_FILES = 100_000;
 export const DEFAULT_CAPTURE_ATTEMPTS = 3;

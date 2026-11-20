@@ -42,6 +42,7 @@ import {
   WALK_ENTRY_UNITS,
   authRootKindIssue,
   authTreeValidationError,
+  captureErrorText,
   captureOutcome,
   copyPrivateTree,
   copyPrivateTreeSteps,
@@ -1180,7 +1181,7 @@ export class AuthBondGuard {
   private thrownCaptureResult(run: CaptureRun, err: unknown): AuthBondCaptureResult {
     this.lastCaptureAt = this.now().toISOString();
     this.lastCaptureReason = run.reason;
-    this.lastCaptureError = errorMessage(err);
+    this.lastCaptureError = captureErrorText(err);
     return {
       ok: false,
       snapshot: this.withCurrentBackup(this.snapshotWithoutWalk(run)),
@@ -1201,7 +1202,8 @@ export class AuthBondGuard {
    * and status 'unknown' (no current evidence), and its backup half comes from
    * the guard's own fields without reading latest.json. An abort stays an abort
    * and leaves the guard's health fields alone; anything else is recorded as a
-   * failure, as thrownCaptureResult records one.
+   * failure, as thrownCaptureResult records one. Both builders format thrown
+   * values with captureErrorText, which cannot throw either.
    */
   private unreadCaptureResult(run: CaptureRun, err: unknown, resultErr: unknown): AuthBondCaptureResult {
     const unread: AuthBondFileSnapshot = {
@@ -1221,7 +1223,7 @@ export class AuthBondGuard {
     if (err instanceof CaptureAbortedError) return this.abortedCaptureResultWith(snapshotFor(), err.abortCause);
     this.lastCaptureAt = this.now().toISOString();
     this.lastCaptureReason = run.reason;
-    this.lastCaptureError = `${errorMessage(err)}; failure result unreadable: ${errorMessage(resultErr)}`;
+    this.lastCaptureError = `${captureErrorText(err)}; failure result unreadable: ${captureErrorText(resultErr)}`;
     return {
       ok: false,
       snapshot: snapshotFor(),
