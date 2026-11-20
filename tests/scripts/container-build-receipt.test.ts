@@ -677,6 +677,19 @@ describe('container build evidence CI contract', () => {
     expect(build).toContain('"${source_repository}#${SOURCE_REF}"');
     expect(step('Load verified deployment image and runtime providers').run).toContain('"${source_repository}#${SOURCE_REF}"');
     expect(step('Verify container build receipt').run?.match(/--source-ref "\$SOURCE_REF"/g)).toHaveLength(2);
+    // Both fetches of the merge ref run the same ls-remote pin check first; the runtime export test
+    // executes the load step's copy against a stub.
+    const load = step('Load verified deployment image and runtime providers').run ?? '';
+    const pinCheck = (run: string) => {
+      const start = run.indexOf('if [ "$SOURCE_REF" != "$SOURCE_REVISION" ]; then\n');
+      return start < 0 ? '' : run.slice(start, run.indexOf('\nfi\n', start) + 4);
+    };
+    expect(pinCheck(build)).toContain('merge_ref_listing="$(git ls-remote "$source_repository" "$SOURCE_REF")"');
+    expect(pinCheck(build)).toBe(pinCheck(load));
+    for (const run of [build, load]) {
+      expect(run.indexOf(pinCheck(run))).toBeGreaterThan(run.indexOf('source_repository="$('));
+      expect(run.indexOf(pinCheck(run))).toBeLessThan(run.indexOf('docker buildx build'));
+    }
   });
 
   it('refuses an empty Buildx provenance placeholder', () => {

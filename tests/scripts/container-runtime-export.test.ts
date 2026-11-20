@@ -14,7 +14,13 @@ const tmp = trackTmpDirs('container-runtime-export-');
 const revision = 'b'.repeat(40);
 const imageId = `sha256:${'a'.repeat(64)}`;
 
-function runExport(options: { receipt?: Record<string, unknown>; loadedImage?: string; buildExit?: number; sourceRef?: string } = {}) {
+function runExport(options: {
+  receipt?: Record<string, unknown>;
+  loadedImage?: string;
+  buildExit?: number;
+  sourceRef?: string;
+  lsRemote?: { output?: string; exit?: number };
+} = {}) {
   const step = workflow.jobs.quality.steps.find((entry) => entry.name === 'Load verified deployment image and runtime providers');
   expect(step?.run).toBeTypeOf('string');
   const root = tmp.make('runtime');
@@ -35,6 +41,17 @@ function runExport(options: { receipt?: Record<string, unknown>; loadedImage?: s
   }));
   const callsPath = path.join(root, 'docker-calls.jsonl');
   writeFileSync(callsPath, '');
+  const gitCallsPath = path.join(root, 'git-calls.jsonl');
+  writeFileSync(gitCallsPath, '');
+  // Stub for the merge-ref pin check; the workflow alone reaches the network.
+  writeFileSync(path.join(bin, 'git'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.GIT_CALLS_PATH, JSON.stringify(args) + '\\n');
+if (args[0] === 'ls-remote') { process.stdout.write(process.env.LS_REMOTE_OUTPUT); process.exit(Number(process.env.LS_REMOTE_EXIT)); }
+process.exit(2);
+`, { mode: 0o755 });
+  const sourceRef = options.sourceRef ?? revision;
   writeFileSync(path.join(bin, 'docker'), `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
@@ -53,15 +70,18 @@ process.exit(2);
       PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH}`,
       RUNNER_TEMP: root,
       SOURCE_REVISION: revision,
-      SOURCE_REF: options.sourceRef ?? revision,
+      SOURCE_REF: sourceRef,
       CALLS_PATH: callsPath,
+      GIT_CALLS_PATH: gitCallsPath,
+      LS_REMOTE_OUTPUT: options.lsRemote?.output ?? `${revision}\t${sourceRef}\n`,
+      LS_REMOTE_EXIT: String(options.lsRemote?.exit ?? 0),
       LOADED_IMAGE: options.loadedImage ?? imageId,
       BUILD_EXIT: String(options.buildExit ?? 0),
     },
   });
   expect(result.error).toBeUndefined();
-  const calls = readFileSync(callsPath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as string[]);
-  return { result, calls };
+  const readCalls = (file: string) => readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as string[]);
+  return { result, calls: readCalls(callsPath), gitCalls: readCalls(gitCallsPath) };
 }
 
 describe('verified container runtime export', () => {
@@ -98,9 +118,35 @@ describe('verified container runtime export', () => {
   });
 
   it('exports a pull request through its merge ref, bound to the checked-out merge commit', () => {
-    const { result, calls } = runExport({ sourceRef: 'refs/pull/7/merge' });
+    const { result, calls, gitCalls } = runExport({ sourceRef: 'refs/pull/7/merge' });
     expect(result.status, result.stderr).toBe(0);
+    // The ref is listed and compared with the checked-out commit before the builder fetches it.
+    expect(gitCalls).toEqual([['ls-remote', 'https://github.com/contributor/WhatSoup.git', 'refs/pull/7/merge']]);
     expect(calls[0]?.at(-1)).toBe('https://github.com/contributor/WhatSoup.git#refs/pull/7/merge');
+  });
+
+  it.each([
+    ['moved to another commit', `${'c'.repeat(40)}\trefs/pull/7/merge\n`],
+    ['no longer listed', ''],
+  ])('refuses a merge ref %s before any build and says a rerun cannot recover', (_case, output) => {
+    const { result, calls } = runExport({ sourceRef: 'refs/pull/7/merge', lsRemote: { output } });
+    expect(result.status).not.toBe(0);
+    expect(calls).toEqual([]);
+    expect(result.stderr).toContain('merge ref moved');
+    expect(result.stderr).toContain('rerun reuses the old commit and cannot recover');
+    expect(result.stderr).toContain('push a commit or close and reopen the pull request');
+  });
+
+  it('fails before any build when the merge ref cannot be listed', () => {
+    const { result, calls } = runExport({ sourceRef: 'refs/pull/7/merge', lsRemote: { exit: 128 } });
+    expect(result.status).not.toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it('lists no ref for a push build, which fetches the event commit itself', () => {
+    const { result, gitCalls } = runExport();
+    expect(result.status, result.stderr).toBe(0);
+    expect(gitCalls).toEqual([]);
   });
 
   it.each(['refs/pull/7/head', 'refs/heads/main', 'c'.repeat(40)])(
