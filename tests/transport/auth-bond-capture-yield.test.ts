@@ -16,7 +16,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
@@ -937,5 +937,200 @@ describe('C8 FIX 2: vanished entries, settling, and slice timing', () => {
     expect(finished.maxSliceMs).toBeGreaterThanOrEqual(IN_SLICE_MS);
     // The retry sleep is not synchronous capture work.
     expect(finished.maxSliceMs).toBeLessThan(RETRY_DELAY_MS);
+  });
+});
+
+// ── C8 FIX 3: restore copies strictly, and a capture result cannot throw ─────
+//
+// Test ids N15-N17 are the fix round 3 tests. N15 and N16 wrap copyFileSync so
+// that a key file the copy has listed vanishes before the copy reaches it:
+// restore must fail and roll back, where the capture defers. N17 drives a
+// capture hook that rejects with a value whose string conversion throws.
+
+/** No prototype, so no toString or valueOf: String() of it throws a TypeError. */
+const NO_STRING_FORM: unknown = Object.create(null);
+/** The fixed text a capture result records for a thrown value with no string form. */
+const NO_STRING_FORM_ERROR = 'thrown value has no string form';
+
+interface CopyHook {
+  beforeCopy: ((src: string, dest: string) => void) | null;
+}
+
+/** Import the guard with copyFileSync wrapped: while `hook.beforeCopy` is set, it runs before each copy. */
+async function importGuardWithCopyHook(hook: CopyHook) {
+  vi.resetModules();
+  vi.doMock('node:fs', async (importOriginal) => {
+    const actual = await importOriginal<FsModule>();
+    const copyFileSync: FsModule['copyFileSync'] = (src, dest, mode) => {
+      hook.beforeCopy?.(String(src), String(dest));
+      actual.copyFileSync(src, dest, mode);
+    };
+    return { ...actual, copyFileSync };
+  });
+  return import('../../src/transport/auth-bond.ts');
+}
+
+/**
+ * A copy hook that, on the first copy into a destination `isTarget` accepts,
+ * removes another key file from the source folder. At that copy the folder is
+ * listed and only the file being copied is reached, so the removed file is
+ * listed but not reached.
+ */
+function vanishOnFirstCopy(isTarget: (dest: string) => boolean, state: { vanished: string | null }) {
+  return (src: string, dest: string): void => {
+    if (state.vanished !== null || !isTarget(dest)) return;
+    const dir = dirname(src);
+    const victim = readdirSync(dir)
+      .filter((name) => name.startsWith('pre-key-') && name !== basename(src))
+      .sort()[0]!;
+    state.vanished = join(dir, victim);
+    unlinkSync(state.vanished);
+  };
+}
+
+/** Every file of a flat folder, by name, with its contents. */
+function flatTree(dir: string): Record<string, string> {
+  return Object.fromEntries(readdirSync(dir).sort().map((name) => [name, readFileSync(join(dir, name), 'utf8')]));
+}
+
+/** Drop treeHash from a backup JSON file, as written before manifests recorded one. */
+function dropTreeHash(path: string): void {
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  expect(typeof parsed['treeHash'], `${basename(path)} recorded a treeHash`).toBe('string');
+  delete parsed['treeHash'];
+  writeFileSync(path, JSON.stringify(parsed));
+}
+
+/** A captureYield whose first call rejects with `value`; later calls yield a macrotask. */
+function firstYieldRejects(value: unknown): () => Promise<void> {
+  let calls = 0;
+  return async () => {
+    calls += 1;
+    if (calls === 1) throw value;
+    await macrotask();
+  };
+}
+
+describe('C8 FIX 3: restore copies strictly, and a capture result cannot throw', () => {
+  it('N15: a backup entry that vanishes during the restore copy fails the restore, which rolls back', async () => {
+    const fx = makeFixture('n15', 4);
+    const restoreTmp = `${fx.authDir}.restore-${process.pid}`;
+    const hook: CopyHook = { beforeCopy: null };
+    const { AuthBondGuard: HookedGuard } = await importGuardWithCopyHook(hook);
+    const guard = new HookedGuard({ authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: fx.name });
+    const seed = await guard.capture('connection-open');
+    expect(seed).toMatchObject({ ok: true, captured: true });
+    // A backup from before manifests recorded a tree hash. Restore's
+    // validation then checks creds.json and the identity, not the whole tree,
+    // so only the copy itself can notice the vanished entry.
+    dropTreeHash(join(seed.path!, 'manifest.json'));
+    dropTreeHash(latestPath(fx));
+    // A definite fault, so the restore runs.
+    writeFileSync(join(fx.authDir, 'creds.json'), '{ bad json');
+    const liveBefore = flatTree(fx.authDir);
+    const state: { vanished: string | null } = { vanished: null };
+    hook.beforeCopy = vanishOnFirstCopy((dest) => dirname(dest) === restoreTmp, state);
+
+    const restored = guard.restoreLatestIfNeeded();
+
+    // Coverage: a listed backup key file vanished during the restore copy.
+    expect(state.vanished).not.toBeNull();
+    expect(restored).toMatchObject({ attempted: true, restored: false, source: seed.path });
+    expect(flatTree(fx.authDir)).toEqual(liveBefore);
+    expect(restored.error).toContain('ENOENT');
+    expect(restored.error).toContain(basename(state.vanished!));
+    expect(restored.error).toContain('quarantine=');
+    expect(existsSync(restoreTmp)).toBe(false);
+  });
+
+  it('N16: control: an entry that vanishes during the capture copy still defers the capture', async () => {
+    const fx = makeFixture('n16', 4);
+    const state: { vanished: string | null } = { vanished: null };
+    const hook: CopyHook = { beforeCopy: vanishOnFirstCopy((dest) => dest.includes(`.tmp-${process.pid}`), state) };
+    const { AuthBondGuard: HookedGuard } = await importGuardWithCopyHook(hook);
+    const guard = new HookedGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      // One attempt, so the deferral is the run's result: a second attempt
+      // would copy the shorter tree completely and capture it.
+      captureAttempts: 1,
+    });
+
+    const result = await guard.capture('connection-open');
+    const owed = await guard.capture('auth-bond-capture-deferred');
+
+    // Coverage: a listed key file vanished during the capture copy.
+    expect(state.vanished).not.toBeNull();
+    // The capture's copy skips it. Validation then finds a tree that changed
+    // with the same identity, and that defers.
+    expect(result).toMatchObject({ ok: false, captured: false, deferred: true, path: null });
+    expect(result.error).toContain('changed during capture with the same identity');
+    expect(owed).toMatchObject({ ok: true, captured: true, deferred: false, error: null });
+    expect(existsSync(join(owed.path!, 'auth', basename(state.vanished!)))).toBe(false);
+    expect(historyEntries(fx)).toHaveLength(1);
+    expect(stagingEntries(fx)).toEqual([]);
+  });
+
+  it('N17a: a hook rejection with no string form settles the run as failed, and shutdown completes', async () => {
+    const fx = makeFixture('n17a', 4);
+    const events: AuthBondCaptureEvent[] = [];
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      onCaptureEvent: (event) => { events.push(event); },
+      // The run's first yield is outside the attempt's own catch, so the
+      // value reaches the failure result builder exactly as the hook threw it.
+      captureYield: firstYieldRejects(NO_STRING_FORM),
+    });
+    // Coverage: the value's string conversion throws, as in errorMessage().
+    expect(() => String(NO_STRING_FORM)).toThrow(TypeError);
+
+    const result = await settledWithin(guard.capture('connection-open'));
+    const shutdown = await settledWithin(guard.shutdownCaptures());
+
+    expect(result, 'the run never settled').not.toBe(PENDING);
+    expect(shutdown, 'shutdownCaptures never resolved').not.toBe(PENDING);
+    expect(result).toMatchObject({
+      ok: false,
+      captured: false,
+      deferred: false,
+      path: null,
+      error: NO_STRING_FORM_ERROR,
+    });
+    expect(finishedEvents(events).map((event) => [event.run, event.outcome, event.error])).toEqual([
+      [1, 'failed', NO_STRING_FORM_ERROR],
+    ]);
+    expect(guard.inspect().backup.lastCaptureError).toBe(NO_STRING_FORM_ERROR);
+    expect(existsSync(latestPath(fx))).toBe(false);
+  });
+
+  it('N17b: the same rejection settles the run even when the failure result cannot be built', async () => {
+    const fx = makeFixture('n17b', 4);
+    mkdirSync(backupRoot(fx), { recursive: true, mode: 0o700 });
+    // N13's malformed latest.json: every read of the backup half throws, so
+    // the first result builder throws and the last-resort builder formats the
+    // same rejection value. Like N13, this test never calls inspect().
+    writeFileSync(latestPath(fx), JSON.stringify({ backupPath: 42, treeHash: 'c8-not-a-tree-hash' }));
+    const events: AuthBondCaptureEvent[] = [];
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      onCaptureEvent: (event) => { events.push(event); },
+      captureYield: firstYieldRejects(NO_STRING_FORM),
+    });
+
+    const result = await settledWithin(guard.capture('connection-open'));
+    const shutdown = await settledWithin(guard.shutdownCaptures());
+
+    expect(result, 'the run never settled').not.toBe(PENDING);
+    expect(shutdown, 'shutdownCaptures never resolved').not.toBe(PENDING);
+    const settled = result as AuthBondCaptureResult;
+    expect(settled).toMatchObject({ ok: false, captured: false, deferred: false, path: null });
+    expect(settled.error).toContain(`${NO_STRING_FORM_ERROR}; failure result unreadable: `);
+    expect(settled.snapshot).toMatchObject({ status: 'unknown', issues: ['auth_bond_capture_result_unread'] });
+    expect(finishedEvents(events).map((event) => [event.run, event.outcome])).toEqual([[1, 'failed']]);
   });
 });
