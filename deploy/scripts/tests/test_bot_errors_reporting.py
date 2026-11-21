@@ -13,12 +13,16 @@ import sys
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, strategies as st
 
 
-_SCRIPTS = Path(__file__).resolve().parents[1]
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+_TESTS_DIR = Path(__file__).resolve().parent
+_SCRIPTS = _TESTS_DIR.parent
+for _path in (_TESTS_DIR, _SCRIPTS):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
+from bot_errors_property_support import private_case, properties
 from lib import bot_errors_reporting as reporting
 
 
@@ -717,20 +721,33 @@ def _event_file(tmp_path: Path) -> Path:
     return path
 
 
-@pytest.mark.parametrize("spelling", ["--f", "--form", "--format", "--format-", "--format="])
-def test_event_preview_keeps_every_spelling_main_accepted(tmp_path: Path, spelling: str) -> None:
-    # Each spelling is an abbreviation of --format-event that the parser has
-    # always resolved; the preview options must not make it ambiguous.
-    event = _event_file(tmp_path)
-    expected = _dispatcher_cli(tmp_path, "--format-event", str(event))
-    assert expected.returncode == 0, expected.stderr
-    assert "Queue delivery delayed" in expected.stdout
+_FORMAT_EVENT = "--format-event"
 
-    argv = (f"{spelling}{event}",) if spelling.endswith("=") else (spelling, str(event))
-    observed = _dispatcher_cli(tmp_path, *argv)
-    assert observed.returncode == 0, observed.stderr
-    assert observed.stdout.splitlines()[0] == expected.stdout.splitlines()[0]
-    assert "Queue delivery delayed" in observed.stdout
+
+@properties
+@given(length=st.integers(min_value=len("--f"), max_value=len(_FORMAT_EVENT)), joined=st.booleans())
+@example(length=len("--f"), joined=False)
+@example(length=len("--form"), joined=False)
+@example(length=len("--format"), joined=False)
+@example(length=len("--format-"), joined=False)
+@example(length=len("--format"), joined=True)
+def test_event_preview_keeps_every_spelling_main_accepted(length: int, joined: bool) -> None:
+    # Every prefix of --format-event from --f on is an abbreviation the
+    # dispatcher's parser has always resolved, with its value apart or joined
+    # by "="; the preview options must not make any of them ambiguous. ("--"
+    # alone is the end-of-options marker, not an abbreviation.)
+    spelling = _FORMAT_EVENT[:length]
+    with private_case() as (root, _):
+        event = _event_file(root)
+        expected = _dispatcher_cli(root, _FORMAT_EVENT, str(event))
+        assert expected.returncode == 0, expected.stderr
+        assert "Queue delivery delayed" in expected.stdout
+
+        argv = (f"{spelling}={event}",) if joined else (spelling, str(event))
+        observed = _dispatcher_cli(root, *argv)
+        assert observed.returncode == 0, observed.stderr
+        assert observed.stdout.splitlines()[0] == expected.stdout.splitlines()[0]
+        assert "Queue delivery delayed" in observed.stdout
 
 
 def test_help_abbreviation_keeps_its_meaning_and_lists_the_preview_options(tmp_path: Path) -> None:
