@@ -1267,7 +1267,9 @@ Folded callers share one promise and one result, and `capture()` never rejects.
 A run that ends deferred re-arms the settled snapshot. A settled snapshot
 refused by the 5-minute floor is re-armed for the rest of the interval. A run
 that ends failed is not re-armed, as before; it pages. A blocked run is refused
-because publishing would be unsafe. An aborted run is
+because publishing would be unsafe. It does not page, but it still sets the
+guard's last capture error, so health classifies the bond `auth_bond_at_risk`
+while the block holds, as before. An aborted run is
 covered by the reconnect after a restore, or by the next process's open.
 
 **Abort.** `restoreLatestIfNeeded()` aborts an in-flight run immediately before

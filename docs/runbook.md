@@ -812,9 +812,11 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
     postponing the next run, and with it the seventh.
   - A `blocked` run is recorded as `auth_snapshot_skipped` with note
     `capture-blocked:<reason>`. It does not page
-    `whatsapp_auth_bond_local_failure`. The block holds from the close
-    handler's logout decision, even when the logout alert could not be
-    enqueued, until the next open.
+    `whatsapp_auth_bond_local_failure`, but it still sets the guard's last
+    capture error, so health classifies the bond `auth_bond_at_risk` while
+    the block holds, as before. The block holds from the close handler's
+    logout decision, even when the logout alert could not be enqueued, until
+    the next open.
   - Each capture's sweep removes the staging copies of other processes: a
     killed process's, or the one a shutdown left. The sweep skips a staging
     entry carrying the current process's PID, such as one an abort left during

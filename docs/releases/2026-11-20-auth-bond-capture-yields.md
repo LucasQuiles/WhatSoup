@@ -51,11 +51,14 @@
   - A settled snapshot refused by the 5-minute floor is re-armed for the rest of
     the interval instead of being dropped. Its `auth_snapshot_skipped` record
     (`settled-snapshot-min-interval`) is unchanged.
-- A capture refused because a logout or bond-lost state is active is no longer
-  treated as a failure.
+- A capture refused because a logout or bond-lost state is active no longer
+  pages, and no longer adds to the capture failure count.
   - It records `auth_snapshot_skipped` with note `capture-blocked:<reason>`.
-  - It no longer pages `whatsapp_auth_bond_local_failure` and no longer counts
-    as a capture failure.
+  - It no longer pages `whatsapp_auth_bond_local_failure` and no longer
+    increments the capture failure count.
+  - It still sets the guard's last capture error. So health still classifies
+    the bond `auth_bond_at_risk` while the block holds, as before, until a
+    later capture succeeds.
   - A logout does not establish a local credential fault, and the logout path
     pages its own alert.
   - The block holds from the close handler's logout decision until the next
