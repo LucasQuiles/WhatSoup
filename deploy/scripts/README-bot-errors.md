@@ -368,10 +368,106 @@ variable, then a hostname-derived default under `deploy/health-profiles/`) and
 exits 2 with a descriptive message if the resolved path fails the same three
 conditions.
 
-The installers attempt to auto-detect a host profile at
-`<REPO_ROOT>/deploy/health-profiles/<hostname-lowercase>.json` before
-falling back to the env file, but this auto-detection only populates
-`HEALTH_PROFILE` if the file already exists — it does not suppress the guard.
+The installers take `BOT_ERRORS_HEALTH_PROFILE` from the environment, then from
+the env file, and only then a host profile auto-detected at
+`<REPO_ROOT>/deploy/health-profiles/<hostname-lowercase>.json`. That
+auto-detection only populates `HEALTH_PROFILE` if the file already exists — it
+does not suppress the guard.
+
+### Preserve an existing daily-health job when changing its release
+
+Use `install-bot-errors-health-launchd.sh --repin-existing` for an existing
+macOS health job. The normal installation path renders a fresh configuration;
+it does not preserve host-specific wrappers or additional environment keys.
+
+First verify the target release with the existing release verifier and inspect
+the effective health profile and runtime manifest. Re-pinning is a configuration
+transaction, not proof that the release or bot runtime is healthy. It preserves
+the profile path, including references into an older release; retain that source
+while the job still depends on it. Run outside the job's scheduled execution.
+
+Re-pin does not change an environment-file wrapper (`/bin/bash -c`), whose
+`BOT_ERRORS_HEALTH_PROFILE` path stays under the older release; when the new
+release declares a
+[BOT ERRORS health-consumer requirement](../../docs/runbooks/release-deployment.md#bot-errors-health-consumer-prerequisite),
+`release:activate` reads such a job as unrecognized and refuses activation with
+exit 2 before any change. For such a job, run this installer without arguments
+and with `BOT_ERRORS_REPO_ROOT` set to the new release instead: it renders a
+fresh job whose runner, checker and working directory are in that release,
+without the wrapper. That reinstall replaces the job file without keeping a
+backup, reloads the job and attempts to enable it (it does not check that
+enabling succeeded). It takes the health profile from
+`BOT_ERRORS_HEALTH_PROFILE` (the environment first, then `bot-errors.env`), or
+else the host's profile in the new release; the label and the state folder come
+from the environment only (`BOT_ERRORS_HEALTH_LABEL`, `BOT_ERRORS_STATE_DIR`) or
+their defaults; and it writes the settings it reads into the job at install
+time. Activation recognizes the reinstalled job only with the default label and
+state folder, so keep both at their defaults for a job that must pass
+activation. A wrapper job that is not re-pinned is read as
+before: activation accepts it when the release it runs from meets the
+requirement.
+
+```bash
+BOT_ERRORS_REPO_ROOT=/absolute/reviewed-release \
+  bash deploy/scripts/install-bot-errors-health-launchd.sh --repin-existing \
+  --expected-plist-sha256 <reviewed-original-sha256>
+```
+
+This prints a JSON plan without writing the plist or reloading the service.
+It changes only `WorkingDirectory` and the exact runner/checker arguments.
+An optional `--runtime-manifest /absolute/reviewed-manifest.json` changes that
+environment key for this job only. Verify that any preserved environment-file
+wrapper does not override it. Other arguments, environment values, schedule,
+permissions and ownership are retained. Plan output excludes environment values.
+Jobs with extended attributes, file flags, or file/parent access-control lists
+are refused because this installer cannot preserve those settings. An absent
+enabled-state entry also requires inspection; it is not treated as permission
+to enable the job.
+
+Review the plan, then repeat the same command with `--apply` and
+`--expected-candidate-sha256 <candidate_sha256-from-plan>`. The installer refuses
+a changed plist, a running or disabled job, or another active re-pin; the
+running or disabled check comes before anything is staged. It validates a staged plist, keeps an original backup and
+restores the original configuration and service after a failed activation.
+Rollback acts on what the run observed itself doing (a successful unload, an
+installed candidate, or a job it then found absent), not on the bytes it finds
+on disk. It cannot tell which definition is loaded under the label, so another
+actor that loads or unloads a job under that label during the run can make the
+receipt wrong. Once this run has unloaded the original job or installed the candidate,
+rollback unloads whatever job is loaded, restores the original plist and
+reloads it; it does not overwrite a plist that it reads as neither the original
+nor the candidate. If the first bootout fails and the original job stays loaded, the
+run unloads nothing: it reports `unchanged` (exit `2`) when the original plist
+is still in place, and `rollback_unverified` (exit `3`) with a reason when the
+plist has changed. It never enables a disabled service or
+restarts bot instances. A successful apply still requires live configuration and
+authenticated runtime verification.
+Immediately before applying, verify that the loaded definition still matches
+the reviewed plist. The installer's label and idle checks do not prove that
+launchd loaded the current on-disk definition.
+
+Exit status: `0` means planned/applied as stated in JSON; `1` means activation
+failed and rollback was verified; `2` means refused, or unchanged as far as the
+run could observe; `3` means
+rollback remains unverified and needs investigation. Two exceptions can print
+`2` with the live job changed, an unload command that times out after taking
+effect and a failure while cleaning up after the job was already switched or
+unloaded, so check `launchctl list <label>` after any non-zero exit. Preserve the reported backup
+until recovery is verified. Forced termination or host failure can interrupt
+restoration; the backup is the manual recovery source. Do not treat a successful
+re-pin as permission to clear existing incidents or recovery debt.
+
+A refusal prints a JSON receipt with `"status": "refused"`, including for a plist
+whose top level or `EnvironmentVariables` is not a dictionary, with or without
+`--runtime-manifest`. When cleanup succeeds, a refusal before the bootout
+removes the backup it staged (the final re-read of the plist runs after the
+backup is staged, and its refusal deletes that backup and names none), and
+every receipt after the bootout names the backup. A cleanup failure can instead
+print a refusal that names no backup while a backup file exists beside the
+plist. Without `--repin-existing` the
+installer takes no arguments: it renders a fresh installation only when called
+with none, and any other argument exits 2 before anything is written or loaded.
+Earlier versions ignored such arguments.
 
 ### NORMATIVE — D3 `validate_calendar_integer` (health installer only)
 
@@ -2246,12 +2342,18 @@ loaded fragment paths and drop-ins via `systemctl --user show`, and requires
 both monitor timers to be enabled and active.
 
 `check-unit-drift.sh` also accepts `--no-wrappers`, which skips wrapper
-verification entirely instead of checking the default `whatsoup-ensure-node`
-wrapper (or an explicit `--wrapper NAME:REL_PATH` list). It is mutually
+verification entirely instead of checking the default wrappers,
+`whatsoup-ensure-node` and `whatsoup-release-drift-linux.sh` (or an explicit
+`--wrapper NAME:REL_PATH` list). It is mutually
 exclusive with `--wrapper` and may not be repeated; combining the two, or
 repeating either flag, exits `2` before any check runs. Use it only for a
 host/context where the pilot units run without the wrapper layer, so there
 is nothing for the script to verify.
+
+Without `--wrapper` or `--no-wrappers`, both default wrappers are checked
+whatever `--unit` selects: an explicit `--unit` run also checks
+`whatsoup-release-drift-linux.sh` and fails when it is missing or has
+drifted, even when no selected unit executes it.
 
 ### Producer cadence receipt (dark, no reader yet)
 

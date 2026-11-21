@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { runHandoffDistill, type RunHandoffDistillDeps } from '../../../src/runtimes/agent/handoff-distiller.ts';
+import { HandoffDistillUsageError, runHandoffDistill, type RunHandoffDistillDeps } from '../../../src/runtimes/agent/handoff-distiller.ts';
 import { initialDistillState, type DistillBudgetConfig, type DistillState } from '../../../src/runtimes/agent/handoff-distill-gate.ts';
 import type { HandoffArtifact } from '../../../src/runtimes/agent/handoff-prelude.ts';
 
@@ -124,4 +124,82 @@ describe('runHandoffDistill', () => {
     expect(d.degraded[0]).toContain('storage unavailable');
   });
 
+});
+
+describe('runHandoffDistill failure warn line', () => {
+  // Built from parts so no credential-shaped literal sits in the source.
+  const token = ['sk', 'test', 'abcdefghijklmnopqrstuvwx'].join('-');
+  const bearerValue = ['abcdefghij', 'klmnop0123'].join('');
+  const digest = 'e3'.repeat(32);
+  const HASHED_KEY = /^[0-9a-f]{12}$/;
+
+  function warnLines(warn: ReturnType<typeof vi.fn>): Array<[Record<string, unknown>, string]> {
+    return warn.mock.calls as Array<[Record<string, unknown>, string]>;
+  }
+
+  it('logs one warn line per failure with an allowlisted reason code and no exception text', async () => {
+    const warn = vi.fn();
+    const d = deps({
+      conversationKey: 'conversation-key-a',
+      log: { warn },
+      distill: async () => {
+        // A spaced path, a one-segment absolute path, a relative path, an opaque value and a full digest.
+        throw new Error(
+          `upstream refused Bearer ${bearerValue} reading /srv/app a/state.json, /opaquefile and state/session.json `
+          + `with ${token} digest ${digest} ${'x'.repeat(400)}`,
+        );
+      },
+    } as Partial<RunHandoffDistillDeps>);
+
+    const result = await runHandoffDistill(d);
+
+    expect(result).toMatchObject({ ran: false, failed: true });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = warnLines(warn)[0]!;
+    expect(fields).toEqual({
+      event: 'handoff_distill_failed',
+      conversationKeyHash: expect.stringMatching(HASHED_KEY),
+      reasonClass: 'provider',
+      reason: 'provider-error',
+    });
+    expect(message).toBe('handoff distill failed');
+    const line = JSON.stringify([fields, message]);
+    for (const leaked of ['conversation-key-a', 'upstream', 'app a', 'opaquefile', 'state/session', token, bearerValue, digest]) {
+      expect(line).not.toContain(leaked);
+    }
+  });
+
+  it.each([
+    ['provider', 'provider-error', { distill: async () => { throw new Error('model exploded'); } }],
+    ['provider-usage', 'provider-usage-rejected', {
+      distill: async () => { throw new HandoffDistillUsageError('artifact rejected', 10); },
+    }],
+    ['timeout', 'provider-timeout', {
+      distill: async () => { throw Object.assign(new Error('deadline passed'), { name: 'TimeoutError' }); },
+    }],
+    ['accounting', 'token-accounting-error', { distill: async () => ({ summary: 's', tokensUsed: 5_000 }) }],
+    ['persist', 'persist-error', { persist: () => { throw new Error('storage unavailable'); } }],
+  ])('logs the %s class with the fixed reason code %s', async (reasonClass, reason, over) => {
+    const warn = vi.fn();
+
+    const result = await runHandoffDistill(deps({ log: { warn }, ...over } as Partial<RunHandoffDistillDeps>));
+
+    expect(result).toMatchObject({ ran: false, failed: true });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warnLines(warn)[0]![0]).toEqual({
+      event: 'handoff_distill_failed',
+      conversationKeyHash: expect.stringMatching(HASHED_KEY),
+      reasonClass,
+      reason,
+    });
+  });
+
+  it('logs no warn line when the distill succeeds or the gate denies it', async () => {
+    const warn = vi.fn();
+    const succeeded = await runHandoffDistill(deps({ log: { warn } } as Partial<RunHandoffDistillDeps>));
+    const denied = await runHandoffDistill(deps({ log: { warn }, globalInFlight: 5 } as Partial<RunHandoffDistillDeps>));
+    expect(succeeded).toMatchObject({ ran: true, failed: false });
+    expect(denied).toMatchObject({ ran: false, denied: 'global-saturated' });
+    expect(warn).not.toHaveBeenCalled();
+  });
 });

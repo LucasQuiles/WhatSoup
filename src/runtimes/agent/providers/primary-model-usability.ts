@@ -57,6 +57,31 @@ export interface PrimaryModelUsabilityResult {
  */
 export const CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG = 'claude-cli-lacks-strict-mcp-config';
 
+/**
+ * A binary-only change that a required provider canary does not admit: new
+ * sessions refuse the binary, so the probe keeps refusing under its own reason
+ * until the service restarts with a fresh canary receipt.
+ */
+export const CONTEXT_BINARY_CHANGED_RESTART_REQUIRED = 'context-binary-changed-restart-required';
+
+/**
+ * Refusals on the runtime's service context, decided before any child runs.
+ * `context-overflow` is not one: it is a provider failure after a child ran.
+ */
+export const PRIMARY_PROBE_SERVICE_CONTEXT_REFUSALS: ReadonlySet<string> = new Set([
+  'context-missing-service',
+  'context-missing-current',
+  'context-mismatch-provider',
+  'context-mismatch-model',
+  'context-mismatch-generation',
+  'context-mismatch-launch',
+  'context-mismatch-binary-state',
+  'context-binary-missing',
+  'context-mismatch-binary-path',
+  'context-mismatch-binary-sha',
+  CONTEXT_BINARY_CHANGED_RESTART_REQUIRED,
+]);
+
 export type BinaryModelProbeResult =
   | { status: 'ok' }
   | { status: 'model_unavailable' }
@@ -406,4 +431,40 @@ export function primaryModelUsabilityRequiresAlert(result: PrimaryModelUsability
       && result.reason !== CLAUDE_CLI_LACKS_STRICT_MCP_CONFIG;
   }
   return result.status !== 'usable';
+}
+
+/**
+ * A probe that refused before spawning because its service context changed
+ * (the explicit set above). Only a later probe result can resolve it: a turn
+ * success says nothing about the probe's binding.
+ */
+export function isPrimaryProbeContextRefusal(result: PrimaryModelUsabilityResult): boolean {
+  return result.status === 'unknown'
+    && typeof result.reason === 'string'
+    && PRIMARY_PROBE_SERVICE_CONTEXT_REFUSALS.has(result.reason);
+}
+
+/**
+ * Why a turn success may not recover primary usability: the outstanding probe
+ * result is a service-context refusal, or a restarted process's startup probe
+ * has not settled (it cannot know why an earlier alert is open).
+ */
+export type PrimaryTurnRecoveryHold = 'service-context' | 'startup' | null;
+
+/**
+ * The hold after a probe result. A service-context refusal holds. A usable
+ * result or an ordinary alerting failure releases it, so turns recover those.
+ * A non-alerting result settles the startup probe and releases its hold, except
+ * a deferral, which keeps the hold until the next probe result. A service-context
+ * hold stays, because its refusal and alert remain outstanding.
+ */
+export function nextPrimaryTurnRecoveryHold(
+  current: PrimaryTurnRecoveryHold,
+  result: PrimaryModelUsabilityResult,
+): PrimaryTurnRecoveryHold {
+  if (isPrimaryProbeContextRefusal(result)) return 'service-context';
+  if (result.status !== 'usable' && !primaryModelUsabilityRequiresAlert(result)) {
+    return current === 'startup' && result.reason !== DEFERRED_REFRESH_IN_FLIGHT ? null : current;
+  }
+  return null;
 }

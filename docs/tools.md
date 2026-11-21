@@ -26,7 +26,8 @@ Complete reference for all 178 MCP tools exposed by WhatSoup. Tools are grouped 
 > credential resolver used by `knowledge_search`.
 >
 > **`restart_self`** is registered when the runtime is neither sandboxed nor in
-> `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane
+> `sandboxPerChat` mode, its `sessionScope` is not `per_chat`, and a `restartSelf`
+> capability is supplied. Control-plane
 > peers are not required for this tool. Calls also require an authenticated admin.
 >
 > **Protected-delivery tools** are registered only for an agent runtime with an
@@ -3923,8 +3924,10 @@ Signal completion of a repair cycle. Only callable during an active repair sessi
 
 Requests a graceful restart of this instance through its injected service manager.
 Invoke only for an explicit trusted operator request. `registerRuntimeInlineTools`
-registers the tool only when `sandbox` and `sandboxPerChat` are both disabled and
-the runtime supplies `restartSelf`. The declaration and input schema live in
+registers the tool only when `sandbox` and `sandboxPerChat` are both disabled, the
+runtime's `sessionScope` is not `per_chat`, and the runtime supplies `restartSelf`.
+A per-chat runtime keeps one outbound queue per chat, and the restart flushes only
+the global turn's queue, so a restart there would discard owed text. The declaration and input schema live in
 [`self-restart.ts`](../src/runtimes/agent/self-restart.ts).
 
 | | |
@@ -3940,12 +3943,50 @@ the runtime supplies `restartSelf`. The declaration and input schema live in
 | `reason` | string | yes | Non-empty reason for the restart. |
 | `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
 
-The handler attempts an acknowledgement to the originating chat, writes an
-intentional-restart marker, emits an alert and requests a service restart. An
-acknowledgement failure is logged and does not stop the restart. A repeated
-request in the same process returns `ok: false` / `restarting: false`.
+The handler first asks the service manager whether it would refuse to restart
+this job. On launchd the manager reads the plist on disk once and restarts only
+the generated plist that runs `~/.local/bin/whatsoup`. For any other plist it
+names a `cause`: `release_pinned` for a validated release-pinned plist (one that
+runs `<release>/deploy/whatsoup` directly and meets the conditions in
+[the macOS launchd runbook](runbooks/macos-launchd-deployment.md)),
+`plist_not_owned` for any other plist, including a release-launcher plist whose
+release cannot be validated, and `plist_absent`, `plist_unreadable` or
+`invalid_instance`. The handler then returns `ok: false` / `restarting: false`
+with that `cause` without sending anything, aborting the turn, writing a marker,
+emitting an alert or stopping the service. Restart a release-pinned job through
+[the release procedure](runbooks/release-deployment.md#activating-a-release).
+The manager's own self-restart refuses the same plists again from its own read,
+before any `launchctl` call, so a plist that changes after the first check is
+still refused, though only after the steps below. Both checks read the plist on
+disk, not the job launchd has loaded: a loaded release-pinned job whose plist on
+disk is the shared-wrapper form is not detected. Systemd and the docker
+supervisor are not asked.
+Otherwise the handler first sends the text the current turn still owes. The queue holds the
+turn's streamed answer until the turn ends, so the handler sends that answer
+unchanged, with the status role rather than as the turn's recorded answer, and
+waits for it before it aborts the turn. The restart's shutdown therefore still ends
+the turn as failed, with no recovery job. Only after that does text that minimal
+mode deferred at the tool boundary, in a turn that has shown nothing yet, go out as
+an interrupted-turn salvage message. Both waits share one
+10-second limit, and the restart continues only when every send reached provider
+submission in time. If the wait expires, a flush rejects, or a send ends failed,
+ambiguous or dropped by the group echo guard, the handler sends no acknowledgement,
+writes no marker, does not restart, and returns `ok: false` / `restarting: false`
+with a `cause` of `timeout`, `flush_rejected` or `send_failed`. A refusal before the
+abort leaves the turn running. Pending sends stay in the queue and finish on their
+own; nothing is sent again. Otherwise it attempts an acknowledgement to the
+originating chat, which can be a phone, `@lid` or group JID. It writes an
+intentional-restart marker, emits an alert and asks the service manager to restart
+its own job: `systemctl --user restart` on systemd and one `launchctl kickstart -k`
+on launchd, so the manager both stops and starts the job. On launchd this restarts
+the job as launchd loaded it, so a plist edited on disk is not picked up; see
+[the macOS launchd runbook](runbooks/macos-launchd-deployment.md). The docker
+supervisor and Linux without systemd reject the request. An acknowledgement
+failure is logged and does not stop the restart. A repeated request in the same
+process returns `ok: false` / `restarting: false`.
 
-**Returns:** `{ ok, restarting, reason, code, text }` when the caller survives
-long enough to receive a result. A fast service-manager rejection throws and marks
+**Returns:** `{ ok, restarting, reason, code, text }`, plus `cause` when the
+service manager's answer or an unconfirmed owed reply stopped the restart, when the
+caller survives long enough to receive a result. A fast service-manager rejection throws and marks
 the intent rejected. A successful request is not proof of a healthy reboot;
 verify service health and continuity after startup.

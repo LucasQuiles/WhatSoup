@@ -120,6 +120,7 @@ function twoMemberWorld({ sharedFirst = true }: { sharedFirst?: boolean } = {}):
   const context = (instance: string, label: string, plistPath: string, db: string, port: number, shared: boolean): ActivationContext => ({
     args: { instance, release: newRelease, expectCurrent: oldRelease, auxLabels: [], healthPort: port, backupDir, wrapperLink: link, mode: 'apply', exitTimeoutSeconds: 1, verifyTimeoutSeconds: 1 },
     home, domain: 'gui/501', launchAgentsDir: agents, wrapperLink: link, dbPath: db, healthPort: port, healthToken: 'private-token', newCommit: NEXT, oldCommit: OLD, instanceLabel: label, preconditions: [],
+    plannedRequiredOutputs: [],
     botErrorsHealthConsumer: null,
     // What planning records for releases without a refresh rollback fence (plan.ts readRefreshRollbackFence).
     refreshRollbackFence: { required: 0, candidateDigest: null, targetCapability: 0, targetDigest: null, targetCompatibleAtPlan: true, candidateDetail: 'no refresh rollback fence (legacy release)', targetDetail: 'no refresh rollback fence (legacy release)' },

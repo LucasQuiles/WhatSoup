@@ -126,6 +126,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    getSendFailureCount: vi.fn(() => 0),
   };
 
   return { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef };
@@ -952,6 +953,8 @@ describe('AgentRuntime', () => {
       model: 'configured-primary',
     });
     await runtime.start();
+    // Until the startup probe settles, a turn success cannot clear the alert (restart reconciliation).
+    await vi.waitFor(() => expect((runtime as unknown as { primaryModelUsability: { probeInFlight?: boolean } | null }).primaryModelUsability?.probeInFlight).toBe(false));
     mockClearAlertSource.mockClear(); // isolate turn-success clear from startup-probe clear
     const rt = runtime as unknown as {
       recordTurnCapabilitySuccess: (u: boolean, s: unknown) => void;
@@ -4884,6 +4887,26 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContain('_(no response)_');
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
     expect(mockQueue.endTurn).toHaveBeenCalledOnce();
+  });
+
+  it('registers restart_self for a single-scope runtime but not for a per_chat runtime', async () => {
+    const registeredNames = (runtime: AgentRuntime): string[] =>
+      (runtime as unknown as { registry: { register: ReturnType<typeof vi.fn> } })
+        .registry.register.mock.calls.map(([tool]) => (tool as RegisteredTool).name);
+    const serviceRestarter = { restartSelf: vi.fn(async (_name: string) => {}) };
+    // per_chat first: if the mocked registry is shared, the single-scope
+    // registration below must not mask a per_chat registration.
+    const perChat = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      sessionScope: 'per_chat',
+      serviceRestarter,
+    });
+    await perChat.start();
+    expect(registeredNames(perChat)).not.toContain('restart_self');
+
+    const single = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { serviceRestarter });
+    await single.start();
+    expect(registeredNames(single)).toContain('restart_self');
+    expect(serviceRestarter.restartSelf).not.toHaveBeenCalled();
   });
 
   it('emit_heal_result rejects when no repair session is active', async () => {

@@ -721,6 +721,41 @@ launchctl bootout   gui/$(id -u)/com.whatsoup.<instance>
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.<instance>.plist
 ```
 
+A **release-pinned** instance plist runs
+`<release>/deploy/whatsoup <instance>` directly instead of the
+`~/.local/bin/whatsoup` symlink. WhatSoup's own service commands (start, stop,
+restart, disable) accept that form only when all of these hold; otherwise they
+refuse the job as not theirs (#3829):
+
+- `ProgramArguments` is exactly two entries, `<release>/deploy/whatsoup` then
+  `<instance>`, and `Label` is `com.whatsoup.<instance>`.
+- `<release>` is named `WhatSoup-release-<sha>`; `deploy/whatsoup` and
+  `.whatsoup-release-manifest.json` in it are both regular files, and neither
+  they nor `<release>` and `<release>/deploy` are symlinks.
+- The manifest's `source.commit` is a full commit id that starts with `<sha>`,
+  and its one `deploy/whatsoup` entry carries the launcher's sha256. A release
+  exported by `scripts/release-export.ts` meets this; a hand-edited launcher
+  does not.
+- The path is canonical and physically inside the service user's home (no
+  symlink out of home).
+
+The in-job `restart_self` tool restarts only a job whose plist on disk is the
+generated `~/.local/bin/whatsoup` form. It refuses a release-pinned job, even
+when all of these hold, because `kickstart -k` would stop the running process
+before the launcher's boot checks run. It also refuses an absent or unreadable
+plist and one WhatSoup does not own, which includes a release-launcher plist
+that fails these conditions. It refuses before it sends anything or stops the
+job, and the service manager's own self-restart refuses the same plists again
+from its own read, before any `launchctl` call. Both read the plist on disk, not
+the definition launchd has loaded: a loaded release-pinned job whose plist on
+disk is the shared-wrapper form is not detected and is restarted with
+`kickstart -k`. Restart a release-pinned job through
+[the release procedure](release-deployment.md#activating-a-release).
+
+`reconcile-launchd-restart-policy` re-renders the symlink form, so it refuses a
+release-pinned plist instead of repointing the job. Switch releases with
+`npm run release:activate`.
+
 `bootout` returning does not guarantee that launchd will immediately accept the
 same label again. During teardown, `bootstrap` can transiently return error 5
 (`Input/output error`) even when the plist is valid. Prefer the repository

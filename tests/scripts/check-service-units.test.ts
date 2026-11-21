@@ -273,6 +273,44 @@ ExecStart=%h/.local/bin/whatsoup-reply-guarantee-drain
     expect(codes(dir)).toEqual([]);
   });
 
+  it('accepts the ":" exec prefix, which turns off environment substitution, before a specifier path', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+Type=oneshot
+ExecStart=:%h/.local/bin/whatsoup-release-drift-linux.sh --label-file %h/.config/whatsoup/release-drift.env
+`,
+    });
+    expect(codes(dir)).toEqual([]);
+  });
+
+  it('still fails a relative executable behind the ":" exec prefix', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+ExecStart=:relative/bin/whatsoup-release-drift-linux.sh
+`,
+    });
+    expect(codes(dir)).toContain('non-absolute-path');
+  });
+
+  it('fails an exec line that holds only prefixes and no executable, such as ExecStart=:', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+ExecStart=:
+`,
+    });
+    expect(codes(dir)).toContain('non-absolute-path');
+  });
+
+  it('accepts an empty ExecStart=, which resets the command list', () => {
+    const dir = makeRepo({
+      'whatsoup-release-drift.service': `[Service]
+ExecStart=
+ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
+`,
+    });
+    expect(codes(dir)).toEqual([]);
+  });
+
   it('fails a systemd unit that execs bare homebrew node', () => {
     const dir = makeRepo({
       'whatsoup-fleet.service': `[Unit]

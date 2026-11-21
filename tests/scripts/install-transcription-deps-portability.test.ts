@@ -174,3 +174,48 @@ describe('install-transcription-deps.sh — resolve_python', () => {
     expect(res.stdout.trim()).not.toBe('/nonexistent/python');
   });
 });
+
+describe('install-transcription-deps.sh — Python dependency installation', () => {
+  it.each([0, 19])('requests a compatible audio decoder and preserves pip exit %i', (pipExit) => {
+    const root = makeTempRoot('itd-python-deps-');
+    const dataRoot = path.join(root, '.local', 'share', 'whatsoup');
+    const bin = path.join(dataRoot, 'transcription-venv', 'bin');
+    const modelDir = path.join(dataRoot, 'models', 'whisper.cpp');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.writeFileSync(path.join(modelDir, 'ggml-small.bin'), 'model fixture');
+    const calls = path.join(root, 'pip-calls.jsonl');
+    writeExecutable(bin, 'python', `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === '-c') process.exit(0);
+fs.appendFileSync(process.env.PIP_CALLS, JSON.stringify(args) + '\\n');
+process.exit(args.includes('faster-whisper==1.2.1') ? Number(process.env.PIP_EXIT) : 0);
+`);
+    const result = spawnSync('/bin/bash', ['-c', `
+brew() { :; }
+sha256sum() { printf '%s  %s\\n' '1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b' "$1"; }
+curl() { echo 'unexpected download' >&2; return 97; }
+export -f brew sha256sum curl
+exec /bin/bash "$1"
+`, 'installer-test', scriptPath], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        HOME: root,
+        PATH: '/usr/bin:/bin',
+        WHATSOUP_TRANSCRIPTION_PYTHON: path.join(bin, 'python'),
+        PIP_CALLS: calls,
+        PIP_EXIT: String(pipExit),
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(pipExit);
+    const commands: string[][] = fs.readFileSync(calls, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    const install = commands.find((args) => args.includes('faster-whisper==1.2.1'));
+    expect(install).toContain('av==17.1.0');
+    expect(result.stdout.includes('Dependencies installed.')).toBe(pipExit === 0);
+    expect(result.stderr).toBe('');
+  });
+});
