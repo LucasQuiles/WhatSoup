@@ -121,7 +121,7 @@ const NESTED_RUN_TIMEOUT_MS = 60_000;
 const NESTED_TEST_TIMEOUT_MS = NESTED_RUN_TIMEOUT_MS + 30_000;
 
 interface ProbeRecord {
-  event: 'module' | 'afterAll';
+  event: 'module' | 'kill' | 'afterAll';
   home?: string;
   runRoot?: string | null;
 }
@@ -131,28 +131,39 @@ interface ProbeRecord {
 //   handle in a real test file does. A fork with nothing left to run exits on
 //   its own once Vitest's stop request removes its message listeners, and its
 //   `exit` fallback then removes the HOME; this one waits for Vitest's SIGTERM.
-// - sigkill: the fork ends itself with SIGKILL inside its test.
+// - sigkill: the fork records that its test reached the kill, then ends itself
+//   with SIGKILL, so a fork that failed before the kill cannot pass for it.
 type ForkEnd = 'sigterm' | 'sigkill';
 
 // One nested Vitest run over one probe file, with the isolation setup file and,
-// when asked, this globalSetup. The probe records its worker HOME and run root
-// from module code, which also runs in a `vitest list` pass, and records its
-// afterAll, so a fork whose hooks ran is visible.
+// when `runRootParent` is given, this globalSetup making its run root in that
+// folder. vitest-run-root.ts reads no setting for the parent (it defaults to
+// /tmp, not TMPDIR, for the socket-path limit), so a generated globalSetup
+// passes it to the real startRunRoot. The probe records its worker HOME and run
+// root from module code, which also runs in a `vitest list` pass, and records
+// its afterAll, so a fork whose hooks ran is visible.
 function nestedRun(options: {
   command: 'run' | 'list';
   end: ForkEnd;
-  globalSetup: boolean;
+  runRootParent?: string;
   env?: NodeJS.ProcessEnv;
 }): { records: ProbeRecord[]; status: number | null; output: string } {
   const dir = realpathSync(tmp.make('nested'));
   const recordsFile = join(dir, 'records.jsonl');
   const config = join(dir, 'vitest.config.mts');
+  const globalSetup = join(dir, 'run-root-setup.mjs');
+  if (options.runRootParent !== undefined) {
+    writeFileSync(globalSetup, [
+      `import { startRunRoot } from ${JSON.stringify(resolve(repoRoot, 'tests/setup/vitest-run-root.ts'))};`,
+      `export default function setup() { return startRunRoot(${JSON.stringify(options.runRootParent)}); }`,
+    ].join('\n'));
+  }
   writeFileSync(config, `export default ${JSON.stringify({
     root: dir,
     cacheDir: join(dir, '.vite'),
     test: {
       include: ['probe.test.mjs'],
-      ...(options.globalSetup ? { globalSetup: [resolve(repoRoot, 'tests/setup/vitest-run-root.ts')] } : {}),
+      ...(options.runRootParent !== undefined ? { globalSetup: [globalSetup] } : {}),
       setupFiles: [resolve(repoRoot, 'tests/setup/bot-errors-vitest-isolation.ts')],
       maxWorkers: 1,
       fileParallelism: false,
@@ -165,7 +176,7 @@ function nestedRun(options: {
     "record({ event: 'module', home: process.env.WHATSOUP_VITEST_HOME, runRoot: process.env.WHATSOUP_VITEST_RUN_ROOT ?? null });",
     "afterAll(() => record({ event: 'afterAll' }));",
     options.end === 'sigkill'
-      ? "it('ends its own fork by signal', () => { process.kill(process.pid, 'SIGKILL'); });"
+      ? "it('ends its own fork by signal', () => { record({ event: 'kill' }); process.kill(process.pid, 'SIGKILL'); });"
       : 'setInterval(() => {}, 60_000);\nit(\'keeps its fork alive\', () => {});',
   ].join('\n'));
   const child = spawnSync(process.execPath, [
@@ -184,29 +195,44 @@ function nestedRun(options: {
   return { records, status: child.status, output };
 }
 
-// The module record, after checking that the fork's hooks never ran: the
-// probe's afterAll would run before the setup file's, which removes the HOME.
-function onlyModuleRecord(records: ProbeRecord[], output: string): { home: string; runRoot: string | null } {
-  expect(records.map((row) => row.event), output).toEqual(['module']);
+// The module record, after checking the events are exactly `events`: the
+// fork's hooks never ran (the probe's afterAll would run before the setup
+// file's, which removes the HOME), and a SIGKILL fork reached its kill.
+function moduleRecord(
+  records: ProbeRecord[],
+  events: readonly string[],
+  output: string,
+): { home: string; runRoot: string | null } {
+  expect(records.map((row) => row.event), output).toEqual(events);
   const [record] = records;
   expect(record!.home, output).toBeTruthy();
   return { home: record!.home!, runRoot: record!.runRoot ?? null };
 }
 
 // `exitsCleanly`: a `vitest list` pass succeeds; a run whose fork died fails.
+// `events`: a `vitest list` pass runs no test body; the SIGKILL test records its kill.
 const FORK_ROUTES = [
-  { route: 'a `vitest list` pass, its fork ended by SIGTERM', command: 'list', end: 'sigterm', exitsCleanly: true },
-  { route: 'a `vitest run` whose fork dies by SIGKILL in its test', command: 'run', end: 'sigkill', exitsCleanly: false },
+  {
+    route: 'a `vitest list` pass, its fork ended by SIGTERM',
+    command: 'list', end: 'sigterm', exitsCleanly: true, events: ['module'],
+  },
+  {
+    route: 'a `vitest run` whose fork dies by SIGKILL in its test',
+    command: 'run', end: 'sigkill', exitsCleanly: false, events: ['module', 'kill'],
+  },
 ] as const;
 
-describe.each(FORK_ROUTES)('the worker HOME of $route', ({ command, end, exitsCleanly }) => {
+describe.each(FORK_ROUTES)('the worker HOME of $route', ({ command, end, exitsCleanly, events }) => {
   it('is removed with the run root by the globalSetup', () => {
-    const { records, status, output } = nestedRun({ command, end, globalSetup: true });
-    const { home, runRoot } = onlyModuleRecord(records, output);
+    // The run root's parent is a folder this test owns, so a root that
+    // survives a regression is still removed by the temporary-directory cleanup.
+    const parent = realpathSync(tmp.make('run-root-parent'));
+    const { records, status, output } = nestedRun({ command, end, runRootParent: parent });
+    const { home, runRoot } = moduleRecord(records, events, output);
 
     expect(status === 0, output).toBe(exitsCleanly);
-    // A fresh root under /tmp, as a nested run under the outer run makes.
-    expect(dirname(runRoot!)).toBe(defaultTempParent());
+    // A fresh root made by the nested run's globalSetup.
+    expect(dirname(runRoot!)).toBe(parent);
     expect(dirname(home)).toBe(runRoot);
     expect(existsSync(home), output).toBe(false);
     expect(existsSync(runRoot!), output).toBe(false);
@@ -220,9 +246,9 @@ describe.each(FORK_ROUTES)('the worker HOME of $route', ({ command, end, exitsCl
     writeFileSync(join(inherited, RUN_ROOT_MARKER), 'control');
 
     const { records, status, output } = nestedRun({
-      command, end, globalSetup: false, env: { [RUN_ROOT_ENV]: inherited },
+      command, end, env: { [RUN_ROOT_ENV]: inherited },
     });
-    const { home, runRoot } = onlyModuleRecord(records, output);
+    const { home, runRoot } = moduleRecord(records, events, output);
 
     expect(status === 0, output).toBe(exitsCleanly);
     expect(runRoot).toBe(inherited);
