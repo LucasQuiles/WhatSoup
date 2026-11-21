@@ -93,7 +93,18 @@ Setup never loads the jobs —
 load them as a deployment step and verify with `launchctl print`; see the
 "macOS (launchd) Maintenance Timers" section of
 [docs/runbook.md](../runbook.md#2-service-management) for the load, verify,
-and uninstall (`deploy/setup.sh --remove-timers`) commands.
+and uninstall (`deploy/setup.sh --remove-timers`) commands. On a host that
+logs in automatically, the next reboot loads an installed plist, so installing
+one is a live change.
+
+On a release host, steps 3 and 4 refuse to move the bot wrapper or the timer
+plists to another tree; `release:activate` owns that switch. On macOS, a tree
+other than the active release can run only `--npmrc-only`: `--skip-wrappers`
+and `--timers-only` still reach step 4. From the active release, run through
+the path the wrapper names, `--wrappers-only` runs only step 3 and moves the
+seven helper links that `release:activate` leaves on the previous release. See
+"`deploy/setup.sh` on a release host" in
+[release-deployment.md](release-deployment.md#deploysetupsh-on-a-release-host).
 
 ## Services
 

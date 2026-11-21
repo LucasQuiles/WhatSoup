@@ -532,6 +532,155 @@ restore required; `5` activation failed and the automatic rollback was blocked
 by an incompatible or unreadable sealed refresh fence — outcome
 `rollback-blocked-refresh-fence`, manual recovery required.
 
+#### `deploy/setup.sh` on a release host
+
+`deploy/setup.sh` step 3 links `~/.local/bin/whatsoup` to the tree setup runs
+from, and on macOS step 4 bakes that tree into the timer plists. Either change
+takes effect at the job's next start, such as a crash restart, a watchdog
+restart or a reboot, without `release:activate`'s preconditions, backup,
+verification and rollback. So once `~/.local/bin/whatsoup` exists, both steps
+refuse with exit `2`, naming `release:activate`, unless one of these holds:
+
+- this tree is the one the wrapper already runs, and setup runs through the
+  path the wrapper names (a git checkout may also be reached another way);
+- the tree the wrapper runs and this tree are both git checkouts.
+
+A tree counts as a git checkout when git reports it as a work tree, by the probe
+`deploy/whatsoup` uses to choose git mode, and it has no
+`.whatsoup-release-manifest.json` at its root. Every other tree counts as a
+release, including an older release without a manifest. A wrapper that does not
+resolve to an existing `deploy/whatsoup`, such as one whose target is gone or
+whose link chain is longer than 40 links, is refused too; on a fresh install,
+remove `~/.local/bin/whatsoup` first. A first install with no wrapper is
+allowed. The refusal happens before any step changes anything. Its message
+prints a `release:activate` command with an `--aux-label` for each setup timer;
+add the others the host runs, as in the example above.
+
+From a tree other than the active release:
+
+- `--npmrc-only` runs only step 5, the hardened `~/.npmrc` merge;
+- on Linux, `--skip-wrappers` skips step 3 and `--timers-only` runs only step 4;
+- on macOS, only `--npmrc-only` runs, because `--skip-wrappers` and
+  `--timers-only` still reach step 4.
+
+`--wrappers-only` runs only step 3, so on a release host it runs only from the
+active release. The preflight and the step 1 checks always run. Step 3 replaces
+each link by renaming a new link over it, so a link is never missing while it
+changes.
+
+**Linux.** `release:activate` refuses on Linux, so no command moves a Linux
+release host to another tree, and the refusal says so. To move one on purpose,
+stop its units, repoint `~/.local/bin/whatsoup` by hand to the other tree's
+`deploy/whatsoup` with a new link renamed over the old one (`ln -s` to a
+temporary name, then GNU `mv -T`), never `rm` then `ln`, then run setup from
+that tree through the path the link names, and start the units again. Nothing
+checks, backs up or rolls back that switch.
+
+**Helper links after an activation.** The fleet console's launchd job starts
+`~/.local/bin/whatsoup-fleet`. `release:activate` moves only
+`~/.local/bin/whatsoup`; `release:activate-host` also moves
+`~/.local/bin/whatsoup-fleet`, but only when its declaration lists
+`com.whatsoup.whatsoup-fleet` with `fleet-wrapper`. Neither moves the other
+helper links. So after an activation run setup from the active release as
+below; otherwise the console can keep starting the previous release.
+
+Step 3 installs eight links in `~/.local/bin`, but the guard reads only
+`~/.local/bin/whatsoup`. The other seven point into whichever tree ran setup and
+passed the guard:
+
+- `whatsoup-fleet`
+- `whatsoup-auth`
+- `whatsoup-ensure-node`
+- `whatsoup-harness-maintenance`
+- `whatsoup-reply-guarantee-drain`
+- `whatsoup-heal-notify`
+- `whatsoup-release-drift-linux.sh`
+
+After an activation they still run the previous release, and they break if
+that release is removed.
+
+To move them, run `deploy/setup.sh --wrappers-only` from the active release,
+through the path that `~/.local/bin/whatsoup` names:
+
+```bash
+bash "$(dirname "$(readlink ~/.local/bin/whatsoup)")/setup.sh" --wrappers-only
+```
+
+The guard passes because that is the tree the wrapper already runs, and step 3
+points all eight links into it. No other step runs: no `npm ci`, no console
+build and no timer render inside the live release, and a target that is already
+executable is not touched. A job that already started through a helper link
+keeps running the previous release until it restarts.
+
+If the wrapper names a relative or unnormalized path, the command above does not
+apply. setup.sh refuses even from the active release, because the path it would
+write never matches. First respell the wrapper as the absolute path of the same
+file. That changes no code the bot runs, only how the path is written. This is
+the macOS procedure; on Linux use GNU `mv -T` where the block uses BSD `mv -fh`.
+
+1. Run `bash /abs/path/to/<active-release>/deploy/setup.sh --wrappers-only`.
+   It refuses and changes nothing. The refusal must say "run setup through the
+   path the wrapper names"; any other refusal means this procedure does not
+   apply. After `Bot wrapper: … ->` it prints the wrapper's resolved path, with
+   every link in the chain and its directories resolved.
+2. Put that resolved path in `NEW` and paste the whole block below. It is one
+   subshell that stops at the first failed check, with or without `set -e`, and
+   prints `stop: …`. It makes the new link only after every check passes:
+   - no `release:activate` or reconcile runs, that is,
+     `~/.local/state/whatsoup/release-activation.lock` is absent, because this
+     writes the wrapper outside that lock;
+   - `NEW` is absolute and normalized: it starts with `/`, has no trailing `/`,
+     no `//` and no `.` or `..` component;
+   - `NEW` is exactly the resolved path: its last part is not a link and its
+     directory has no linked part;
+   - `NEW` is an existing regular file and the same file the wrapper runs
+     (`-ef` compares device and inode, following the link). If it is another
+     file, moving the wrapper is a release switch for `release:activate`, not
+     a respelling;
+   - the temporary link `~/.local/bin/.whatsoup.relink` does not exist in any
+     form.
+
+   The block then swaps the link atomically, as setup's step 3 does: it makes a
+   new link beside the wrapper and renames it over the old one with BSD
+   `mv -fh`, which replaces a link to a directory instead of moving into it. It
+   never runs `rm` on the wrapper and then `ln`, because a job that starts in
+   between would find no wrapper. If the rename fails, the wrapper is unchanged;
+   the block removes the temporary link only while it still points at `NEW`,
+   and stops. Last, it reads the wrapper back and stops unless it names `NEW`.
+
+   ```bash
+   (
+     fail() { echo "stop: $*" >&2; exit 1; }
+     NEW='<the path printed after "Bot wrapper: … ->">'
+     W="$HOME/.local/bin/whatsoup"
+     T="$HOME/.local/bin/.whatsoup.relink"
+     LOCK="$HOME/.local/state/whatsoup/release-activation.lock"
+     if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then fail "$LOCK exists; an activation or reconcile may be running"; fi
+     case "$NEW" in
+       */ | *//* | */./* | */. | */../* | */..) fail "NEW is not normalized: $NEW" ;;
+       /*) ;;
+       *) fail "NEW is not absolute: $NEW" ;;
+     esac
+     if [ -L "$NEW" ]; then fail "NEW ends in a link: $NEW"; fi
+     [ "$(cd -P "$(dirname "$NEW")" 2>/dev/null && pwd)" = "$(dirname "$NEW")" ] || fail "NEW is not the resolved path: $NEW"
+     [ -f "$NEW" ] || fail "NEW is not an existing regular file: $NEW"
+     [ "$NEW" -ef "$W" ] || fail "NEW is not the file the wrapper runs: $NEW"
+     if [ -e "$T" ] || [ -L "$T" ]; then fail "$T already exists; inspect it"; fi
+     ln -s "$NEW" "$T" || fail "could not create $T"
+     if ! mv -fh "$T" "$W"; then
+       if [ "$(readlink "$T")" = "$NEW" ]; then rm "$T"; fi
+       fail "could not rename $T over $W; the wrapper is unchanged"
+     fi
+     [ "$(readlink "$W")" = "$NEW" ] || fail "the wrapper does not name $NEW"
+     echo relinked
+   )
+   ```
+
+   If it stops because `~/.local/bin/.whatsoup.relink` exists, inspect it with
+   `readlink`. If it is a link you made in an earlier attempt, remove it with
+   `rm` and run the block again; otherwise find out what made it first.
+3. After `relinked`, run the `--wrappers-only` command above.
+
 ### `npm run release:activate-host`
 
 Host activation is a separate, explicitly declared transaction for one or
@@ -1218,8 +1367,11 @@ variable:
   which honours `WHATSOUP_REPO_ROOT`;
 - `com.whatsoup.harness-maintenance` and `com.whatsoup.reply-guarantee` —
   `deploy/setup.sh`, whose `install_launchd_timer` derives the root from its own
-  `${BASH_SOURCE[0]}` and IGNORES `WHATSOUP_REPO_ROOT`. Run it from inside the
-  new release; exporting the variable does nothing for these two.
+  `${BASH_SOURCE[0]}` and IGNORES `WHATSOUP_REPO_ROOT`; exporting the variable
+  does nothing for these two. `release:activate` re-renders them from inside the
+  new release with its `setup-timer` renderer. `deploy/setup.sh` itself refuses
+  to render them from a release the bot wrapper does not already run (see
+  "`deploy/setup.sh` on a release host" above).
 
 Re-rendering writes the plist on disk but does NOT switch a job that is already
 loaded: launchd keeps the loaded definition until the label is reloaded, so
@@ -1317,7 +1469,8 @@ database automatically; it detects the case and stops:
 - It exits `4` with outcome `rollback-blocked-migrated`. `receipt.json` records
   `schemaMigration.before`, `after` (or `afterError`) and `blockedAt`. stderr
   prints both levels, the backup path, and the restore commands with this
-  host's paths filled in.
+  host's paths filled in. For the wrapper, use the guarded block below, not
+  the printed `ln -sfn` line.
 
 **Data loss:** restoring the backup loses every message received after the
 backup was taken. The moved-aside live database is then the only copy of them;
@@ -1333,15 +1486,66 @@ aside=<db>.pre-restore-$(date -u +%Y%m%dT%H%M%SZ); mkdir -m 700 "$aside"
 mv <db> <db>-wal <db>-shm "$aside"/                       # -wal/-shm may be absent
 # 3. Restore the pre-activation backup.
 cp <backup>/bot.db <db> && chmod 600 <db>
-# 4. Repoint the wrapper symlink and the plists to the old release.
-ln -sfn "$(cat <backup>/symlink.before)" ~/.local/bin/whatsoup
-cp <backup>/<label>.plist ~/Library/LaunchAgents/<label>.plist   # every label
-# 5. Start every label, then verify from the executing process as above.
-launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/<label>.plist
 ```
+
+Then repoint the wrapper to the old release, restore the plists and start every
+label, as one block. It is one subshell that stops at the first failed check,
+with or without `set -e`, and prints `stop: …`. It follows the same rule as the
+relink under "Helper links after an activation":
+
+- the activation lock is absent, because this writes the wrapper outside it;
+- `<backup>/symlink.before` was read, and the target it names is absolute,
+  normalized and an existing regular file. It is not compared with the current
+  wrapper, which still names the new release;
+- the temporary link does not exist in any form;
+- it renames a new link over the wrapper with `mv -fh` only after `ln -s`
+  succeeds, and never runs `rm` then `ln`. If the rename fails, it removes the
+  temporary link only while it still points at the target, and stops;
+- it reads the wrapper back. The plists are copied and the labels bootstrapped
+  only after the wrapper names the old release.
+
+```bash
+# 4. Repoint the wrapper, then 5. restore the plists and start every label.
+(
+  fail() { echo "stop: $*" >&2; exit 1; }
+  W="$HOME/.local/bin/whatsoup"
+  T="$HOME/.local/bin/.whatsoup.relink"
+  LOCK="$HOME/.local/state/whatsoup/release-activation.lock"
+  if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then fail "$LOCK exists; confirm no activation or reconcile runs (see above)"; fi
+  old="$(cat <backup>/symlink.before)" || fail "could not read <backup>/symlink.before"
+  case "$old" in
+    */ | *//* | */./* | */. | */../* | */..) fail "the old target is not normalized: $old" ;;
+    /*) ;;
+    *) fail "the old target is not absolute: $old" ;;
+  esac
+  [ -f "$old" ] || fail "the old target is not an existing regular file: $old"
+  if [ -e "$T" ] || [ -L "$T" ]; then fail "$T already exists; inspect it"; fi
+  ln -s "$old" "$T" || fail "could not create $T"
+  if ! mv -fh "$T" "$W"; then
+    if [ "$(readlink "$T")" = "$old" ]; then rm "$T"; fi
+    fail "could not rename $T over $W; the wrapper is unchanged"
+  fi
+  [ "$(readlink "$W")" = "$old" ] || fail "the wrapper does not name $old"
+  for label in com.whatsoup.<instance> <each aux label>; do
+    cp "<backup>/$label.plist" "$HOME/Library/LaunchAgents/$label.plist" || fail "could not restore $label.plist"
+  done
+  for label in com.whatsoup.<instance> <each aux label>; do
+    launchctl bootstrap gui/"$(id -u)" "$HOME/Library/LaunchAgents/$label.plist" || fail "could not bootstrap $label"
+  done
+  echo restored
+)
+```
+
+After `restored`, verify from the executing process as above. If the block stops
+because the temporary link exists, inspect it with `readlink`. If it is a link
+you made in an earlier attempt, remove it with `rm` and run the block again;
+otherwise find out what made it first.
 
 Never leave a `-wal` or `-shm` file from the migrated database beside the
 restored `bot.db`.
+
+The restore commands that `release:activate` prints still show `ln -sfn` for
+the wrapper; use the block above instead.
 
 #### Rollback blocked by refresh-fence compatibility (exit `5`)
 

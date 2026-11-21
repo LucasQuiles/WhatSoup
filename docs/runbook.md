@@ -269,7 +269,11 @@ events are described in
 `~/Library/LaunchAgents` (idempotent; a differing pre-existing plist is backed
 up first; an already-loaded label or a cron twin triggers a duplicate-timer
 warning instead of a double install). Setup never loads the jobs — they
-activate at next login.
+activate at next login. On a host that logs in automatically, the next reboot
+loads them, so installing them is a live change. On a release host, step 4
+renders them only from the release the bot wrapper already runs, through the
+path it names; use `release:activate` to move them to another release
+([release-deployment.md](runbooks/release-deployment.md#deploysetupsh-on-a-release-host)).
 
 **Load now (deployment step):**
 ```bash
