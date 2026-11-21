@@ -509,14 +509,49 @@ describe(`deploy/setup.sh release guard helpers with ${SWITCH_FLAG} (Linux)`, ()
     expectSwitch(host, r2, r1);
   });
 
-  it('still refuses a wrapper that does not resolve: the old tree is unknown', () => {
+  it('still refuses a wrapper that does not resolve: the old tree is unknown, and the flag is not suggested', () => {
     const host = makeHost();
     const release = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
     linkWrapper(host, wrapperOf(path.join(host.base, 'gone')));
     const run = runGuard(host, release, { switchTree: true });
     expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(2);
     expect(run.stderr).toContain(FRESH_INSTALL_HINT);
+    expect(run.stderr).not.toContain(LINUX_NOTE);
     expect(run.stdout).not.toContain('Old wrapper target');
+  });
+
+  it('prints the plain rollback command, and says so, when the old tree has no flag', () => {
+    const host = makeHost();
+    const older = makeTree(path.join(host.base, 'releases', 'r0'), 'release');
+    const next = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const olderSetup = path.join(older, 'deploy', 'setup.sh');
+    writeExecutable(olderSetup, '#!/usr/bin/env bash\necho "an older setup without the release-tree guard"\n');
+    linkWrapper(host, wrapperOf(older));
+    const run = runGuard(host, next, { switchTree: true });
+    expect(run.passed, `${run.stdout}\n${run.stderr}`).toBe(true);
+    expect(run.stdout).toContain(`      bash ${olderSetup}\n`);
+    expect(run.stdout).not.toContain(`${olderSetup} ${SWITCH_FLAG}`);
+    expect(run.stdout).toContain('it switches the host back without the release-tree check');
+  });
+
+  it('prints the old setup path as one shell word', () => {
+    const host = makeHost();
+    const spaced = makeTree(path.join(host.base, 'releases', 'r 1'), 'release');
+    const next = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    linkWrapper(host, wrapperOf(spaced));
+    const run = runGuard(host, next, { switchTree: true });
+    expect(run.passed, `${run.stdout}\n${run.stderr}`).toBe(true);
+    const quoted = path.join(spaced, 'deploy', 'setup.sh').replace(/ /g, '\\ ');
+    expect(run.stdout).toContain(`      bash ${quoted} ${SWITCH_FLAG}\n`);
+  });
+
+  it('announces no switch when the wrapper already names this tree by the same text', () => {
+    const host = makeHost();
+    const release = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    linkWrapper(host, wrapperOf(release));
+    const run = runGuard(host, release, { switchTree: true });
+    expect(run.passed, `${run.stdout}\n${run.stderr}`).toBe(true);
+    expect(run.stdout).not.toContain('Switching this host');
   });
 });
 
@@ -654,18 +689,33 @@ describe(`deploy/setup.sh ${SWITCH_FLAG}: a deliberate Linux tree switch`, () =>
     expect(snapshot(host.base)).toEqual(before);
   });
 
-  it('fails when the wrapper does not name this tree after step 3', () => {
+  it.each([
+    { kind: 'a switch from release N', switched: true },
+    { kind: 'a first install', switched: false },
+  ])('fails after step 3 when the bot link changed during the last helper link ($kind)', ({ switched }) => {
     const host = makeHost();
     const current = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
-    const next = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
-    linkWrapper(host, wrapperOf(current));
-    // A rename that reports success but moves nothing.
-    writeExecutable(path.join(host.shims, 'mv'), '#!/bin/sh\nexit 0\n');
+    const next = makeTree(path.join(host.base, 'releases', 'r2'), 'release', { units: true });
+    if (switched) linkWrapper(host, wrapperOf(current));
+    // Each link before the last passes its own read-back; while the last helper is staged, another
+    // writer points the bot link back at release N. Only the final read-back after step 3 sees it.
+    writeExecutable(path.join(host.shims, 'ln'), [
+      '#!/bin/bash',
+      '/bin/ln "$@" || exit $?',
+      'case "${@: -1}" in',
+      '  */.whatsoup-release-drift-linux.sh.setup-*) /bin/ln -sfn "$REPOINT_AT_LAST_LINK" "$HOME/.local/bin/whatsoup" ;;',
+      'esac',
+      '',
+    ].join('\n'));
 
-    const run = runSetup(host, next, [SWITCH_FLAG]);
+    const run = runSetup(host, next, [SWITCH_FLAG], { env: { REPOINT_AT_LAST_LINK: wrapperOf(current) } });
     expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(1);
-    expect(run.stderr).toContain(`not ${wrapperOf(next)}`);
-    expect(fs.readlinkSync(path.join(host.bin, 'whatsoup'))).toBe(wrapperOf(current));
+    expect(run.stderr).toContain(
+      `after step 3 ${path.join(host.bin, 'whatsoup')} names ${wrapperOf(current)}, not ${wrapperOf(next)}: the switch did not complete`,
+    );
+    // The rollback command is named only when the switch announcement printed one.
+    expect(run.stderr.includes('roll back with the command printed above')).toBe(switched);
+    expect(run.stdout.includes('Old wrapper target')).toBe(switched);
     expect(run.stdout).not.toContain('[4/7]');
   });
 });

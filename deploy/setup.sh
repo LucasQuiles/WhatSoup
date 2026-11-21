@@ -208,13 +208,20 @@ refuse_release_bound_change() {
   if [ -z "$current_tree" ]; then
     reason="the wrapper does not resolve to an existing deploy/whatsoup, so the tree the bot runs is unknown; remove ~/.local/bin/whatsoup first if this is a fresh install"
   elif [ "${switch_release_tree:-0}" -eq 1 ]; then
-    if [ "${release_tree_switch_announced:-0}" -ne 1 ]; then
-      named="$(readlink "$link" 2>/dev/null || true)"
+    named="$(readlink "$link" 2>/dev/null || true)"
+    # A wrapper that already names this tree by the same text is no switch.
+    if [ "${release_tree_switch_announced:-0}" -ne 1 ] && [ "$named" != "$REPO_ROOT/deploy/whatsoup" ]; then
+      old_setup="$current_tree/deploy/setup.sh"
       echo "  Switching this host's tree ($SWITCH_RELEASE_TREE_FLAG):"
       echo "    Old wrapper target: ${named:-$current} (resolves to $current)"
       echo "    New wrapper target: $REPO_ROOT/deploy/whatsoup"
-      echo "    To roll back, run the old tree's setup the same way:"
-      echo "      bash $current_tree/deploy/setup.sh $SWITCH_RELEASE_TREE_FLAG"
+      echo "    To roll back, run the old tree's setup:"
+      if [ -f "$old_setup" ] && grep -qF -- "$SWITCH_RELEASE_TREE_FLAG" "$old_setup"; then
+        echo "      bash $(printf '%q' "$old_setup") $SWITCH_RELEASE_TREE_FLAG"
+      else
+        echo "      bash $(printf '%q' "$old_setup")"
+        echo "    That older setup.sh has no $SWITCH_RELEASE_TREE_FLAG: it switches the host back without the release-tree check."
+      fi
       echo ""
       release_tree_switch_announced=1
     fi
@@ -247,8 +254,11 @@ refuse_release_bound_change() {
       echo "        --backup-dir <dir> --plan"
       echo "    Pass one --aux-label for each timer plist the host has installed; see"
       echo "    docs/runbooks/release-deployment.md (\"Activating a release\")."
-    else
+    elif [ -n "$current_tree" ]; then
       echo "    On Linux, where release:activate refuses, re-run with $SWITCH_RELEASE_TREE_FLAG to switch this host to this tree on purpose (docs/runbooks/release-deployment.md, \"Switching a Linux host to another tree\")."
+    else
+      # The flag needs the old tree, so it cannot help here.
+      echo "    On Linux, where release:activate refuses, no option switches a wrapper that does not resolve: repair or remove it first, as the reason above says."
     fi
     echo "    From any tree, --npmrc-only (step 5) still runs. --skip-wrappers skips"
     echo "    step 3, but on macOS step 4 still needs the active release. From the"
@@ -547,6 +557,7 @@ only_wrappers=0
 only_timers=0
 only_npmrc=0
 switch_release_tree=0
+release_tree_switch_announced=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --profile)
@@ -795,7 +806,11 @@ if [ "$run_wrappers" -eq 1 ]; then
   if [ "$switch_release_tree" -eq 1 ]; then
     switched_target="$(readlink "$BIN_DIR/whatsoup" 2>/dev/null || true)"
     if [ "$switched_target" != "$REPO_ROOT/deploy/whatsoup" ]; then
-      echo "  ✗ after step 3 $BIN_DIR/whatsoup names ${switched_target:-nothing}, not $REPO_ROOT/deploy/whatsoup: the switch did not complete; roll back with the command printed above" >&2
+      if [ "$release_tree_switch_announced" -eq 1 ]; then
+        echo "  ✗ after step 3 $BIN_DIR/whatsoup names ${switched_target:-nothing}, not $REPO_ROOT/deploy/whatsoup: the switch did not complete; roll back with the command printed above" >&2
+      else
+        echo "  ✗ after step 3 $BIN_DIR/whatsoup names ${switched_target:-nothing}, not $REPO_ROOT/deploy/whatsoup: the switch did not complete" >&2
+      fi
       exit 1
     fi
     echo "  ✓ the bot wrapper now names $REPO_ROOT/deploy/whatsoup"
