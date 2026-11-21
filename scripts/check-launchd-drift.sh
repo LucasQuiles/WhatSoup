@@ -32,7 +32,14 @@ ALL_INSTANCES=()
 # Non-instance stems: parity with deploy/managed-components.json
 # protective_services (+ the fleet console). Enforced by
 # tests/scripts/launchd-drift.test.ts (manifest-parity test).
-NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check ms365-token-backup bot-errors-j1-collector whatsoup-fleet)
+NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check bot-errors-j1-collector whatsoup-fleet)
+
+# Retired stems: jobs removed from the standard (no manifest entry; their templates
+# stay tracked until they can be deleted and are excluded from release exports).
+# A leftover plist ($LAUNCHD_DIR/com.whatsoup.<stem>.plist) or script
+# ($BIN_DIR/<stem>) is drift with a removal instruction; the stem is never
+# discovered as an instance. See docs/releases/2026-11-20-token-backup-job-retired.md.
+RETIRED_STEMS=(ms365-token-backup)
 
 usage() {
   cat <<'USAGE'
@@ -87,6 +94,27 @@ fi
 
 failures=0
 PLIST_PYTHON=""
+
+# A configured instance owns its name: a retired stem with an instance config
+# (src/fleet/paths.ts configRoot) is checked as that instance, never as the
+# retired job. Only the remaining stems are treated as retired below.
+INSTANCE_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances"
+UNOWNED_RETIRED_STEMS=()
+for stem in ${RETIRED_STEMS[@]+"${RETIRED_STEMS[@]}"}; do
+  if [ ! -f "$INSTANCE_CONFIG_ROOT/$stem/config.json" ]; then UNOWNED_RETIRED_STEMS+=("$stem"); fi
+done
+
+is_unowned_retired_plist() { # PLIST_PATH — the retired file name AND, read with plistlib, the retired Label
+  local k label
+  for k in ${UNOWNED_RETIRED_STEMS[@]+"${UNOWNED_RETIRED_STEMS[@]}"}; do
+    if [ "$(basename "$1")" = "com.whatsoup.$k.plist" ]; then
+      label="$(plist_key "$1" Label 2>/dev/null)" || return 1
+      [ "$label" = "com.whatsoup.$k" ] && return 0
+      return 1
+    fi
+  done
+  return 1
+}
 
 resolve_plist_python() {
   local selected="" resolved="" status=0
@@ -206,10 +234,11 @@ check_maintenance_surface() {
   # The verdict line is the parser's stdout; its stderr is never shown (it could echo plist content).
   # A file, not $(...): bash 3.2 misparses a quoted heredoc inside a command substitution.
   out="$(mktemp "${TMPDIR:-/tmp}/launchd-drift-maint.XXXXXX")"
-  "$PLIST_PYTHON" - "$rendered" "$installed" "$LAUNCHD_DIR" "$HOME" >"$out" 2>/dev/null <<'PY' || status=$?
+  "$PLIST_PYTHON" - "$rendered" "$installed" "$LAUNCHD_DIR" "$HOME" "${UNOWNED_RETIRED_STEMS[*]-}" >"$out" 2>/dev/null <<'PY' || status=$?
 import glob, hashlib, os, plistlib, sys, unicodedata
 
 rendered_path, installed_path, launchd_dir, home = sys.argv[1:5]
+retired = set(sys.argv[5].split()) if len(sys.argv) > 5 else set()
 BASE = "Claude" + " Code-credentials"  # the agent CLI's keychain service base name
 CONFIG = "CLAUDE_CONFIG_DIR"
 SECURE = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
@@ -284,11 +313,13 @@ for path in sorted(glob.glob(os.path.join(launchd_dir, "com.whatsoup.*.plist")))
     name = os.path.basename(path)
     if name == "com.whatsoup.harness-maintenance.plist":
         continue
+    stem = name[len("com.whatsoup."):-len(".plist")]
+    if stem in retired:
+        continue  # a retired job's leftover: check_retired_surfaces reports it; never opened here
     try:
         other_plist = load(path)
     except Exception:
         drift(f"{name} could not be read to establish whether it is an instance")
-    stem = name[len("com.whatsoup."):-len(".plist")]
     args = other_plist.get("ProgramArguments") if isinstance(other_plist, dict) else None
     if not isinstance(other_plist, dict) or other_plist.get("Label") != f"com.whatsoup.{stem}" or not isinstance(args, list) or len(args) < 2 or args[1] != stem:
         continue
@@ -336,7 +367,7 @@ discover_instances() {
     stem="${stem#com.whatsoup.}"
     case "$stem" in *-watchdog) continue ;; esac
     known=0
-    for k in "${NON_INSTANCE_STEMS[@]}"; do
+    for k in "${NON_INSTANCE_STEMS[@]}" ${UNOWNED_RETIRED_STEMS[@]+"${UNOWNED_RETIRED_STEMS[@]}"}; do
       if [ "$stem" = "$k" ]; then known=1; fi
     done
     if [ "$known" -eq 1 ]; then continue; fi
@@ -403,21 +434,20 @@ check_watchdog_script() { # BOT
   fi
 }
 
-check_ms365_script() {
-  local script="$BIN_DIR/ms365-token-backup"
-  if [ ! -f "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist" ]; then
-    return 0 # host does not run this surface; plist skip already reported
-  fi
-  if [ ! -x "$script" ]; then
-    echo "missing installed ms365-token-backup script: $script" >&2
-    failures=$((failures + 1)); return 0
-  fi
-  if grep -qE '__[A-Z][A-Z_]*__' "$script"; then
-    echo "drift: ms365-token-backup script has surviving placeholders" >&2
-    failures=$((failures + 1))
-  else
-    echo "ok: ms365-token-backup script (no surviving placeholders)"
-  fi
+check_retired_surfaces() { # a retired job's leftover files are drift; contents are never read or printed
+  local stem plist script
+  for stem in ${UNOWNED_RETIRED_STEMS[@]+"${UNOWNED_RETIRED_STEMS[@]}"}; do
+    plist="$LAUNCHD_DIR/com.whatsoup.$stem.plist"
+    script="$BIN_DIR/$stem"
+    if [ -e "$plist" ] || [ -L "$plist" ]; then
+      echo "retired: $stem plist is installed (retired from the standard; boot the job out if it is loaded, then remove $plist)" >&2
+      failures=$((failures + 1))
+    fi
+    if [ -e "$script" ] || [ -L "$script" ]; then
+      echo "retired: $stem script is installed (retired from the standard; remove $script)" >&2
+      failures=$((failures + 1))
+    fi
+  done
 }
 
 check_j1_collector_script() { # optional surface; when its plist is installed the wrapper must be a readable regular
@@ -484,6 +514,7 @@ warn_unmanaged_collector_jobs() { # any OTHER LaunchAgent that runs the J1 colle
   for f in "$LAUNCHD_DIR"/*.plist; do
     [ -e "$f" ] || continue
     case "$(basename "$f")" in com.whatsoup.bot-errors-j1-collector.plist) continue ;; esac
+    if is_unowned_retired_plist "$f"; then continue; fi # the retired job's own plist: check_retired_surfaces reports it
     if grep -q 'bot_errors_j1_collector' "$f" 2>/dev/null; then
       label="$(basename "$f" .plist)"
       echo "warn: unmanaged collector job: $label (runs bot_errors_j1_collector outside the managed label; boot it out before installing com.whatsoup.bot-errors-j1-collector)"
@@ -573,7 +604,7 @@ warn_unknown_surfaces() { # reported, NOT counted as drift in v1 (calibrate befo
     stem="$(basename "$f" .plist)"
     stem="${stem#com.whatsoup.}"
     covered=0
-    for k in "${NON_INSTANCE_STEMS[@]}"; do
+    for k in "${NON_INSTANCE_STEMS[@]}" ${UNOWNED_RETIRED_STEMS[@]+"${UNOWNED_RETIRED_STEMS[@]}"}; do
       if [ "$stem" = "$k" ]; then covered=1; fi
     done
     for k in ${ALL_INSTANCES[@]+"${ALL_INSTANCES[@]}"}; do
@@ -589,8 +620,7 @@ warn_unknown_surfaces() { # reported, NOT counted as drift in v1 (calibrate befo
 # --- main ---
 check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-maintenance.plist" "$LAUNCHD_DIR/com.whatsoup.harness-maintenance.plist"
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
-check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
-check_ms365_script
+check_retired_surfaces
 check_optional_template_surface "bot-errors-j1-collector" "deploy/templates/com.whatsoup.bot-errors-j1-collector.plist" "$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist"
 check_j1_collector_script
 warn_unmanaged_collector_jobs

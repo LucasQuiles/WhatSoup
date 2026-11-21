@@ -71,6 +71,15 @@ const HOST_TIMER_LABELS = new Set(['com.whatsoup.harness-maintenance', 'com.what
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const INTERPRETER = /^(?:ba|z|da|k|fi)?sh$|^(?:env|node|nodejs|osascript|perl|ruby)$|^python(?:\d+(?:\.\d+)*)?$/;
 const PYTHON_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/;
+/**
+ * WhatSoup launchd jobs retired from the standard, each with the home-relative script it ran: no manifest entry; the
+ * templates stay tracked until they can be deleted and are excluded from release exports
+ * (docs/releases/2026-11-20-token-backup-job-retired.md). Planning refuses a host that still has one
+ * installed or loaded, by name and with the files to remove; it never loads, reloads or counts one as a member.
+ */
+const RETIRED_JOBS: ReadonlyMap<string, string> = new Map([
+  ['com.whatsoup.ms365-token-backup', path.join('.local', 'bin', 'ms365-token-backup')],
+]);
 
 function absolute(value: unknown): string | null {
   return typeof value === 'string' && path.isAbsolute(value) ? path.normalize(value).replace(/\/+$/, '') || '/' : null;
@@ -611,6 +620,26 @@ export async function buildHostUnitPlan(
   })();
   const unionLabels = new Set([...installedLabels, ...(inventory ?? []).map((entry) => entry.label)]);
   for (const label of unionLabels) {
+    const retiredScript = RETIRED_JOBS.get(label);
+    // A configured instance owns its name (a regular config.json under the instance-config root): it is checked as an
+    // instance below, never as the retired job.
+    if (retiredScript !== undefined && !isRegularFile(path.join(configRoot(), label.slice('com.whatsoup.'.length), 'config.json'))) {
+      const canonicalPlist = path.join(launchAgentsDir, `${label}.plist`);
+      const isLoaded = inventory?.some((entry) => entry.label === label) === true;
+      // A file with the retired file name whose own Label is another job is not the retired job's file.
+      const canonicalLabel = (() => { try { return parsePlist(readFileSync(canonicalPlist, 'utf8'))?.label ?? null; } catch { return null; } })();
+      const canonicalIsOther = canonicalLabel !== null && canonicalLabel !== label;
+      if (isLoaded || !canonicalIsOther) {
+        // launchd may have loaded the job from another plist; that file is the one that can load it again.
+        const loadedFrom = isLoaded ? (await loadedJobDefinition(host, domain, label))?.path ?? null : null;
+        const present = (file: string): boolean => { try { lstatSync(file); return true; } catch { return false; } };
+        const remove = [...(loadedFrom !== null && loadedFrom !== canonicalPlist ? [loadedFrom] : []), ...[...(canonicalIsOther ? [] : [canonicalPlist]), path.join(os.homedir(), retiredScript)].filter(present)];
+        const bootOut = !isLoaded ? '' : loadedFrom === null ? 'boot the job out' : `boot the job out (loaded from ${loadedFrom})`;
+        const removal = remove.length > 0 ? `remove ${remove.join(' and ')}` : 'no plist or script is left to remove';
+        check(`retired:${label}`, false, `retired from the standard; ${[bootOut, removal].filter((part) => part !== '').join(remove.length > 0 ? ', then ' : '; ')}`);
+        continue;
+      }
+    }
     // Each closed host auxiliary obtains its own exact loaded definition below:
     // the standard inventory intentionally filters external labels.
     if (declaration.hostAuxiliaries.some((auxiliary) => auxiliary.label === label) || declaration.outsideUnits.some((outsideUnit) => outsideUnit.label === label)) continue;

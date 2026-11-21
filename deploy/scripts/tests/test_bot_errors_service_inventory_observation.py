@@ -345,3 +345,120 @@ def test_inventory_fail_line_exposes_only_status_backend_count_freshness(
     assert "backend=" in line
     assert "count=" in line
     assert "observed_age_s=" in line
+
+
+# ---------------------------------------------------------------------------
+# Retired launchd jobs -- a loaded one is a finding of its own
+# ---------------------------------------------------------------------------
+
+# Retired from the standard (docs/releases/2026-11-20-token-backup-job-retired.md).
+_RETIRED = "ms365-token-backup"
+
+
+@pytest.mark.parametrize("pid", ["-", "4242"])
+def test_loaded_retired_launchd_job_is_a_retired_finding(monkeypatch, tmp_path, pid):
+    """A retired job is reported idle or running, and never as an undeclared instance.
+
+    It ran on a daily calendar for seconds, so its normal loaded state is idle
+    (pid "-"); a reader that sees only running jobs would almost always miss
+    it. Other idle jobs stay unreported, as before.
+    """
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM", "darwin")
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM_RELEASE", "6.8.0-generic")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES", raising=False)
+    # Ownership is read from the production instance-config root; keep it empty.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    module = _load(f"bot_errors_health_check_retired_{pid}", _SCRIPT)
+    stdout = f"{pid}\t0\tcom.whatsoup.{_RETIRED}\n-\t0\tcom.whatsoup.idle-instance\n"
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path, set())
+    assert lines == [
+        f"FAIL retired_service {_RETIRED}: retired job is loaded "
+        f"service=com.whatsoup.{_RETIRED} remediation=boot_out_then_remove_plist_and_script"
+    ], lines
+
+
+def test_instance_with_the_retired_name_is_never_the_retired_job(backend_env, tmp_path):
+    """The finding is for the launchd job only: a systemd unit of that name, or
+    any unit whose name a configured instance owns, is an instance and keeps the
+    ordinary coverage path (declared: no line)."""
+    (tmp_path / _RETIRED).mkdir()
+    (tmp_path / _RETIRED / "config.json").write_text("{}", encoding="utf-8")
+    if backend_env["platform"] == "darwin":
+        stdout = f"4242\t0\tcom.whatsoup.{_RETIRED}\n"
+    else:
+        stdout = f"whatsoup@{_RETIRED}.service loaded active running WhatSoup\n"
+    module = backend_env["module"]
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path, {_RETIRED})
+    assert lines == [], lines
+
+
+def _darwin_module(monkeypatch, tmp_path, tag):
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM", "darwin")
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM_RELEASE", "6.8.0-generic")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    return _load(f"bot_errors_health_check_retired_{tag}", _SCRIPT)
+
+
+def _xdg_instance_dir(tmp_path):
+    folder = tmp_path / "xdg" / "whatsoup" / "instances" / _RETIRED
+    folder.mkdir(parents=True)
+    return folder
+
+
+def test_declared_instance_with_the_retired_name_is_never_the_retired_job(monkeypatch, tmp_path):
+    """A name the health profile declares is an instance, with or without a config."""
+    module = _darwin_module(monkeypatch, tmp_path, "declared")
+    stdout = f"-\t0\tcom.whatsoup.{_RETIRED}\n"
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path / "root", {_RETIRED})
+    assert lines == [], lines
+
+
+def test_ownership_is_read_from_the_xdg_instance_config_root(monkeypatch, tmp_path):
+    """Ownership comes from the production root selection (XDG_CONFIG_HOME, as
+    the drift check and host activation read it), not the root argument."""
+    module = _darwin_module(monkeypatch, tmp_path, "xdg_owned")
+    (_xdg_instance_dir(tmp_path) / "config.json").write_text("{}", encoding="utf-8")
+    stdout = f"4242\t0\tcom.whatsoup.{_RETIRED}\n"
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path / "root", set())
+    assert lines == [
+        f"FAIL profile_coverage_service {_RETIRED}: active service not declared "
+        f"in health profile service=com.whatsoup.{_RETIRED} config_exists=False"
+    ], lines
+
+
+def test_a_directory_named_config_json_is_not_ownership(monkeypatch, tmp_path):
+    """Only a regular config.json file proves an instance owns the name."""
+    module = _darwin_module(monkeypatch, tmp_path, "dir_config")
+    (_xdg_instance_dir(tmp_path) / "config.json").mkdir()
+    (tmp_path / "root" / _RETIRED / "config.json").mkdir(parents=True)
+    stdout = f"-\t0\tcom.whatsoup.{_RETIRED}\n"
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path / "root", set())
+    assert lines == [
+        f"FAIL retired_service {_RETIRED}: retired job is loaded "
+        f"service=com.whatsoup.{_RETIRED} remediation=boot_out_then_remove_plist_and_script"
+    ], lines
+
+
+def test_systemd_unit_with_the_retired_name_is_an_ordinary_service(monkeypatch, tmp_path):
+    """Without a config, a systemd unit of that name is still not the retired
+    launchd job: it gets the ordinary undeclared-service line."""
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM", "linux")
+    monkeypatch.setenv("BOT_ERRORS_DRY_PLATFORM_RELEASE", "6.8.0-generic")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES", raising=False)
+    module = _load("bot_errors_health_check_retired_systemd", _SCRIPT)
+    stdout = f"whatsoup@{_RETIRED}.service loaded active running WhatSoup\n"
+    with patch("subprocess.run", lambda argv, **kw: _FakeProc(stdout, 0)):
+        lines = module.unprofiled_service_inventory(tmp_path, set())
+    assert lines == [
+        f"FAIL profile_coverage_service {_RETIRED}: active service not declared "
+        f"in health profile service=com.whatsoup.{_RETIRED} config_exists=False"
+    ], lines

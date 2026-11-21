@@ -61,6 +61,32 @@ describe('deploy/managed-components.json protective services registry', () => {
   );
 });
 
+describe('retired token backup job templates', () => {
+  // Still tracked until they can be deleted (docs/releases/2026-11-20-token-backup-job-retired.md). Nothing under
+  // deploy/ (setup, deploy scripts, the managed components) may point at them again.
+  const retired = ['com.whatsoup.ms365-token-backup.plist', 'ms365-token-backup.sh'];
+  const templateFiles = new Set(retired.map((name) => path.join(repoRoot, 'deploy', 'templates', name)));
+
+  function deployFiles(dir: string): string[] {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return entry.name === 'node_modules' || entry.name === '__pycache__' ? [] : deployFiles(full);
+      return entry.isFile() && !templateFiles.has(full) ? [full] : [];
+    });
+  }
+
+  it('no setup step, deploy script or managed component references either template', () => {
+    const files = deployFiles(path.join(repoRoot, 'deploy'));
+    expect(files).toContain(path.join(repoRoot, 'deploy', 'setup.sh'));
+    expect(files).toContain(registryPath);
+    const hits = files.filter((file) => {
+      const text = fs.readFileSync(file, 'latin1');
+      return retired.some((name) => text.includes(name));
+    }).map((file) => path.relative(repoRoot, file));
+    expect(hits).toEqual([]);
+  });
+});
+
 describe('deploy/managed-components.json npm section', () => {
   it('npmrc path points at a real repo file (read at runtime by harness-maintenance.sh)', () => {
     expect(registry.npm?.npmrc, 'npm.npmrc is missing from the registry').toBeTruthy();

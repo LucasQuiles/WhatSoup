@@ -213,20 +213,6 @@
         "probe": "launchctl print gui/$(id -u)/com.whatsoup.release-drift-check"
       },
       {
-        "name": "ms365-token-backup",
-        "label_pattern": "com.whatsoup.ms365-token-backup",
-        "template": "deploy/templates/com.whatsoup.ms365-token-backup.plist",
-        "script_template": "deploy/templates/ms365-token-backup.sh",
-        "install_path": "~/Library/LaunchAgents/com.whatsoup.ms365-token-backup.plist",
-        "script_install_path": "~/.local/bin/ms365-token-backup",
-        "schedule": "StartCalendarInterval 03:00 daily",
-        "run_at_load": true,
-        "keep_alive": false,
-        "purpose": "Backs up ~/.ms365-mcp/token-cache.json and selected-account.json daily, retaining 14 copies. Allows token recovery after accidental deletion or plugin upgrade that clears the token store.",
-        "applicable_hosts": "Hosts running M365 MCP bots (ml-bot/mini8, ew-bot/mini9 and any future M365-integrated bots).",
-        "probe": "ls -lt ~/.ms365-mcp-backups/ | head -5"
-      },
-      {
         "name": "bot-errors-j1-collector",
         "label_pattern": "com.whatsoup.bot-errors-j1-collector",
         "template": "deploy/templates/com.whatsoup.bot-errors-j1-collector.plist",

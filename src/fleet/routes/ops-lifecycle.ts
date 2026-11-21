@@ -32,6 +32,7 @@ import { privateWriteError, writePrivateFileSync } from '../../lib/private-fs.ts
 import { errorMessage } from '../../lib/error-message.ts';
 import { projectError, validationError, mutationError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
+import { reservedInstanceNameReason } from '../instance-name.ts';
 import { writeInitialDatabaseCreateMarker } from '../../core/initial-database-marker.ts';
 import {
   defaultAgentOptions,
@@ -265,6 +266,11 @@ export async function handleCreateLine(
     || name.length > NAME_MAX_LENGTH
   ) {
     jsonResponse(res, 400, { error: 'name must be 2-30 lowercase alphanumeric/hyphens, starting with a letter' });
+    return;
+  }
+  const reserved = reservedInstanceNameReason(name);
+  if (reserved !== null) {
+    jsonResponse(res, 400, { error: `name '${name}' is reserved: ${reserved}` });
     return;
   }
 
