@@ -476,8 +476,8 @@ describe('ConfigStep — real React handler wiring', () => {
       const patch = onChange.mock.calls
         .map(([arg]) => arg as Record<string, unknown>)
         .find((arg) => Object.hasOwn(arg, 'toolUpdateMode'))
-      expect(patch).toBeDefined()
-      expect(patch?.toolUpdateMode).toBeUndefined()
+      // toStrictEqual keeps the explicit undefined key that clears the saved mode; toEqual would accept {}.
+      expect(patch).toStrictEqual({ toolUpdateMode: undefined })
     })
 
     it('writes full updates only when the operator selects them', () => {
