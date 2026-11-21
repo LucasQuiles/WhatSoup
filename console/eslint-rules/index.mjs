@@ -218,6 +218,9 @@ const noBrandRegression = {
 
       // (b) Literal in JSX attribute position
       'JSXAttribute > Literal'(node) {
+        // Repository link targets preserve the source identifier, not UI branding.
+        if (node.parent.name.name === 'href' && typeof node.value === 'string' &&
+            /^https:\/\/github\.com\/LucasQuiles\/WhatSoup(?:[/?#][^\s]*)?$/.test(node.value)) return
         checkStringValue(node, node.value, 'jsxAttr')
       },
 
