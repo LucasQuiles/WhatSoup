@@ -7,14 +7,22 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+from hypothesis import example, given, strategies as st
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from bot_errors_property_support import properties  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.incident_authority import (
+from lib.incident_authority import (  # noqa: E402
     AuthorityConflict,
     AuthorityNotReady,
     AuthorityProtocolError,
@@ -69,20 +77,33 @@ class _Connection:
         return
 
 
-@pytest.fixture
-def private_credential_root() -> Iterator[Path]:
+@contextmanager
+def _private_credential_root() -> Iterator[Path]:
+    # The credential reader opens every parent without following a link and
+    # requires each to be private to the user, so this folder sits under the
+    # home folder, not the system temporary folder.
     with TemporaryDirectory(prefix="whatsoup-incident-authority-", dir=Path.home()) as directory:
         root = Path(directory)
         root.chmod(0o700)
         yield root
 
 
-@pytest.fixture
-def credential(private_credential_root: Path) -> Path:
-    path = private_credential_root / "incident-authority.credential"
+def _write_credential(root: Path) -> Path:
+    path = root / "incident-authority.credential"
     path.write_text("narrow-secret\n", encoding="utf-8")
     path.chmod(0o600)
     return path
+
+
+@pytest.fixture
+def private_credential_root() -> Iterator[Path]:
+    with _private_credential_root() as root:
+        yield root
+
+
+@pytest.fixture
+def credential(private_credential_root: Path) -> Path:
+    return _write_credential(private_credential_root)
 
 
 def _client(response, credential):
@@ -301,25 +322,38 @@ def test_store_and_transport_failures_are_not_ready(credential: Path):
         client.accept(CLAIM)
 
 
-@pytest.mark.parametrize(
-    ("status_code", "reason"),
-    [
-        (401, "authority_credential_rejected"),
-        (403, "authority_scope_denied"),
-        (429, "incident_authority_rate_limited"),
-        (503, "incident_authority_unavailable"),
-    ],
+# Every status that is a refusal or an outage, with the reason it raises.
+# Every 5xx status is an outage.
+_REFUSAL_STATUSES = st.one_of(
+    st.sampled_from(
+        (
+            (401, "authority_credential_rejected"),
+            (403, "authority_scope_denied"),
+            (429, "incident_authority_rate_limited"),
+        )
+    ),
+    st.integers(min_value=500, max_value=599).map(lambda code: (code, "incident_authority_unavailable")),
 )
-def test_an_oversized_refusal_is_classified_by_its_status(credential: Path, status_code, reason):
+
+
+@properties
+@given(refusal=_REFUSAL_STATUSES)
+@example(refusal=(401, "authority_credential_rejected"))
+@example(refusal=(403, "authority_scope_denied"))
+@example(refusal=(429, "incident_authority_rate_limited"))
+@example(refusal=(503, "incident_authority_unavailable"))
+def test_an_oversized_refusal_is_classified_by_its_status(refusal):
+    status_code, reason = refusal
     # A proxy's large error page must not turn a refusal or an outage into a
     # protocol error: the status decides before the body size does.
     oversized = b"x" * (16 * 1024 + 1)
-    client, _ = _client(
-        lambda _body, code=status_code: (code, {"Content-Type": "text/html"}, oversized),
-        credential,
-    )
-    with pytest.raises(AuthorityNotReady, match=rf"^{reason}$"):
-        client.accept(CLAIM)
+    with _private_credential_root() as root:
+        client, _ = _client(
+            lambda _body, code=status_code: (code, {"Content-Type": "text/html"}, oversized),
+            _write_credential(root),
+        )
+        with pytest.raises(AuthorityNotReady, match=rf"^{reason}$"):
+            client.accept(CLAIM)
 
 
 class _SlowConnection:
@@ -398,20 +432,41 @@ def _authority_lib():
     return authority
 
 
-@pytest.mark.parametrize(
-    ("value", "mode", "warned"),
-    [
-        (None, "observe", False),
-        ("", "observe", False),
-        ("   ", "observe", False),
-        ("observe", "observe", False),
-        ("enforce", "enforce", False),
-        (" enforce\n", "enforce", False),
-        ("Enforce", "observe", True),
-        ("on", "observe", True),
-    ],
-)
-def test_the_mode_reader_defaults_to_observe(value, mode, warned):
+def _documented_mode(value: str | None) -> tuple[str | None, str, bool]:
+    # The reader's documented rule: after trimming white space, exactly
+    # "observe" or "enforce" is that mode; absent or empty is observe; any
+    # other value is observe with one warning.
+    trimmed = (value or "").strip()
+    if trimmed in ("observe", "enforce"):
+        return value, trimmed, False
+    return value, "observe", bool(trimmed)
+
+
+_PADDING = st.sampled_from(("", " ", "\t", "\n", " \r\n"))
+_MODE_SETTINGS = st.one_of(
+    st.none(),
+    st.text(max_size=16),
+    st.builds(
+        lambda before, word, after: before + word + after,
+        _PADDING,
+        st.sampled_from(("observe", "enforce", "Enforce", "OBSERVE", "enforced", "on", "off")),
+        _PADDING,
+    ),
+).map(_documented_mode)
+
+
+@properties
+@given(setting=_MODE_SETTINGS)
+@example(setting=(None, "observe", False))
+@example(setting=("", "observe", False))
+@example(setting=("   ", "observe", False))
+@example(setting=("observe", "observe", False))
+@example(setting=("enforce", "enforce", False))
+@example(setting=(" enforce\n", "enforce", False))
+@example(setting=("Enforce", "observe", True))
+@example(setting=("on", "observe", True))
+def test_the_mode_reader_defaults_to_observe(setting):
+    value, mode, warned = setting
     authority = _authority_lib()
     environ = {} if value is None else {authority.AUTHORITY_MODE_SETTING: value}
     warnings: list[str] = []
@@ -420,40 +475,47 @@ def test_the_mode_reader_defaults_to_observe(value, mode, warned):
     assert authority.AUTHORITY_MODE_SETTING == "BOT_ERRORS_INCIDENT_AUTHORITY_MODE"
 
 
-@pytest.mark.parametrize(
-    ("error", "outcome", "reason"),
-    [
-        (None, "granted", "none"),
-        ("conflict", "refused", "incident_authority_identity_conflict"),
-        ("credential_rejected", "refused", "authority_credential_rejected"),
-        ("scope_denied", "refused", "authority_scope_denied"),
-        ("rate_limited", "not_ready", "incident_authority_rate_limited"),
-        ("unavailable", "not_ready", "incident_authority_unavailable"),
-        ("credential_unreadable", "not_ready", "authority_credential_unreadable"),
-        ("not_configured", "not_configured", "incident_authority_not_configured"),
-        ("receipt", "protocol_error", "authority_receipt_malformed"),
-        ("type_error", "protocol_error", "authority_client_error"),
-        ("os_error", "protocol_error", "authority_client_error"),
-        ("free_text", "protocol_error", "authority_client_error"),
-    ],
+def _never_a_code(text: str) -> str:
+    # A space is outside every reason code, so this text must never reach a record.
+    return f"{text} x"
+
+
+_ANY_TEXT = st.text(max_size=24)
+_FREE_TEXT = _ANY_TEXT.map(_never_a_code)
+# Any answer, as (error, outcome, reason): free text in a reason-carrying error,
+# any message on an error whose class alone decides, and any exception the
+# client did not classify.
+_AUTHORITY_ANSWERS = st.one_of(
+    _FREE_TEXT.map(lambda text: (AuthorityProtocolError(text), "protocol_error", "authority_client_error")),
+    _FREE_TEXT.map(lambda text: (AuthorityNotReady(text), "not_ready", "authority_client_error")),
+    _ANY_TEXT.map(lambda text: (AuthorityConflict(text), "refused", "incident_authority_identity_conflict")),
+    _ANY_TEXT.map(lambda text: (AuthorityUnavailable(text), "not_ready", "incident_authority_unavailable")),
+    st.builds(
+        lambda error_type, text: (error_type(text), "protocol_error", "authority_client_error"),
+        st.sampled_from((TypeError, ValueError, KeyError, OSError, RuntimeError, LookupError)),
+        _ANY_TEXT,
+    ),
 )
-def test_outcomes_are_classified_into_closed_codes(error, outcome, reason):
-    errors = {
-        None: None,
-        "conflict": AuthorityConflict("incident_authority_identity_conflict"),
-        "credential_rejected": AuthorityNotReady("authority_credential_rejected"),
-        "scope_denied": AuthorityNotReady("authority_scope_denied"),
-        "rate_limited": AuthorityNotReady("incident_authority_rate_limited"),
-        "unavailable": AuthorityNotReady("incident_authority_unavailable"),
-        "credential_unreadable": AuthorityNotReady("authority_credential_unreadable"),
-        "not_configured": AuthorityNotReady("incident_authority_not_configured"),
-        "receipt": AuthorityProtocolError("authority_receipt_malformed"),
-        "type_error": TypeError("unhashable type: 'list'"),
-        "os_error": OSError("read failed on /private/path"),
-        "free_text": AuthorityProtocolError("contains a path /private/state and spaces"),
-    }
+
+
+@properties
+@given(answer=_AUTHORITY_ANSWERS)
+@example(answer=(None, "granted", "none"))
+@example(answer=(AuthorityConflict("incident_authority_identity_conflict"), "refused", "incident_authority_identity_conflict"))
+@example(answer=(AuthorityNotReady("authority_credential_rejected"), "refused", "authority_credential_rejected"))
+@example(answer=(AuthorityNotReady("authority_scope_denied"), "refused", "authority_scope_denied"))
+@example(answer=(AuthorityNotReady("incident_authority_rate_limited"), "not_ready", "incident_authority_rate_limited"))
+@example(answer=(AuthorityNotReady("incident_authority_unavailable"), "not_ready", "incident_authority_unavailable"))
+@example(answer=(AuthorityNotReady("authority_credential_unreadable"), "not_ready", "authority_credential_unreadable"))
+@example(answer=(AuthorityNotReady("incident_authority_not_configured"), "not_configured", "incident_authority_not_configured"))
+@example(answer=(AuthorityProtocolError("authority_receipt_malformed"), "protocol_error", "authority_receipt_malformed"))
+@example(answer=(TypeError("unhashable type: 'list'"), "protocol_error", "authority_client_error"))
+@example(answer=(OSError("read failed on /private/path"), "protocol_error", "authority_client_error"))
+@example(answer=(AuthorityProtocolError("contains a path /private/state and spaces"), "protocol_error", "authority_client_error"))
+def test_outcomes_are_classified_into_closed_codes(answer):
+    error, outcome, reason = answer
     authority = _authority_lib()
-    assert authority.classify_authority_outcome(errors[error]) == (outcome, reason)
+    assert authority.classify_authority_outcome(error) == (outcome, reason)
 
 
 def test_the_outcome_record_carries_only_closed_fields():

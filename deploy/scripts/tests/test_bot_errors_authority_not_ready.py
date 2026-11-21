@@ -20,12 +20,21 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import pytest
+from hypothesis import example, given, strategies as st
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from bot_errors_property_support import private_case, properties  # noqa: E402
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
 _DISPATCHER = _SCRIPTS / "bot-errors-dispatcher.py"
@@ -63,12 +72,21 @@ def _clean_env():
             os.environ[k] = v
 
 
-@pytest.fixture
-def credential_root():
-    # The credential reader requires every parent to be private to the user.
+@contextmanager
+def _private_credential_root():
+    # The credential reader opens every parent without following a link and
+    # requires each to be private to the user, so this folder sits under the
+    # home folder, not the system temporary folder (reached through a link on
+    # some hosts).
     with TemporaryDirectory(prefix="whatsoup-authority-not-ready-", dir=Path.home()) as directory:
         root = Path(directory)
         root.chmod(0o700)
+        yield root
+
+
+@pytest.fixture
+def credential_root():
+    with _private_credential_root() as root:
         yield root
 
 
@@ -185,56 +203,68 @@ def _assert_held_in_outbox(paths, reason: str, count: int = 1) -> None:
         assert delivery.get("nextAttemptAtEpoch", 0) > int(time.time()) - 5
 
 
-@pytest.mark.parametrize(
-    "case,reason",
-    [
-        ("not_configured", "incident_authority_not_configured"),
-        ("credential_missing", "authority_credential_unreadable"),
-        ("credential_rejected", "authority_credential_rejected"),
-        ("scope_denied", "authority_scope_denied"),
-        ("rate_limited", "incident_authority_rate_limited"),
-        ("store_unavailable", "incident_authority_unavailable"),
-    ],
+# Each not-ready cause: the reason it records and the HTTP status the authority
+# answers with (None: no request is made). Every 5xx status is an outage.
+_NOT_READY_CASES = st.one_of(
+    st.sampled_from(
+        (
+            ("not_configured", "incident_authority_not_configured", None),
+            ("credential_missing", "authority_credential_unreadable", None),
+            ("credential_rejected", "authority_credential_rejected", 401),
+            ("scope_denied", "authority_scope_denied", 403),
+            ("rate_limited", "incident_authority_rate_limited", 429),
+        )
+    ),
+    st.integers(min_value=500, max_value=599).map(
+        lambda status: ("store_unavailable", "incident_authority_unavailable", status)
+    ),
 )
-def test_authority_not_ready_keeps_the_event_in_the_outbox(tmp_path, credential_root, case, reason):
+
+
+@properties
+@given(not_ready=_NOT_READY_CASES)
+@example(not_ready=("not_configured", "incident_authority_not_configured", None))
+@example(not_ready=("credential_missing", "authority_credential_unreadable", None))
+@example(not_ready=("credential_rejected", "authority_credential_rejected", 401))
+@example(not_ready=("scope_denied", "authority_scope_denied", 403))
+@example(not_ready=("rate_limited", "incident_authority_rate_limited", 429))
+@example(not_ready=("store_unavailable", "incident_authority_unavailable", 503))
+def test_authority_not_ready_keeps_the_event_in_the_outbox(not_ready):
+    case, reason, status = not_ready
     # With a cap of one attempt, any reason that counted as an attempt would
     # dead-letter the event on the first refusal.
     os.environ["BOT_ERRORS_INCIDENT_AUTHORITY_MAX_ATTEMPTS"] = "1"
-    mod = _load(tmp_path / f"not-ready-{case}")
-    paths = mod.setup_dirs()
-    event = _event(f"evt-not-ready-{case}")
-    _open_incident(mod, paths, event)
-    queued = _seed_outbox(paths, event)
-    env: dict[str, str] = {}
-    requests: list = []
-    client = mod.IncidentAuthorityClient
-    if case == "credential_missing":
-        env = {
-            "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _LOOPBACK_AUTHORITY,
-            "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(credential_root / "not-enrolled"),
-        }
-    elif case != "not_configured":
-        status = {
-            "credential_rejected": 401,
-            "scope_denied": 403,
-            "rate_limited": 429,
-            "store_unavailable": 503,
-        }[case]
-        env = {
-            "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _LOOPBACK_AUTHORITY,
-            "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(_write_credential(credential_root)),
-        }
-        client = _authority_answering(mod, status, requests)
-    calls: list = []
+    # The credential folder is made before private_case() moves HOME.
+    with _private_credential_root() as credential_root, private_case() as (root, _patch):
+        mod = _load(root / "state")
+        paths = mod.setup_dirs()
+        event = _event(f"evt-not-ready-{case}")
+        _open_incident(mod, paths, event)
+        queued = _seed_outbox(paths, event)
+        env: dict[str, str] = {}
+        requests: list = []
+        client = mod.IncidentAuthorityClient
+        if case == "credential_missing":
+            env = {
+                "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _LOOPBACK_AUTHORITY,
+                "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(credential_root / "not-enrolled"),
+            }
+        elif case != "not_configured":
+            env = {
+                "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _LOOPBACK_AUTHORITY,
+                "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(_write_credential(credential_root)),
+            }
+            client = _authority_answering(mod, status, requests)
+        calls: list = []
 
-    with patch.dict(os.environ, env), patch.object(mod, "IncidentAuthorityClient", client), patch.object(
-        mod, "send_whatsapp", side_effect=lambda *args, **_kwargs: calls.append(args)
-    ):
-        result = mod.process_one(queued, paths)
+        with patch.dict(os.environ, env), patch.object(mod, "IncidentAuthorityClient", client), patch.object(
+            mod, "send_whatsapp", side_effect=lambda *args, **_kwargs: calls.append(args)
+        ):
+            result = mod.process_one(queued, paths)
 
-    assert result == (False, "incident_authority_not_ready")
-    assert calls == [], "a not-ready authority must stop the send"
-    _assert_held_in_outbox(paths, reason)
+        assert result == (False, "incident_authority_not_ready")
+        assert calls == [], "a not-ready authority must stop the send"
+        _assert_held_in_outbox(paths, reason)
 
 
 def test_a_malformed_authority_reply_stays_terminal(tmp_path, credential_root):
@@ -424,16 +454,26 @@ def _derived_events(mod) -> dict[str, dict]:
     }
 
 
-@pytest.mark.parametrize("kind", ["flap_storm", "flap_resolve", "stale_renotify", "autoclose_digest"])
-def test_a_derived_notice_without_a_grant_never_reaches_transport(tmp_path, kind):
-    mod = _load(tmp_path / f"derived-{kind}")
-    mod.setup_dirs()
-    event = _derived_events(mod)[kind]
-    calls: list = []
-    with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **_k: calls.append(a)):
-        with pytest.raises(mod.AuthorityUnavailable):
-            mod.send_authorized_whatsapp(event, mod.format_event(event))
-    assert calls == [], f"the {kind} notice reached the transport without a grant"
+# Every notice the dispatcher derives inside a pass, as _derived_events builds them.
+_DERIVED_KINDS = ("flap_storm", "flap_resolve", "stale_renotify", "autoclose_digest")
+
+
+@properties
+@given(kind=st.sampled_from(_DERIVED_KINDS))
+@example(kind="flap_storm")
+@example(kind="flap_resolve")
+@example(kind="stale_renotify")
+@example(kind="autoclose_digest")
+def test_a_derived_notice_without_a_grant_never_reaches_transport(kind):
+    with private_case() as (root, _patch):
+        mod = _load(root / "state")
+        mod.setup_dirs()
+        event = _derived_events(mod)[kind]
+        calls: list = []
+        with patch.object(mod, "send_whatsapp", side_effect=lambda *a, **_k: calls.append(a)):
+            with pytest.raises(mod.AuthorityUnavailable):
+                mod.send_authorized_whatsapp(event, mod.format_event(event))
+        assert calls == [], f"the {kind} notice reached the transport without a grant"
 
 
 def test_a_credential_meta_alert_without_a_grant_sends_nothing(tmp_path):

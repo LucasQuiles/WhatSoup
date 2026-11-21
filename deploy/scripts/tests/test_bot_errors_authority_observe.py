@@ -25,6 +25,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from hypothesis import example, given, strategies as st
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from bot_errors_property_support import private_case, properties  # noqa: E402
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS) not in sys.path:
@@ -470,23 +477,33 @@ def _derived_events(mod) -> dict[str, dict]:
     }
 
 
+# Every notice the dispatcher derives inside a pass, as _derived_events builds them.
+_DERIVED_KINDS = ("flap_storm", "flap_resolve", "stale_renotify", "autoclose_digest")
+
+
 @pytest.mark.parametrize("outcome", OUTCOME_NAMES)
-@pytest.mark.parametrize("kind", ["flap_storm", "flap_resolve", "stale_renotify", "autoclose_digest"])
-def test_observe_sends_every_derived_notice(tmp_path, kind, outcome):
-    mod = _load_dispatcher(tmp_path / f"derived-{kind}-{outcome}")
-    paths = mod.setup_dirs()
-    event = _derived_events(mod)[kind]
-    text = mod.format_event(event)
-    messages: list = []
-    calls: list = []
-    with patch.object(mod, "_request_incident_authority", _answering(outcome, calls)), patch.object(
-        mod, "send_whatsapp", side_effect=lambda sent, *_a, **_k: messages.append(sent)
-    ):
-        mod.begin_incident_authority_cycle()
-        mod.send_authorized_whatsapp(event, text)
-    assert messages == [text], f"the {kind} notice must be sent whatever the authority answers"
-    assert len(calls) == 1
-    assert _dispatcher_records(mod, paths)[-1]["outcome"] == OUTCOMES[outcome][1]
+@properties
+@given(kind=st.sampled_from(_DERIVED_KINDS))
+@example(kind="flap_storm")
+@example(kind="flap_resolve")
+@example(kind="stale_renotify")
+@example(kind="autoclose_digest")
+def test_observe_sends_every_derived_notice(kind, outcome):
+    with private_case() as (root, _patch):
+        mod = _load_dispatcher(root / "state")
+        paths = mod.setup_dirs()
+        event = _derived_events(mod)[kind]
+        text = mod.format_event(event)
+        messages: list = []
+        calls: list = []
+        with patch.object(mod, "_request_incident_authority", _answering(outcome, calls)), patch.object(
+            mod, "send_whatsapp", side_effect=lambda sent, *_a, **_k: messages.append(sent)
+        ):
+            mod.begin_incident_authority_cycle()
+            mod.send_authorized_whatsapp(event, text)
+        assert messages == [text], f"the {kind} notice must be sent whatever the authority answers"
+        assert len(calls) == 1
+        assert _dispatcher_records(mod, paths)[-1]["outcome"] == OUTCOMES[outcome][1]
 
 
 @pytest.mark.parametrize("outcome", OUTCOME_NAMES)
@@ -784,25 +801,51 @@ def test_an_unmatched_q_reply_keeps_the_nudge_armed(tmp_path, mode):
     assert nudges == [f"q-loop-nudge-{waiting_since}"]
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        "APPROVED SCOPE for the gate",
-        "APPROVED",
-        "BLOCKED: missing evidence",
-        "Standing by",
-        "You've hit your session limit",
-    ],
+# Every reply form the Q loop recognises (classify_activity and
+# q_unavailable_reason in bot-errors-q-loop.py).
+_RECOGNISED_Q_PHRASES = (
+    "APPROVED SCOPE",
+    "APPROVED",
+    "approved",
+    "BLOCKED",
+    "**BLOCKED**",
+    "Standing by",
+    "no response needed",
+    "no post warranted",
+    "nothing new",
+    "no actionable change",
+    "monitoring continues",
+    "continuing to monitor",
+    "continuing monitor/poll",
+    "You've hit your session limit",
+    "You’ve hit your session limit",
+    "Your session limit resets at noon",
 )
-def test_a_recognised_q_reply_still_clears_the_nudge(tmp_path, body):
-    q_loop = _load_q_loop(tmp_path / "q-nudge-matched")
-    current = q_loop.now()
-    state = q_loop.default_state()
-    state["awaiting_q_since"] = current - q_loop.NUDGE_AFTER_SECONDS - 60
-    q_loop.classify_activity(state, [_q_message(body, current - 30)])
-    assert state["awaiting_q_since"] == 0
-    with patch.object(q_loop, "send_message", side_effect=AssertionError("no nudge after a recognised reply")):
-        assert q_loop.maybe_send_nudge(state, "socket.invalid") is False
+
+
+def _reply_around(before: str, phrase: str, after: str) -> str:
+    # A line break before and a space after keep the phrase a whole word, and
+    # BLOCKED at the start of a line, whatever text surrounds it.
+    return (f"{before}\n" if before else "") + phrase + (f" {after}" if after else "")
+
+
+@properties
+@given(body=st.builds(_reply_around, st.text(max_size=24), st.sampled_from(_RECOGNISED_Q_PHRASES), st.text(max_size=24)))
+@example(body="APPROVED SCOPE for the gate")
+@example(body="APPROVED")
+@example(body="BLOCKED: missing evidence")
+@example(body="Standing by")
+@example(body="You've hit your session limit")
+def test_a_recognised_q_reply_still_clears_the_nudge(body):
+    with private_case() as (root, _patch):
+        q_loop = _load_q_loop(root / "q-nudge-matched")
+        current = q_loop.now()
+        state = q_loop.default_state()
+        state["awaiting_q_since"] = current - q_loop.NUDGE_AFTER_SECONDS - 60
+        q_loop.classify_activity(state, [_q_message(body, current - 30)])
+        assert state["awaiting_q_since"] == 0
+        with patch.object(q_loop, "send_message", side_effect=AssertionError("no nudge after a recognised reply")):
+            assert q_loop.maybe_send_nudge(state, "socket.invalid") is False
 
 
 def test_enforce_still_stops_a_q_loop_notice_without_a_grant(tmp_path):
