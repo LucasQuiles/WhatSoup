@@ -65,6 +65,7 @@ function listTsFiles(dir: string): string[] {
 }
 
 const AUDITED_STRUCTURED_ALERT_RESULT_CALLERS = new Set([
+  'src/core/inbound-observation.ts',
   'src/core/ingest.ts',
   'src/fleet/health-poller.ts',
   'src/runtimes/agent/turn-finalizer.ts',
