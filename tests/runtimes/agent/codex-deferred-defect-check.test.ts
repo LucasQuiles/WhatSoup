@@ -65,7 +65,10 @@ describe('codex deferred-defect startup check', () => {
       'bot-a: codex-cli resume needs sessionScope per_chat',
       expect.stringContaining('check=codex_single_or_shared_scope'),
       'warning',
-      expect.anything(),
+      expect.objectContaining({
+        asset: { kind: 'runtime_session', instance: INSTANCE },
+        failure: expect.objectContaining({ code: 'CODEX_RESUME_NEEDS_PER_CHAT_SCOPE', operatorAction: SCOPE_FIX }),
+      }),
     );
   });
 
@@ -112,7 +115,10 @@ describe('codex deferred-defect startup check', () => {
       'bot-a: codex-cli resume is unproven under host work admission',
       expect.stringContaining('check=codex_host_work_admission'),
       'warning',
-      expect.anything(),
+      expect.objectContaining({
+        asset: { kind: 'runtime_session', instance: INSTANCE },
+        failure: expect.objectContaining({ code: 'CODEX_RESUME_UNPROVEN_UNDER_HOST_ADMISSION', operatorAction: ADMISSION_FIX }),
+      }),
     );
   });
 

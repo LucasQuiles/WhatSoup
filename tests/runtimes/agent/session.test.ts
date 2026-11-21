@@ -4627,7 +4627,8 @@ describe('Codex session resume via thread ID', () => {
       // An unknown count does not prove turns, so the text does not claim them.
       'codex: stored thread may have had turns but thread/resume failed - starting fresh',
     );
-    expect(mockLogger.warn).not.toHaveBeenCalledWith(expect.anything(), 'codex: thread resume rejected — retrying with fresh thread');
+    // Checked in every argument of every call, so no logged form of the message slips through.
+    expect(mockLogger.warn.mock.calls.flat()).not.toContain('codex: thread resume rejected — retrying with fresh thread');
     expect(getSessionTurnCount).toHaveBeenCalledWith(db, 42, 'thread_other_error', 'codex-cli');
     expect(notifyUser).toHaveBeenCalledTimes(1);
     expect(notifyUser).toHaveBeenCalledWith('_Previous session could not be restored_ — starting fresh.');
@@ -4706,7 +4707,8 @@ describe('Codex session resume via thread ID', () => {
       }),
       'codex: stored thread may have had turns but thread/resume failed - starting fresh',
     );
-    expect(mockLogger.info).not.toHaveBeenCalledWith(expect.anything(), 'codex: thread resumed');
+    // Checked in every argument of every call, so no logged form of the message slips through.
+    expect(mockLogger.info.mock.calls.flat()).not.toContain('codex: thread resumed');
     expect(notifyUser).toHaveBeenCalledTimes(1);
     expect(notifyUser).toHaveBeenCalledWith('_Previous session could not be restored_ — starting fresh.');
     expect(updateSessionId).not.toHaveBeenCalledWith(db, 42, '');
