@@ -115,16 +115,31 @@ enclosing function by the last column-zero `def`. In the dispatcher it rejects:
 - a keyword hand-off `json_rpc_call=json_rpc_call` outside the two owner-route
   callers (`drain_owner_route_queue`, `send_credential_pages`).
 
+In the Q loop it also rejects an assignment to `state["phase"]` or
+`state["scope_approved_at"]` written directly inside `classify_activity`.
+
 It does not see, and these are open follow-ups: a nested definition, which
 inherits its outer function's allowance; a statement after a function's body,
 which can inherit that function's allowance; a call split across lines between
-the name and the parenthesis; and a positional hand-off such as
-`f(json_rpc_call)`. The mode decision lives inside those wrappers, so the
-guard's call-site counts hold in both modes; the guard does not check the mode.
+the name and the parenthesis; a positional hand-off such as
+`f(json_rpc_call)`; and a Q-loop phase assignment made in a helper that
+`classify_activity` calls. `apply_q_reply_cadence` is such a helper: it sets
+`state["phase"]`, which is the loop's own reply cadence and grants no
+IncidentStore authority, and the guard does not check it. The mode decision
+lives inside those wrappers, so the guard's call-site counts hold in both
+modes; the guard does not check the mode.
 The guard also pins the authority preflight ahead of credential observation,
-suppression, flap/storm mutation, and delivery, inventories the full `deploy/`
-tree, rejects test-only dry seams in service definitions, and verifies the two
-producer credential settings remain distinct. The guard's test
+suppression, flap/storm mutation, and delivery. It reads only these files:
+the TypeScript files under `src/` and `deploy/` (not tests), the dispatcher,
+the Q loop, `lib/owner_route.py`, `install-bot-errors-launchd.sh`, and every
+`.service` and `.plist` file under `src/` and `deploy/`. It rejects the
+test-only dry seams in the `.service` and `.plist` files and in the installer.
+For the producer credentials it rejects the shared setting name
+`BOT_ERRORS_INCIDENT_AUTHORITY_CREDENTIAL_FILE` in any file it reads, and it
+requires `BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE` on exactly one line
+of the dispatcher and `BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE` on exactly
+one line of the Q loop. It checks setting names only: it does not check that
+a host gives the two settings different paths. The guard's test
 (`tests/scripts/security-boundary-guard.test.ts`) scans the live tree, so the
 test suite enforces it.
 
@@ -293,9 +308,11 @@ total=… granted=… refused=… not_ready=… protocol_error=… not_configure
 not_asked=… would_hold_or_refuse_in_enforce=… mode=… skipped=…
 record_starts=…`. The count enforce would have stopped is refused +
 not_ready + protocol_error + not_configured; `skipped` counts the rows the
-report could not read (not JSON, or an outcome or reason that is not a known
-string), not rows the size bound dropped. The line counts a row whose time is
-in the last 24 hours or up to 300 seconds after the report time. `record_starts`
+report could not read (not JSON, not a JSON object, an `outcome` that is not
+one of the six names above, or a `reason` that is not a string; the reason's
+value is not checked, so any string is readable), not rows the size bound
+dropped. The line counts a row whose time is in the last 24 hours or up to
+300 seconds after the report time. `record_starts`
 is the time of the oldest readable row in the record, whatever its age, as
 `YYYY-MM-DDTHH:MM:SSZ` in UTC, or `none` when the record holds no readable
 row. Because the dispatcher record is bounded to 1 MiB and drops its oldest
@@ -373,13 +390,43 @@ refuses to open a database above its own schema version. Before the first
 migration, the fleet server writes a copy of the database at its old version
 beside it (`incidents.db.schema-v<N>.bak`). The copy is written under a
 temporary name, checked (regular file, opens read-only, `quick_check`, old
-schema version) and only then put in place; an existing entry at that name is
-kept only if it passes the same check, and otherwise the open fails and names
-the file to inspect. To roll back to an earlier release:
-stop the fleet server, move `incidents.db` and its `-wal` and `-shm` files
-aside, copy the `.bak` file to `incidents.db`, then start the earlier release.
-Signals, phase facts and admission counters recorded after the migration are
-not in the copy; keep the moved-aside database for investigation.
+schema version), flushed to disk and only then linked into place; the folder
+is flushed before the migration runs, and a failed flush stops the open with
+the database not migrated. An entry already at that name is kept only when it
+is a regular file with one link, is not the live database file, passes the
+same check and holds exactly the live database's content (a digest over the
+schema and every row of every table of both). Otherwise the open fails, names
+the file and says to move it aside; the entry itself is never replaced,
+renamed or removed. Each open of a database not yet migrated also removes the
+temporary copies (`incidents.db.schema-v<N>.bak.tmp-<pid>-<id>` and their
+`-journal` files) whose process is no longer running.
+
+To roll back to an earlier release: stop the fleet server, move `incidents.db`
+and its `-wal` and `-shm` files aside, move (not copy) the `.bak` file to
+`incidents.db`, then start the earlier release. Moving it leaves no old copy
+behind, so a later upgrade copies the rows the earlier release wrote in the
+meantime. Signals, phase facts and admission counters recorded after the
+migration are not in the copy; keep the moved-aside database for
+investigation.
+
+A database that this release created (there was no file, or an empty one) is
+at schema version 3 from the start and has no copy. To roll that host back,
+stop the fleet server and move `incidents.db` and its `-wal` and `-shm` files
+aside; the earlier release then starts with an empty incident store. That
+release has none of the stored data: no signal, incident or transition, no
+producer registration or credential (register and enroll the producers
+again), and no phase fact or admission counter. They stay only in the
+moved-aside database.
+
+A power loss before the migration leaves the database at its old version,
+with at most a temporary file and the copy. The next open removes the
+temporary file once its process id names no running process, then keeps the
+copy if it matches or writes it again. If that id names a running process
+again after the restart, the temporary file stays; if the copy was already
+linked, it then has two links and the open fails closed until that process
+has ended. On macOS a flush (`fsync`) does not empty the drive's own write
+cache, so a power loss there can still lose the copy while the migrated
+database survives.
 
 ### NORMATIVE — D2 Fail-closed health-profile guard
 
