@@ -28,11 +28,18 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
@@ -147,7 +154,11 @@ BOUNDARY_EVENT_ID = "evt-2424-d0-boundary"
 # order and the containment case needs the FAILING record handled first.
 COMPANION_EVENT_ID = "evt-2424-d0-other"
 
-_ENV_KEYS = ["BOT_ERRORS_STATE_DIR", "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES"]
+_ENV_KEYS = [
+    "BOT_ERRORS_STATE_DIR",
+    "BOT_ERRORS_CONVERSATION_SCOPED_SOURCES",
+    *dispatcher_fixtures.INCIDENT_AUTHORITY_TEST_ENV_KEYS,
+]
 
 
 @pytest.fixture(autouse=True)
@@ -165,6 +176,7 @@ def _clean_env():
 
 def _load(state_dir: Path):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+    dispatcher_fixtures.configure_test_incident_authority(state_dir)
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)
     spec = importlib.util.spec_from_file_location(
         f"bot_errors_dispatcher_held_age_{state_dir.name}", _SCRIPT

@@ -123,6 +123,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/harness-maintenance-guard.test.ts',
   'tests/scripts/logger-mock-residue.test.ts',
   'tests/scripts/publication-guard.test.ts',
+  'tests/scripts/security-boundary-guard.test.ts',
   'tests/scripts/guard-test-coverage-check.test.ts',
   'tests/deploy/preflight-check.test.ts',
   'tests/scripts/import-boundary-check.test.ts',

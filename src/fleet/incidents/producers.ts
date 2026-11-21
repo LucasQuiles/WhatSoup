@@ -1,6 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { SIGNAL_KINDS, type SignalKind } from './envelope.ts';
+import {
+  INCIDENT_ACTOR_CLASSES,
+  INCIDENT_PHASE_KINDS,
+  type IncidentActorClass,
+  type IncidentPhaseKind,
+} from './phase-envelope.ts';
 import { MS_PER_MINUTE, MS_PER_DAY } from '../../lib/time-units.ts';
 
 export interface ProducerRegistration {
@@ -9,6 +15,8 @@ export interface ProducerRegistration {
   allowedKinds: readonly SignalKind[];
   allowedConditionClasses: readonly string[];
   allowedSubjects: readonly string[];
+  actorClass?: IncidentActorClass;
+  allowedPhaseKinds?: readonly IncidentPhaseKind[];
   enrollmentTtlMs?: number;
 }
 
@@ -35,9 +43,17 @@ export interface AuthenticatedProducer {
   allowedKinds: readonly string[];
   allowedConditionClasses: readonly string[];
   allowedSubjects: readonly string[];
+  actorClass: IncidentActorClass;
+  allowedPhaseKinds: readonly IncidentPhaseKind[];
 }
 
 export type ScopeDenial = 'kind_not_allowed' | 'condition_class_not_allowed' | 'subject_not_allowed';
+
+export interface AdmissionDecision {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  count: number;
+}
 
 const DEFAULT_ENROLLMENT_TTL_MS = 10 * MS_PER_MINUTE;
 const MAX_ENROLLMENT_TTL_MS = 30 * MS_PER_MINUTE;
@@ -52,6 +68,8 @@ interface ProducerRow {
   allowed_kinds: string;
   allowed_condition_classes: string;
   allowed_subjects: string;
+  actor_class: string;
+  allowed_phase_kinds: string;
   status: string;
   credential_hash: string | null;
   credential_expires_at: string | null;
@@ -85,9 +103,10 @@ export class ProducerStore {
         .prepare(
           `INSERT INTO producers (
              producer_id, producer_domain_id, allowed_kinds, allowed_condition_classes,
-             allowed_subjects, status, enrollment_secret_hash, enrollment_secret_expires_at,
+             allowed_subjects, actor_class, allowed_phase_kinds,
+             status, enrollment_secret_hash, enrollment_secret_expires_at,
              enrollment_mismatches, created_at)
-           VALUES (?, ?, ?, ?, ?, 'enabled', ?, ?, 0, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'enabled', ?, ?, 0, ?)`,
         )
         .run(
           input.producerId,
@@ -95,6 +114,8 @@ export class ProducerStore {
           JSON.stringify(input.allowedKinds),
           JSON.stringify(input.allowedConditionClasses),
           JSON.stringify(input.allowedSubjects),
+          input.actorClass ?? 'observer',
+          JSON.stringify(input.allowedPhaseKinds ?? []),
           digest(secret),
           new Date(now.getTime() + ttl).toISOString(),
           now.toISOString(),
@@ -215,7 +236,13 @@ export class ProducerStore {
       allowedKinds: JSON.parse(row.allowed_kinds) as string[],
       allowedConditionClasses: JSON.parse(row.allowed_condition_classes) as string[],
       allowedSubjects: JSON.parse(row.allowed_subjects) as string[],
+      actorClass: row.actor_class as IncidentActorClass,
+      allowedPhaseKinds: JSON.parse(row.allowed_phase_kinds) as IncidentPhaseKind[],
     };
+  }
+
+  authorizePhase(producer: AuthenticatedProducer, phase: IncidentPhaseKind): boolean {
+    return producer.allowedPhaseKinds.includes(phase);
   }
 
   authorize(
@@ -231,6 +258,45 @@ export class ProducerStore {
     }
     if (!producer.allowedSubjects.includes(signal.subject)) return 'subject_not_allowed';
     return null;
+  }
+
+  consumeAdmission(
+    producerId: string,
+    at: Date,
+    policy: { windowMs: number; maxPerWindow: number },
+  ): AdmissionDecision {
+    if (
+      !Number.isInteger(policy.windowMs) || policy.windowMs <= 0
+      || !Number.isInteger(policy.maxPerWindow) || policy.maxPerWindow <= 0
+    ) {
+      throw new Error('invalid admission policy');
+    }
+    const atMs = at.getTime();
+    const windowStart = Math.floor(atMs / policy.windowMs) * policy.windowMs;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db
+        .prepare(
+          `INSERT INTO admission_windows (producer_id, window_start_ms, request_count)
+           VALUES (?, ?, 1)
+           ON CONFLICT(producer_id, window_start_ms)
+           DO UPDATE SET request_count = request_count + 1
+           RETURNING request_count`,
+        )
+        .get(producerId, windowStart) as { request_count: number };
+      this.db
+        .prepare(`DELETE FROM admission_windows WHERE window_start_ms < ?`)
+        .run(windowStart - (2 * policy.windowMs));
+      this.db.exec('COMMIT');
+      return {
+        allowed: row.request_count <= policy.maxPerWindow,
+        retryAfterSeconds: Math.max(1, Math.ceil((windowStart + policy.windowMs - atMs) / 1000)),
+        count: row.request_count,
+      };
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   private findRow(producerId: string): ProducerRow | undefined {
@@ -276,6 +342,29 @@ function validRegistration(input: ProducerRegistration): boolean {
   ) {
     return false;
   }
+  if (
+    input.actorClass !== undefined
+    && !(INCIDENT_ACTOR_CLASSES as readonly string[]).includes(input.actorClass)
+  ) return false;
+  if (
+    input.allowedPhaseKinds !== undefined
+    && (
+      !Array.isArray(input.allowedPhaseKinds)
+      || !input.allowedPhaseKinds.every((kind) =>
+        (INCIDENT_PHASE_KINDS as readonly string[]).includes(kind))
+    )
+  ) return false;
+  const actor = input.actorClass ?? 'observer';
+  const phaseActors: Record<IncidentPhaseKind, IncidentActorClass> = {
+    notification_delivered: 'notifier',
+    q_receipt: 'q_receiver',
+    diagnosis_recorded: 'diagnostician',
+    change_approved: 'approver',
+    execution_recorded: 'executor',
+    recovery_confirmed: 'recovery_witness',
+  };
+  const phaseKinds = (input.allowedPhaseKinds ?? []) as readonly IncidentPhaseKind[];
+  if (phaseKinds.some((kind) => phaseActors[kind] !== actor)) return false;
   return true;
 }
 

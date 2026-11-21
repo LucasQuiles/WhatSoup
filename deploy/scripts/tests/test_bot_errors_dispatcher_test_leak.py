@@ -18,11 +18,23 @@ from typing import Any
 
 import pytest
 
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Module loader
 # ---------------------------------------------------------------------------
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
+
+
+@pytest.fixture(autouse=True)
+def _test_incident_authority(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    for key, value in dispatcher_fixtures.incident_authority_test_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
 
 
 def _load_module(extra_env: dict[str, str] | None = None):

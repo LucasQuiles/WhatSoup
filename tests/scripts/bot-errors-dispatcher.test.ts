@@ -40,6 +40,8 @@ const TEST_CHAT_JID = `q${AT_SIGN}s.whatsapp.net`;
 const PHONE_SAMPLE = '+1 (555) 123-4567';
 
 function writeEvent(root: string, severity = 'critical', overrides: Record<string, unknown> = {}) {
+  process.env.BOT_ERRORS_TEST_MODE = '1';
+  process.env.BOT_ERRORS_DRY_AUTHORITY_CAPTURE = join(root, 'incident-authority.jsonl');
   const outbox = join(root, 'outbox');
   mkdirSync(outbox, { recursive: true, mode: 0o700 });
   const event = {
@@ -70,6 +72,8 @@ function captureMessages(path: string): string[] {
 }
 
 function writeStormEvent(root: string, machine: string, overrides: Record<string, unknown> = {}) {
+  process.env.BOT_ERRORS_TEST_MODE = '1';
+  process.env.BOT_ERRORS_DRY_AUTHORITY_CAPTURE = join(root, 'incident-authority.jsonl');
   const outbox = join(root, 'outbox');
   mkdirSync(outbox, { recursive: true, mode: 0o700 });
   const safeMachine = machine.replace(/[^A-Za-z0-9_.:-]+/g, '_');
@@ -101,6 +105,8 @@ function writeStormEvent(root: string, machine: string, overrides: Record<string
 }
 
 function writeRecoveryEvent(root: string, index: number, overrides: Record<string, unknown> = {}) {
+  process.env.BOT_ERRORS_TEST_MODE = '1';
+  process.env.BOT_ERRORS_DRY_AUTHORITY_CAPTURE = join(root, 'incident-authority.jsonl');
   const outbox = join(root, 'outbox');
   mkdirSync(outbox, { recursive: true, mode: 0o700 });
   const event = {
@@ -208,6 +214,8 @@ function writeWritefail(root: string, eventOverrides: Record<string, unknown> = 
 }
 
 afterEach(() => {
+  delete process.env.BOT_ERRORS_DRY_AUTHORITY_CAPTURE;
+  delete process.env.BOT_ERRORS_TEST_MODE;
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
 });
@@ -287,6 +295,158 @@ describe('bot-errors-dispatcher', () => {
     const event = JSON.parse(readFileSync(join(sent, sentFiles[0]!), 'utf8')) as { delivery: { attempts: number; status: string } };
     expect(event.delivery.attempts).toBeGreaterThanOrEqual(1);
     expect(event.delivery.status).toBe('sent');
+  });
+
+  it('persists IncidentStore acceptance before the first notification attempt (enforce mode)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-authority-first-'));
+    const capturePath = join(tmpRoot, 'sent.jsonl');
+    const authorityCapture = join(tmpRoot, 'authority.jsonl');
+    writeEvent(tmpRoot);
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_INCIDENT_AUTHORITY_MODE: 'enforce',
+        BOT_ERRORS_DRY_AUTHORITY_CAPTURE: authorityCapture,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(readFileSync(authorityCapture, 'utf8').trim().split('\n')).toHaveLength(1);
+    expect(captureMessages(capturePath)).toHaveLength(1);
+    const sentFile = readdirSync(join(tmpRoot, 'sent'))[0]!;
+    const sent = JSON.parse(readFileSync(join(tmpRoot, 'sent', sentFile), 'utf8')) as {
+      delivery: { incidentAuthorityStatus: string; incidentAuthority: Record<string, unknown> };
+    };
+    expect(sent.delivery.incidentAuthorityStatus).toBe('accepted');
+    expect(sent.delivery.incidentAuthority).toMatchObject({
+      schemaVersion: 1,
+      producerId: 'bot-errors-dispatcher',
+      disposition: 'incident_opened',
+    });
+    expect(JSON.stringify(sent.delivery.incidentAuthority)).not.toContain('attempt counter test');
+  });
+
+  it('in observe mode, the default, a full cycle delivers, exits 0 and records the answer', () => {
+    // The dry send seam also answers for the authority, so the answer here is
+    // a grant; the Python observe tests cover every other answer, including
+    // a host with nothing configured.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-authority-observe-'));
+    const capturePath = join(tmpRoot, 'sent.jsonl');
+    writeEvent(tmpRoot);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_DRY_AUTHORITY_CAPTURE: '',
+      BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      BOT_ERRORS_INCIDENT_AUTHORITY_URL: '',
+      BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE: '',
+    };
+    delete env.BOT_ERRORS_INCIDENT_AUTHORITY_MODE;
+
+    const run = spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env,
+      encoding: 'utf8',
+    });
+    expect(run.status).toBe(0);
+    expect(captureMessages(capturePath)).toHaveLength(1);
+    expect(readdirSync(join(tmpRoot, 'sent'))).toHaveLength(1);
+    expect(readdirSync(join(tmpRoot, 'outbox')).filter((name) => name.endsWith('.json'))).toHaveLength(0);
+    const sentFile = readdirSync(join(tmpRoot, 'sent'))[0]!;
+    const sent = JSON.parse(readFileSync(join(tmpRoot, 'sent', sentFile), 'utf8')) as {
+      delivery: Record<string, unknown>;
+    };
+    // Observe mode writes no authority field into the event.
+    expect(sent.delivery).not.toHaveProperty('incidentAuthority');
+    expect(sent.delivery).not.toHaveProperty('incidentAuthorityStatus');
+    const record = readFileSync(join(tmpRoot, 'logs', 'incident-authority.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, string>);
+    expect(record).toHaveLength(1);
+    expect(record[0]).toMatchObject({ outcome: 'granted', reason: 'none', mode: 'observe' });
+  });
+
+  it('in enforce mode, keeps authority unavailability visible and prevents notification and incident mutation', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-authority-unavailable-'));
+    const capturePath = join(tmpRoot, 'sent.jsonl');
+    writeEvent(tmpRoot);
+
+    const run = spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_INCIDENT_AUTHORITY_MODE: 'enforce',
+        BOT_ERRORS_DRY_AUTHORITY_CAPTURE: '',
+        BOT_ERRORS_DRY_SEND_CAPTURE: '',
+        BOT_ERRORS_INCIDENT_AUTHORITY_URL: '',
+        BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE: '',
+      },
+      encoding: 'utf8',
+    });
+    expect(run.status).toBe(1);
+
+    expect(existsSync(capturePath)).toBe(false);
+    const incidentStatePath = join(tmpRoot, 'incident-state.json');
+    if (existsSync(incidentStatePath)) {
+      const incidentState = readFileSync(incidentStatePath, 'utf8');
+      expect(incidentState).toContain('"openIncidents":{}');
+      expect(incidentState).not.toContain('"flapState":{"test-machine');
+    }
+    const queuedFile = readdirSync(join(tmpRoot, 'outbox')).find((name) => name.endsWith('.json'))!;
+    const queued = JSON.parse(readFileSync(join(tmpRoot, 'outbox', queuedFile), 'utf8')) as {
+      delivery: Record<string, unknown>;
+    };
+    // Missing settings are "not ready": held in the outbox, not counted as an attempt.
+    expect(queued.delivery).toMatchObject({
+      incidentAuthorityAttempts: 0,
+      incidentAuthorityStatus: 'not_ready',
+      incidentAuthorityError: 'incident_authority_not_configured',
+    });
+  });
+
+  it('revalidates a persisted authority grant after send failure without duplicate acceptance (enforce mode)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-authority-replay-'));
+    const authorityCapture = join(tmpRoot, 'authority.jsonl');
+    const sendCapture = join(tmpRoot, 'sent.jsonl');
+    writeEvent(tmpRoot);
+
+    spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_INCIDENT_AUTHORITY_MODE: 'enforce',
+        BOT_ERRORS_DRY_AUTHORITY_CAPTURE: authorityCapture,
+        BOT_ERRORS_SOCKET_PATH: join(tmpRoot, 'missing.sock'),
+      },
+      encoding: 'utf8',
+    });
+    const queuedFile = readdirSync(join(tmpRoot, 'outbox')).find((name) => name.endsWith('.json'))!;
+    const queuedPath = join(tmpRoot, 'outbox', queuedFile);
+    const queued = JSON.parse(readFileSync(queuedPath, 'utf8')) as { delivery: Record<string, unknown> };
+    queued.delivery.nextAttemptAtEpoch = 0;
+    writeFileSync(queuedPath, `${JSON.stringify(queued)}\n`);
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_INCIDENT_AUTHORITY_MODE: 'enforce',
+        BOT_ERRORS_DRY_AUTHORITY_CAPTURE: authorityCapture,
+        BOT_ERRORS_DRY_SEND_CAPTURE: sendCapture,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(readFileSync(authorityCapture, 'utf8').trim().split('\n')).toHaveLength(1);
+    expect(captureMessages(sendCapture)).toHaveLength(1);
   });
 
   it('quarantines a contradictory v1 clear before delivery or incident mutation', () => {
@@ -1228,7 +1388,7 @@ describe('bot-errors-dispatcher', () => {
       },
       encoding: 'utf8',
     });
-    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(1);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(1);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('send_deferred_transient');
 
     writeRecoveryEvent(tmpRoot, 1, {
@@ -1382,7 +1542,7 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
       recoveredBeforeDelivery: 0,
     });
-    expect(readdirSync(join(tmpRoot, 'outbox'))).toHaveLength(1);
+    expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(1);
     expect(existsSync(capturePath)).toBe(false);
   });
 

@@ -63,6 +63,7 @@ sys.path.insert(0, str(_SCRIPTS / "lib"))
 from lib import owner_route  # noqa: E402
 from lib.bot_errors_envelope import SEVERITIES  # noqa: E402
 from lib.controller_state import open_controller_state  # noqa: E402
+from lib.incident_authority import dry_accept_for_test  # noqa: E402
 
 _ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
@@ -83,6 +84,10 @@ _ENV_KEYS = [
     "BOT_ERRORS_TEST_LEAK_PATH_PATTERNS",
     "BOT_ERRORS_DRY_SEND_CAPTURE",
     "BOT_ERRORS_DRY_SEND_FAIL",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
     "BOT_ERRORS_OWNER_ROUTE_JID",
     "BOT_ERRORS_OWNER_ROUTE_SOCKET",
     "BOT_ERRORS_STORM_THRESHOLD",
@@ -131,6 +136,10 @@ class _Bench:
     def __init__(self, tmp_path: Path) -> None:
         state_dir = tmp_path / "state"
         os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+        os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+        os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+            state_dir / "test-authority.jsonl"
+        )
         (state_dir / "logs").mkdir(parents=True, exist_ok=True)
         self.mod = dispatcher_fixtures.load_module_from_path(
             f"bot_errors_dispatcher_age_escalation_{tmp_path.name}", _SCRIPT
@@ -1082,12 +1091,17 @@ class _OwnerRecorder:
 
 
 def _route_owner(event: dict[str, Any], rec: _OwnerRecorder, state_dir: Path, key: str) -> None:
+    authority_grant = dry_accept_for_test(
+        event,
+        state_dir / "test-authority.jsonl",
+    ).as_record()
     owner_route.route_owner_critical(
         event,
         key=key,
         is_alert=True,
         group_text="group text",
         state_dir=state_dir,
+        authority_grant=authority_grant,
         json_rpc_call=rec.rpc,
         email_fallback=rec.email,
         log=rec.log,

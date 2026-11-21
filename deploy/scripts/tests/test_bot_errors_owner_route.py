@@ -43,6 +43,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from lib import owner_route  # noqa: E402
 from lib.controller_log import metadata_only_controller_details  # noqa: E402
+from lib.incident_authority import AuthorityProtocolError, dry_accept_for_test  # noqa: E402
 
 _DISPATCHER = _SCRIPTS / "bot-errors-dispatcher.py"
 
@@ -66,6 +67,7 @@ def _alert(source: str = "provider_fallback_activated", *, severity: str = "crit
         "source": source,
         "severity": severity,
         "eventType": "alert",
+        "createdAt": "2026-01-01T00:00:00.000Z",
         "machine": "host-a",
         "instance": "sample",
         "evidence": evidence,
@@ -103,6 +105,11 @@ def route_env(monkeypatch, tmp_path):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_JID", _JID)
     monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_SOCKET", str(tmp_path / "line.sock"))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+        str(tmp_path / "dispatcher-authority.jsonl"),
+    )
+    monkeypatch.setenv("BOT_ERRORS_TEST_MODE", "1")
     # Send acceptance is validated by the shared helper; accept any result here.
     monkeypatch.setattr(owner_route, "validate_send_acceptance", lambda result, jid: {"audit_receipt": "r1"})
     return tmp_path
@@ -110,12 +117,18 @@ def route_env(monkeypatch, tmp_path):
 
 def _route(event: dict, rec: _Recorder, state_dir: Path, *, is_alert: bool = True, key: str | None = None,
            deadline: float | None = None) -> None:
+    authority_grant = (
+        dry_accept_for_test(event, state_dir / "test-authority.jsonl").as_record()
+        if owner_route.enabled()
+        else {}
+    )
     owner_route.route_owner_critical(
         event,
         key=key or f"host-a|sample|{event['source']}",
         is_alert=is_alert,
         group_text="group text",
         state_dir=state_dir,
+        authority_grant=authority_grant,
         json_rpc_call=rec.rpc,
         email_fallback=rec.email,
         log=rec.log,
@@ -130,6 +143,82 @@ def test_route_is_inert_without_its_environment(monkeypatch, tmp_path):
     _route(_alert(), rec, tmp_path)
     assert rec.sends == [] and rec.emails == [] and rec.logs == []
     assert not (tmp_path / "owner-route-state.json").exists()
+
+
+def test_invalid_authority_grant_cannot_record_a_floor_or_send(route_env):
+    rec = _Recorder()
+    event = _alert()
+    with pytest.raises(AuthorityProtocolError):
+        owner_route.route_owner_critical(
+            event,
+            key="host-a|sample|provider_fallback_activated",
+            is_alert=True,
+            group_text="group text",
+            state_dir=route_env,
+            authority_grant={},
+            json_rpc_call=rec.rpc,
+            email_fallback=rec.email,
+            log=rec.log,
+        )
+    assert rec.sends == [] and rec.emails == []
+    assert not (route_env / "owner-route-state.json").exists()
+
+
+def _route_without_grant(rec: _Recorder, state_dir: Path, **mode: str) -> None:
+    owner_route.route_owner_critical(
+        _alert(),
+        key="host-a|sample|provider_fallback_activated",
+        is_alert=True,
+        group_text="group text",
+        state_dir=state_dir,
+        authority_grant=None,
+        json_rpc_call=rec.rpc,
+        email_fallback=rec.email,
+        log=rec.log,
+        **mode,
+    )
+
+
+def test_observe_mode_sends_the_owner_copy_without_a_grant(route_env):
+    # Observe mode delivers as before the authority existed.
+    rec = _Recorder()
+    _route_without_grant(rec, route_env, authority_mode="observe")
+    assert len(rec.sends) == 1
+    assert [log["type"] for log in rec.logs] == ["owner_route_sent"]
+
+
+def test_the_route_defaults_to_enforce_and_refuses_a_missing_grant(route_env):
+    rec = _Recorder()
+    with pytest.raises(AuthorityProtocolError):
+        _route_without_grant(rec, route_env)
+    assert rec.sends == [] and rec.emails == []
+
+
+def test_observe_mode_sends_a_credential_page_without_a_grant(route_env):
+    rec = _Recorder()
+    counters = {"count": 1, "failedAttempts": 0, "hours": 4}
+    accepted = owner_route.send_credential_page(
+        "line", "body",
+        counters=counters,
+        authority_grant=None,
+        authority_claim=None,
+        json_rpc_call=rec.rpc,
+        email_fallback=rec.email,
+        log=rec.log,
+        authority_mode="observe",
+    )
+    assert accepted is True and len(rec.sends) == 1
+    with pytest.raises(AuthorityProtocolError):
+        owner_route.send_credential_page(
+            "line", "body",
+            counters=counters,
+            authority_grant=None,
+            authority_claim=None,
+            json_rpc_call=rec.rpc,
+            email_fallback=rec.email,
+            log=rec.log,
+        )
+    assert len(rec.sends) == 1, "enforce, the default, sends nothing without a grant"
 
 
 @pytest.mark.parametrize(
@@ -279,6 +368,11 @@ def test_the_queue_is_capped(monkeypatch, tmp_path):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_JID", _JID)
     monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_SOCKET", str(tmp_path / "line.sock"))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+        str(tmp_path / "dispatcher-authority.jsonl"),
+    )
+    monkeypatch.setenv("BOT_ERRORS_TEST_MODE", "1")
     dispatcher = _load_dispatcher()
     logged: list[dict] = []
     monkeypatch.setattr(dispatcher, "append_dispatch_log", lambda paths, record: logged.append(record))
@@ -750,6 +844,11 @@ def test_run_once_sends_every_group_alert_before_any_owner_copy(tmp_path, monkey
     monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_JID", _JID)
     monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_SOCKET", str(tmp_path / "line.sock"))
     monkeypatch.setenv("BOT_ERRORS_OWNER_ROUTE_EMAIL", "0")
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+        str(tmp_path / "dispatcher-authority.jsonl"),
+    )
+    monkeypatch.setenv("BOT_ERRORS_TEST_MODE", "1")
     dispatcher = _load_dispatcher()
     order: list[str] = []
 

@@ -49,6 +49,7 @@ _ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
     "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS",
     "BOT_ERRORS_TEST_LEAK_PATH_PATTERNS",
+    *dispatcher_fixtures.INCIDENT_AUTHORITY_TEST_ENV_KEYS,
 ]
 
 # Deeper than copy.deepcopy survives inside process_one on this interpreter
@@ -74,6 +75,9 @@ def _clean_env() -> Iterator[None]:
 def _load_module(env: dict[str, str]):
     for key, value in env.items():
         os.environ[key] = value
+    state_dir = env.get("BOT_ERRORS_STATE_DIR")
+    if state_dir:
+        dispatcher_fixtures.configure_test_incident_authority(Path(state_dir))
     spec = importlib.util.spec_from_file_location(
         f"bot_errors_dispatcher_snapshot_depth_{uuid.uuid4().hex}", _SCRIPT
     )

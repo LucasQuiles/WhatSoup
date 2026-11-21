@@ -39,8 +39,13 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
+_TESTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 MACHINE_ENV = "BOT_ERRORS_MACHINE"
 ENV_FILE_ENV = "BOT_ERRORS_ENV_FILE"
@@ -126,6 +131,8 @@ def state_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state))
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(state / "outbox"))
+    for key, value in dispatcher_fixtures.incident_authority_test_env(state).items():
+        monkeypatch.setenv(key, value)
     _live(monkeypatch, LIVE_A)
     return state
 
@@ -502,7 +509,11 @@ def test_credential_meta_alert_keeps_the_configured_machine_when_hostname_change
     monkeypatch.setenv(MACHINE_ENV, CONFIGURED)
     dispatcher = _load("bot-errors-dispatcher.py")
     sent: list[str] = []
-    monkeypatch.setattr(dispatcher, "send_whatsapp", lambda text, **kwargs: sent.append(text))
+    monkeypatch.setattr(
+        dispatcher,
+        "send_whatsapp",
+        lambda text, *_args, **_kwargs: sent.append(text),
+    )
 
     for live in (LIVE_A, LIVE_B):
         _live(monkeypatch, live)

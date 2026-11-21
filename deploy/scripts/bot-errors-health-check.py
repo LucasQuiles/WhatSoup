@@ -9112,6 +9112,153 @@ def deadman_observation_gap_inventory() -> list[str]:
     return [line] if line else []
 
 
+# How long IncidentStore authority may stay not ready, with events waiting,
+# before the deadman reports it. The dispatcher's own notices need that
+# authority, so the deadman, which sends directly, is the only channel left.
+AUTHORITY_NOT_READY_DEADMAN_SECONDS = 1800
+
+
+def _authority_not_ready_fields(state_data: Any) -> tuple[str, str, int] | None:
+    if not isinstance(state_data, dict):
+        return None
+    record = state_data.get("incidentAuthorityNotReady")
+    counts = state_data.get("counts")
+    if not isinstance(record, dict) or not isinstance(counts, dict):
+        return None
+    reason = record.get("reason")
+    since = record.get("since")
+    waiting = counts.get("outbox")
+    if not isinstance(reason, str) or not isinstance(since, str) or type(waiting) is not int:
+        return None
+    return reason[:80], since, waiting
+
+
+def authority_not_ready_line(state_data: Any) -> str | None:
+    """Daily-report line for a dispatcher that holds events for authority."""
+    fields = _authority_not_ready_fields(state_data)
+    if fields is None:
+        return None
+    reason, since, waiting = fields
+    return (
+        f"WARN incident_authority: not_ready reason={reason} since={since} "
+        f"events_waiting={waiting}"
+    )
+
+
+def authority_not_ready_member(state_data: Any, now_epoch: float) -> dict[str, Any] | None:
+    """Deadman member: authority not ready past the bound while events wait."""
+    fields = _authority_not_ready_fields(state_data)
+    if fields is None:
+        return None
+    reason, since, waiting = fields
+    if waiting <= 0:
+        return None
+    try:
+        age = max(0, int(now_epoch - parse_iso_epoch(since)))
+    except Exception:  # noqa: BLE001 - an unreadable time cannot prove the bound passed
+        return None
+    if age < AUTHORITY_NOT_READY_DEADMAN_SECONDS:
+        return None
+    return {"reason": reason, "not_ready_seconds": age, "events_waiting": waiting}
+
+
+INCIDENT_AUTHORITY_RECORD_NAME = "incident-authority.jsonl"
+INCIDENT_AUTHORITY_RECORD_WINDOW_SECONDS = 86400
+INCIDENT_AUTHORITY_RECORD_READ_BYTES = 4 * 1024 * 1024
+_INCIDENT_AUTHORITY_OUTCOMES = (
+    "granted",
+    "refused",
+    "not_ready",
+    "protocol_error",
+    "not_configured",
+    "not_asked",
+)
+_INCIDENT_AUTHORITY_ENFORCE_WOULD_STOP = ("refused", "not_ready", "protocol_error", "not_configured")
+
+
+def incident_authority_record_line(producer: str, path: Path, now_epoch: float) -> str | None:
+    """Daily-report summary of one producer's authority record, last 24 hours.
+
+    Counts per outcome and how many notices enforce mode would have held or
+    refused, so the owner can see when a host is ready for enforce, how many
+    rows it could not read, and the time of the oldest readable row of any
+    age, which shows whether the record holds the whole window.
+    Returns None when the record does not exist.
+    Plain text, not WARN: observe mode holds nothing.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            if size > INCIDENT_AUTHORITY_RECORD_READ_BYTES:
+                handle.seek(size - INCIDENT_AUTHORITY_RECORD_READ_BYTES)
+            text = handle.read(INCIDENT_AUTHORITY_RECORD_READ_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return f"incident_authority_record: producer={producer} unreadable"
+    counts = {outcome: 0 for outcome in _INCIDENT_AUTHORITY_OUTCOMES}
+    modes: set[str] = set()
+    skipped = 0
+    # The dispatcher record is size-bounded and drops its oldest rows first, so
+    # the window is complete only when the oldest readable row, of any age, is
+    # at least 24 hours old. A counted row is always inside the window and
+    # cannot show that.
+    record_starts: float | None = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            skipped += 1
+            continue
+        # A row the reader cannot use is counted, never raised on: a list
+        # outcome would raise in the lookup below.
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("outcome"), str)
+            or not isinstance(record.get("reason"), str)
+            or record["outcome"] not in counts
+        ):
+            skipped += 1
+            continue
+        observed = parse_iso_epoch(record.get("time"))
+        if observed is not None and (record_starts is None or observed < record_starts):
+            record_starts = observed
+        if observed is None or not (
+            now_epoch - INCIDENT_AUTHORITY_RECORD_WINDOW_SECONDS <= observed <= now_epoch + 300
+        ):
+            continue
+        counts[record["outcome"]] += 1
+        if record.get("mode") in ("observe", "enforce"):
+            modes.add(record["mode"])
+    would_stop = sum(counts[outcome] for outcome in _INCIDENT_AUTHORITY_ENFORCE_WOULD_STOP)
+    outcome_text = " ".join(f"{outcome}={counts[outcome]}" for outcome in _INCIDENT_AUTHORITY_OUTCOMES)
+    starts_text = (
+        "none"
+        if record_starts is None
+        else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record_starts))
+    )
+    return (
+        f"incident_authority_record: producer={producer} last_24h total={sum(counts.values())} "
+        f"{outcome_text} would_hold_or_refuse_in_enforce={would_stop} "
+        f"mode={','.join(sorted(modes)) or 'none'} skipped={skipped} record_starts={starts_text}"
+    )
+
+
+def incident_authority_record_lines(now_epoch: float | None = None) -> list[str]:
+    current = time.time() if now_epoch is None else now_epoch
+    lines: list[str] = []
+    for producer, path in (
+        ("dispatcher", state_root() / "logs" / INCIDENT_AUTHORITY_RECORD_NAME),
+        ("q_loop", q_loop_state_root().expanduser() / INCIDENT_AUTHORITY_RECORD_NAME),
+    ):
+        line = incident_authority_record_line(producer, path, current)
+        if line is not None:
+            lines.append(line)
+    return lines
+
+
 def queue_inventory() -> list[str]:
     root = state_root()
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
@@ -9138,9 +9285,13 @@ def queue_inventory() -> list[str]:
                 f"{prefix}dispatcher_state: {state} age_seconds={age} "
                 f"failed={failed} last_error={str(last_error)[:180] if last_error else 'none'}"
             )
+            authority_line = authority_not_ready_line(state_data)
+            if authority_line is not None:
+                lines.append(authority_line)
     else:
         prefix = "dispatcher_state:" if state_problem.startswith("missing ") else "FAIL dispatcher_state:"
         lines.append(f"{prefix} {state_problem}")
+    lines.extend(incident_authority_record_lines())
 
     lines.append(queue_directory_line(
         "outbox",
@@ -10076,6 +10227,9 @@ def deadman(
         state_age = max(0, int(now_epoch - state.stat().st_mtime))
         try:
             state_data = json.loads(state.read_text(encoding="utf-8"))
+            authority_member = authority_not_ready_member(state_data, now_epoch)
+            if authority_member is not None:
+                active_members["authority_not_ready"] = authority_member
             cycle_completed = state_data.get("cycleCompletedAt")
             if isinstance(cycle_completed, str):
                 completed_epoch = parse_iso_epoch(cycle_completed)

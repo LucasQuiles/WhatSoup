@@ -9,6 +9,7 @@ let dir: string;
 let store: IncidentStore;
 
 const PRODUCER = { producerId: 'prod-selfcheck-alpha', producerDomainId: 'dom-selfcheck' };
+const RECOVERY_PRODUCER = { producerId: 'prod-recovery-witness', producerDomainId: 'dom-selfcheck' };
 const NOW = new Date('2026-07-28T12:00:05.000Z');
 
 beforeEach(() => {
@@ -107,7 +108,7 @@ describe('condition_observed lifecycle', () => {
 
   it('resolves the matching open occurrence with a verified_recovery transition', () => {
     const opened = store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
-    const result = store.acceptSignal(recovered('sig-r1', 'occ-1', 2), PRODUCER, NOW);
+    const result = store.acceptSignal(recovered('sig-r1', 'occ-1', 2), RECOVERY_PRODUCER, NOW);
     expect(result.outcome).toBe('accepted');
     if (opened.outcome !== 'accepted' || result.outcome !== 'accepted') return;
 
@@ -119,8 +120,17 @@ describe('condition_observed lifecycle', () => {
     expect(transitions.at(-1)?.reasonCode).toBe('verified_recovery');
   });
 
+  it('keeps same-producer recovery evidence state-inert', () => {
+    const opened = store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
+    const result = store.acceptSignal(recovered('sig-self-recovery', 'occ-1', 2), PRODUCER, NOW);
+    expect(result.outcome).toBe('accepted');
+    if (opened.outcome !== 'accepted' || result.outcome !== 'accepted') return;
+    expect(result.receipt.disposition).toBe('stored_no_state_change');
+    expect(store.getIncident(opened.receipt.incidentId as number)?.conditionState).toBe('open');
+  });
+
   it('stores an unmatched recovery without altering any state', () => {
-    const result = store.acceptSignal(recovered('sig-r2', 'occ-unknown', 1), PRODUCER, NOW);
+    const result = store.acceptSignal(recovered('sig-r2', 'occ-unknown', 1), RECOVERY_PRODUCER, NOW);
     expect(result.outcome).toBe('accepted');
     if (result.outcome !== 'accepted') return;
     expect(result.receipt.disposition).toBe('stored_no_state_change');
@@ -130,8 +140,8 @@ describe('condition_observed lifecycle', () => {
 
   it('does not re-resolve or reopen an already-resolved occurrence', () => {
     store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
-    store.acceptSignal(recovered('sig-r1', 'occ-1', 2), PRODUCER, NOW);
-    const late = store.acceptSignal(recovered('sig-r3', 'occ-1', 3), PRODUCER, NOW);
+    store.acceptSignal(recovered('sig-r1', 'occ-1', 2), RECOVERY_PRODUCER, NOW);
+    const late = store.acceptSignal(recovered('sig-r3', 'occ-1', 3), RECOVERY_PRODUCER, NOW);
     expect(late.outcome).toBe('accepted');
     if (late.outcome !== 'accepted') return;
     expect(late.receipt.disposition).toBe('stored_no_state_change');
@@ -139,7 +149,7 @@ describe('condition_observed lifecycle', () => {
 
   it('stores an observation against a concluded occurrence as stored_no_state_change', () => {
     const opened = store.acceptSignal(observed('sig-1', 'occ-1', 1), PRODUCER, NOW);
-    store.acceptSignal(recovered('sig-r1', 'occ-1', 2), PRODUCER, NOW);
+    store.acceptSignal(recovered('sig-r1', 'occ-1', 2), RECOVERY_PRODUCER, NOW);
     const late = store.acceptSignal(observed('sig-post', 'occ-1', 3), PRODUCER, NOW);
     expect(late.outcome).toBe('accepted');
     if (opened.outcome !== 'accepted' || late.outcome !== 'accepted') return;
@@ -208,7 +218,7 @@ describe('condition_observed lifecycle', () => {
       const before = store.getIncident(incidentId);
       const beforeTransitions = store.listTransitions(incidentId);
 
-      const stale = store.acceptSignal(recovered('sig-r-old', 'occ-1', 3), PRODUCER, NOW);
+      const stale = store.acceptSignal(recovered('sig-r-old', 'occ-1', 3), RECOVERY_PRODUCER, NOW);
       expect(stale.outcome).toBe('accepted');
       if (stale.outcome !== 'accepted') return;
       expect(stale.receipt.disposition).toBe('stored_stale_observation');
@@ -225,7 +235,7 @@ describe('condition_observed lifecycle', () => {
       if (opened.outcome !== 'accepted') throw new Error('setup: open failed');
       const incidentId = opened.receipt.incidentId as number;
 
-      const equal = store.acceptSignal(recovered('sig-r-eq', 'occ-1', 5), PRODUCER, NOW);
+      const equal = store.acceptSignal(recovered('sig-r-eq', 'occ-1', 5), RECOVERY_PRODUCER, NOW);
       expect(equal.outcome).toBe('accepted');
       if (equal.outcome !== 'accepted') return;
       expect(equal.receipt.disposition).toBe('stored_stale_observation');
@@ -236,8 +246,8 @@ describe('condition_observed lifecycle', () => {
     it('replays the original state-inert receipt on exact resend', () => {
       store.acceptSignal(observed('sig-1', 'occ-1', 5), PRODUCER, NOW);
       const body = recovered('sig-r-old', 'occ-1', 3);
-      const first = store.acceptSignal(body, PRODUCER, NOW);
-      const replay = store.acceptSignal(body, PRODUCER, new Date('2026-07-28T12:30:00.000Z'));
+      const first = store.acceptSignal(body, RECOVERY_PRODUCER, NOW);
+      const replay = store.acceptSignal(body, RECOVERY_PRODUCER, new Date('2026-07-28T12:30:00.000Z'));
       expect(replay.outcome).toBe('idempotent_replay');
       if (first.outcome !== 'accepted' || replay.outcome !== 'idempotent_replay') return;
       expect(replay.receipt).toEqual(first.receipt);
@@ -246,7 +256,7 @@ describe('condition_observed lifecycle', () => {
     it('still resolves on a causally newer recovery', () => {
       const opened = store.acceptSignal(observed('sig-1', 'occ-1', 5), PRODUCER, NOW);
       if (opened.outcome !== 'accepted') throw new Error('setup: open failed');
-      const result = store.acceptSignal(recovered('sig-r-new', 'occ-1', 6), PRODUCER, NOW);
+      const result = store.acceptSignal(recovered('sig-r-new', 'occ-1', 6), RECOVERY_PRODUCER, NOW);
       expect(result.outcome).toBe('accepted');
       if (result.outcome !== 'accepted') return;
       expect(result.receipt.disposition).toBe('incident_resolved');

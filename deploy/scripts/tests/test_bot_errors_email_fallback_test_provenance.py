@@ -59,7 +59,16 @@ from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
-_ENV_KEYS = ["BOT_ERRORS_STATE_DIR", "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS", "BOT_ERRORS_TEST_LEAK_PATH_PATTERNS"]
+_ENV_KEYS = [
+    "BOT_ERRORS_STATE_DIR",
+    "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS",
+    "BOT_ERRORS_TEST_LEAK_PATH_PATTERNS",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
+]
 
 _CLEAN_STATE_DIR = "/tmp/unused-state-dir-for-pattern-test"
 _PYTEST_BASETEMP_STATE_DIR = "/srv/whatsoup/tmp/pytest-of-user/pytest-4/testdeadlettersavesabsorbe0/state"
@@ -93,6 +102,12 @@ def _clean_env():
 def _load_module(env: dict[str, str]):
     for key, value in env.items():
         os.environ[key] = value
+    state_dir = env.get("BOT_ERRORS_STATE_DIR")
+    if state_dir:
+        os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+        os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+            Path(state_dir) / "test-incident-authority.jsonl"
+        )
     spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_email_provenance", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

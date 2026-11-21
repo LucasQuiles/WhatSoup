@@ -79,6 +79,21 @@ async function postChunks(chunks: Buffer[], headers: Record<string, string> = {}
   return done;
 }
 
+async function postPhase(body: string, bearer: string, d = deps()): Promise<CapturedResponse> {
+  const handlers = createSignalsHandlers(d);
+  const { res, done } = mockRes();
+  await handlers.postPhaseFact(
+    mockReq({
+      method: 'POST',
+      url: '/api/incident-phases',
+      body,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
+    }),
+    res,
+  );
+  return done;
+}
+
 function heartbeat(signalId = 'hb-1'): string {
   return JSON.stringify({
     schemaVersion: 1,
@@ -251,6 +266,26 @@ describe('POST /api/signals', () => {
     expect(statuses[2]).toBe(429);
   });
 
+  it('keeps admission limits across handler recreation', async () => {
+    const d = deps({ rateLimit: { windowMs: 60_000, maxPerWindow: 2 } });
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const handlers = createSignalsHandlers(d);
+      const { res, done } = mockRes();
+      await handlers.postSignal(
+        mockReq({
+          method: 'POST',
+          url: '/api/signals',
+          body: heartbeat(`hb-durable-rate-${i}`),
+          headers: { 'content-type': 'application/json', ...authed() },
+        }),
+        res,
+      );
+      statuses.push((await done).status);
+    }
+    expect(statuses).toEqual([201, 201, 429]);
+  });
+
   it('maps storage-full failures to 507', async () => {
     const throwing = {
       acceptSignal: () => {
@@ -365,5 +400,52 @@ describe('POST /api/signals — byte-stable ingestion', () => {
     expect(out.status).toBe(400);
     expect((out.body as { error: { code: string } }).error.code).toBe('malformed_request');
     expect(eventCount()).toBe(0);
+  });
+});
+
+describe('POST /api/incident-phases', () => {
+  it('requires credential-bound phase scope and returns replay receipts', async () => {
+    const opened = incidentStore!.acceptSignal(JSON.stringify({
+      schemaVersion: 1,
+      signalId: 'phase-source',
+      kind: 'condition_observed',
+      subject: 'host:alpha',
+      conditionClass: 'selfcheck_drift',
+      occurrenceId: 'occ-phase',
+      occurrenceSeq: 1,
+      observedAt: '2026-07-28T11:59:00.000Z',
+    }), { producerId: 'prod-alpha', producerDomainId: 'dom-selfcheck' }, NOW);
+    if (opened.outcome !== 'accepted' || opened.receipt.incidentId === null) throw new Error('setup failed');
+    const phaseBody = JSON.stringify({
+      schemaVersion: 1,
+      factId: 'notify-phase-1',
+      incidentId: opened.receipt.incidentId,
+      occurrenceId: 'occ-phase',
+      phase: 'notification_delivered',
+      sourceEventId: opened.receipt.eventId,
+      observedAt: '2026-07-28T12:00:00.000Z',
+    });
+    expect((await postPhase(phaseBody, credential)).status).toBe(403);
+
+    const reg = producerStore!.register({
+      producerId: 'prod-notifier',
+      producerDomainId: 'dom-selfcheck',
+      allowedKinds: ['notice_recorded'],
+      allowedConditionClasses: [],
+      allowedSubjects: ['host:alpha'],
+      actorClass: 'notifier',
+      allowedPhaseKinds: ['notification_delivered'],
+    }, NOW);
+    if (!reg.ok) throw new Error('setup failed');
+    const ex = producerStore!.exchangeEnrollmentSecret('prod-notifier', reg.enrollmentSecret, NOW);
+    if (!ex.ok) throw new Error('setup failed');
+    const first = await postPhase(phaseBody, ex.credential);
+    const replay = await postPhase(phaseBody, ex.credential);
+    expect(first.status).toBe(201);
+    expect(replay.status).toBe(200);
+    expect(replay.headers['idempotent-replay']).toBe('true');
+    expect((replay.body as { receiptId: string }).receiptId).toBe(
+      (first.body as { receiptId: string }).receiptId,
+    );
   });
 });

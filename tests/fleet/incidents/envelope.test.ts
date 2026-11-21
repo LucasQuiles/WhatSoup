@@ -38,6 +38,25 @@ describe('parseSignalEnvelope', () => {
     expect(result.ok).toBe(false);
   });
 
+  it('rejects occurrence sequences that cannot round-trip exactly', () => {
+    const result = parseSignalEnvelope(base({ occurrenceSeq: Number.MAX_SAFE_INTEGER + 1 }));
+    expect(result.ok).toBe(false);
+  });
+
+  it('requires an explicit recovery proof class for recovery evidence', () => {
+    const parsed = parseSignalEnvelope(JSON.stringify({
+      schemaVersion: 1,
+      signalId: 'sig-recovery-no-proof',
+      kind: 'condition_recovered',
+      subject: 'host:alpha',
+      conditionClass: 'selfcheck_drift',
+      occurrenceId: 'occ-1',
+      occurrenceSeq: 2,
+      observedAt: '2026-07-28T12:01:00.000Z',
+    }));
+    expect(parsed.ok).toBe(false);
+  });
+
   it('accepts heartbeat_observed without occurrence fields', () => {
     const result = parseSignalEnvelope(
       JSON.stringify({

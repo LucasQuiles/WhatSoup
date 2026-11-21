@@ -101,6 +101,51 @@ export const MIGRATIONS: readonly IncidentMigration[] = [
       `CREATE INDEX idx_producers_credential ON producers (credential_hash)`,
     ],
   },
+  {
+    version: 3,
+    statements: [
+      `ALTER TABLE incidents ADD COLUMN opened_producer_id TEXT`,
+      `UPDATE incidents
+          SET opened_producer_id = (
+            SELECT producer_id FROM events WHERE event_id = incidents.opened_event_id
+          )
+        WHERE opened_producer_id IS NULL`,
+      `CREATE TABLE admission_windows (
+         producer_id TEXT NOT NULL,
+         window_start_ms INTEGER NOT NULL,
+         request_count INTEGER NOT NULL CHECK (request_count > 0),
+         PRIMARY KEY (producer_id, window_start_ms)
+       ) STRICT`,
+      `CREATE INDEX idx_admission_windows_start ON admission_windows (window_start_ms)`,
+      `ALTER TABLE producers ADD COLUMN actor_class TEXT NOT NULL DEFAULT 'observer'`,
+      `ALTER TABLE producers ADD COLUMN allowed_phase_kinds TEXT NOT NULL DEFAULT '[]'`,
+      `CREATE TABLE phase_facts (
+         phase_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+         producer_id TEXT NOT NULL,
+         producer_domain_id TEXT NOT NULL,
+         actor_class TEXT NOT NULL,
+         fact_id TEXT NOT NULL,
+         payload_digest TEXT NOT NULL,
+         payload_json TEXT NOT NULL,
+         incident_id INTEGER NOT NULL,
+         occurrence_id TEXT NOT NULL,
+         phase_kind TEXT NOT NULL CHECK (phase_kind IN (
+           'notification_delivered', 'q_receipt', 'diagnosis_recorded',
+           'change_approved', 'execution_recorded', 'recovery_confirmed')),
+         source_event_id INTEGER NOT NULL,
+         related_fact_id TEXT,
+         evidence_class TEXT,
+         evidence_digest TEXT,
+         observed_at TEXT NOT NULL,
+         received_at TEXT NOT NULL,
+         disposition TEXT NOT NULL CHECK (disposition IN ('phase_recorded', 'stored_state_inert')),
+         reason_code TEXT NOT NULL,
+         transition_id INTEGER,
+         UNIQUE (producer_id, fact_id)
+       ) STRICT`,
+      `CREATE INDEX idx_phase_facts_incident ON phase_facts (incident_id, phase_event_id)`,
+    ],
+  },
 ];
 
 export const INCIDENT_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

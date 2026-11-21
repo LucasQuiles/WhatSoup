@@ -162,6 +162,46 @@ describe('BOT ERRORS service templates', () => {
     }
   });
 
+  it('keeps IncidentStore producer credentials separate and dry seams out of services', () => {
+    const dispatcher = readFileSync('deploy/scripts/bot-errors-dispatcher.py', 'utf8');
+    const qLoop = readFileSync('deploy/scripts/bot-errors-q-loop.py', 'utf8');
+    const installer = readFileSync('deploy/scripts/install-bot-errors-launchd.sh', 'utf8');
+
+    expect(dispatcher).toContain('BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE');
+    expect(dispatcher).not.toContain('BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE');
+    expect(qLoop).toContain('BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE');
+    expect(qLoop).not.toContain('BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE');
+    expect(installer).toContain('<key>BOT_ERRORS_INCIDENT_AUTHORITY_URL</key>');
+    expect(installer).toContain('<key>BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE</key>');
+    expect(installer).toContain('<key>BOT_ERRORS_INCIDENT_AUTHORITY_MODE</key>');
+    // Without a value in the env file the macOS dispatcher runs in observe mode.
+    expect(installer).toContain('env_or_default BOT_ERRORS_INCIDENT_AUTHORITY_MODE "observe"');
+    for (const file of [...serviceTemplates, ...launchdInstallers]) {
+      expect(readFileSync(file, 'utf8')).not.toMatch(/BOT_ERRORS_(?:DRY_(?:AUTHORITY|SEND)|TEST_MODE)/);
+    }
+    for (const text of [dispatcher, qLoop, installer]) {
+      expect(text).not.toContain('BOT_ERRORS_INCIDENT_AUTHORITY_CREDENTIAL_FILE');
+    }
+  });
+
+  it('setup writes observe mode and never adds default credential paths to an existing env file', () => {
+    const setup = readFileSync('deploy/setup.sh', 'utf8');
+    const freshStart = setup.indexOf('# Private BOT ERRORS routing config generated');
+    const existingStart = setup.indexOf('bot_errors_env_file="$HOME/.config/whatsoup/bot-errors.env"');
+    const existingEnd = setup.indexOf('# ── Step 5');
+    expect(freshStart).toBeGreaterThan(0);
+    expect(existingStart).toBeGreaterThan(freshStart);
+    expect(existingEnd).toBeGreaterThan(existingStart);
+    const fresh = setup.slice(freshStart, existingStart);
+    const existing = setup.slice(existingStart, existingEnd);
+    expect(fresh).toContain('echo "BOT_ERRORS_INCIDENT_AUTHORITY_MODE=observe"');
+    // Appended only when the key is missing, so an owner's enforce is kept.
+    expect(existing).toContain(
+      'append_env_key_if_missing "$bot_errors_env_file" "BOT_ERRORS_INCIDENT_AUTHORITY_MODE" "observe"',
+    );
+    expect(existing).not.toMatch(/append_env_key_if_missing[^\n]*\n?[^\n]*AUTHORITY_CREDENTIAL_FILE/);
+  });
+
   it('renders launchd plists with routing env from file without executing env-file shell', () => {
     const home = makeTempRoot('whatsoup-launchd-home-');
     const shimDir = makeTempRoot('whatsoup-launchd-shims-');
@@ -173,6 +213,8 @@ describe('BOT ERRORS service templates', () => {
     const db = path.join(home, 'bot<db>.sqlite');
     const stateDir = path.join(home, 'state "quoted"');
     const repoRoot = path.join(home, "repo 'single'");
+    const authorityUrl = 'https://incident-authority.invalid/api/signals';
+    const authorityCredential = path.join(home, 'credentials & dispatcher.token');
     const escapedSocket = xmlEscape(socket);
     const escapedDb = xmlEscape(db);
     const escapedStateDir = xmlEscape(stateDir);
@@ -187,6 +229,9 @@ describe('BOT ERRORS service templates', () => {
       `BOT_ERRORS_SOCKET_PATH=${socket}`,
       `BOT_ERRORS_SOCKET=${socket}`,
       `BOT_ERRORS_DB=${db}`,
+      `BOT_ERRORS_INCIDENT_AUTHORITY_URL=${authorityUrl}`,
+      `BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE=${authorityCredential}`,
+      'BOT_ERRORS_INCIDENT_AUTHORITY_MODE=enforce',
       `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
       `MALICIOUS_TOUCH=$(touch ${maliciousTouch})`,
       '',
@@ -241,6 +286,24 @@ describe('BOT ERRORS service templates', () => {
       expect(plist).toContain('/opt/homebrew/bin');
       expect(plist).toContain('/usr/local/bin');
       expect(plist).toContain('/usr/bin:/bin:/usr/sbin:/sbin');
+    }
+    const dispatcherPlist = readFileSync(
+      launchAgentPath(home, 'com.bot-errors.dispatcher'),
+      'utf8',
+    );
+    expect(dispatcherPlist).toContain(
+      `<key>BOT_ERRORS_INCIDENT_AUTHORITY_URL</key><string>${authorityUrl}</string>`,
+    );
+    expect(dispatcherPlist).toContain(
+      `<key>BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE</key><string>${xmlEscape(authorityCredential)}</string>`,
+    );
+    // The owner's per-host enforce switch reaches the macOS dispatcher.
+    expect(dispatcherPlist).toContain(
+      '<key>BOT_ERRORS_INCIDENT_AUTHORITY_MODE</key><string>enforce</string>',
+    );
+    for (const label of ['com.bot-errors.deadman', 'com.bot-errors.health', 'com.bot-errors.health-only']) {
+      const plist = readFileSync(launchAgentPath(home, label), 'utf8');
+      expect(plist).not.toContain('AUTHORITY_CREDENTIAL_FILE');
     }
   });
 
