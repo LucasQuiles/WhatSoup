@@ -22,6 +22,14 @@
  * instances, which reproduces the part that broke (singletons do not survive), and
  * the carrier under test is a genuine file on disk. A true two-process test would
  * additionally cover argv/env/cwd differences, which this does not.
+ *
+ * Nor does it, or any unit test, cover whether WhatsApp accepts the daemon's first
+ * reconnect with the paired auth material. The pairing-completion gate
+ * (pairing-completion.test.ts, auth-cli-pairing-completion.test.ts) proves the CLI
+ * waits for the key-store writes Baileys makes after 'open'; whether that prevents
+ * the observed first-reconnect 401 needs a live-line qualification: pair a real
+ * line, let the CLI exit on its own, start the runtime and confirm it stays
+ * connected across a restart.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -125,8 +133,10 @@ describe('S2/S3 — pairing receipt crosses the process boundary', () => {
     mocks.saveCreds.mockResolvedValue(undefined);
     mocks.qrcodeGenerate.mockReset();
     mocks.useMultiFileAuthState.mockReset();
+    // A key store with get/set, like useMultiFileAuthState's. An empty object has no
+    // trackable writes, and the pairing completion gate now refuses success on it.
     mocks.useMultiFileAuthState.mockResolvedValue({
-      state: { creds: {}, keys: {} },
+      state: { creds: {}, keys: { get: async () => ({}), set: async () => {} } },
       saveCreds: mocks.saveCreds,
     });
     mocks.makeWASocket.mockReset();
