@@ -31,6 +31,8 @@ credentials — enter the fleet token on the lock screen to start a session:
 - An unavailable session check stays closed with **Retry session check**; it is
   distinguished from the server confirming that the session is absent or expired.
   Retired probes and revocation responses cannot overwrite a newer local action.
+  These ordering guarantees hold within one mounted console tab: other tabs and a
+  reload before revocation settles share the session cookie but not this ordering.
 - The fleet token lives in `~/.config/whatsoup/fleet-tokens.json` on the
   fleet host.
 - Dev mode (Vite proxy) bypasses the lock screen — the proxy injects auth
@@ -56,11 +58,13 @@ flow; the existing `update-by-release-deploy-required` refusal switches that flo
 to deployment guidance. A fleet recovery timeout is unconfirmed recovery, not an
 update-complete result. Closing or reopening the dialog invalidates pending callbacks.
 
-An instance restart's HTTP202 response confirms a request, not recovered health.
+An instance restart's HTTP 202 response confirms a request, not recovered health.
 Restart batches prevent duplicate pending requests and do not resubmit an already
 accepted item when another item fails. Check instance health after acceptance or an
-unconfirmed result. Mode changes persist configuration before requesting restart;
-both line views refresh after that write, even when restart cannot be confirmed.
+unconfirmed result. The mode switch dialog sends a change of the line's `type`, which
+the server refuses for an existing line (`type is immutable`): the dialog reports the
+failure and neither saves the configuration nor restarts the line. Its saved and
+restart-requested messages apply only where the server accepts the change.
 
 ## Pages
 
@@ -106,21 +110,38 @@ Fleet health monitoring with instance management actions.
 
 The left panel shows every instance with its status, phone number, message count, and session info. Unhealthy instances display restart and delete buttons inline.
 
-Deletion succeeds only after the service is stopped and disabled and its config,
-data and state directories are removed. If cleanup is incomplete, the API returns
-`instance_cleanup_failed` with `mutation_state: unknown` and `retryable: false`.
-The line detail page shows the recovery message and stays open. Inspect the
-remaining directories and the correlated server log, correct the cleanup failure,
-then explicitly retry deletion. A failure can leave only part of the instance;
-it does not mean that deletion had no effect.
+Deletion succeeds only after the stop and disable calls returned, or reported the
+service as already absent, and the config, data and state directories are removed.
+A success does not prove that the instance process has exited: some service
+managers return from a stop after a timeout without observing the exit. Each delete
+failure carries `instance`, `mutation_state: unknown`, `retryable: false` and a
+correlation id that the server log line also carries:
+`service_stop_failed` (nothing was removed), `service_disable_failed` (the stop
+returned; the files are kept) and `instance_cleanup_failed` (some directories may
+remain). The line detail page shows the recovery message and stays open. Inspect the
+remaining directories and the correlated server log, correct the failure, then
+explicitly retry deletion. A failure can leave only part of the instance; it does
+not mean that deletion had no effect.
 
-Failed creation reports `rolled_back` with `rollback_state: succeeded` only after
-service compensation and filesystem restoration succeed. A rejected enable call
-can have changed service state before losing its response, so creation attempts
-disable before removing its files. Failed compensation retains the files and
-reports `rollback_failed` with `rollback_state: failed`. Inspect service state and
-the correlated server log before repair or another creation attempt; the API does
-not automatically retry an uncertain service operation.
+A failed creation always runs its filesystem rollback: it removes the instance's
+config, data and state directories, restores each workspace file it overwrote
+(`.claude/CLAUDE.md`, `.claude/settings.json`) with its bytes and mode, and removes
+the workspace files it added. A rejected enable call can have changed service state
+before losing its response, so creation also attempts disable. The response has one
+of three outcomes, each with a correlation id that the server log carries:
+
+- `rolled_back` with `rollback_state: succeeded`: the disable (when one was needed)
+  returned and the filesystem rollback finished. This does not prove that an earlier
+  service state was restored, and a `.claude` directory or permission change that
+  creation made in the workspace stays.
+- `rollback_failed` with `mutation_state: unknown`: the disable failed, but the files
+  were restored and the directories removed, so another creation of the same name is
+  not refused. Inspect the service state first.
+- `rollback_failed` with `mutation_state: rollback_failed`: the filesystem rollback
+  was incomplete. Files or directories may remain, and another creation is refused
+  while the config directory exists.
+
+The API does not automatically retry an uncertain service operation.
 
 ![Unhealthy Instance Management](screenshots/ops-unhealthy.png)
 
