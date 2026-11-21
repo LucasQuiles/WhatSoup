@@ -186,7 +186,7 @@ def _binding(value: object, code: str) -> IncidentBinding:
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
         raise ReportQualificationError("invalid_generation")
     scope = data.get("scope")
-    if scope not in _SCOPES:
+    if not isinstance(scope, str) or scope not in _SCOPES:
         raise ReportQualificationError("invalid_coverage_scope")
     coverage_complete = _required_bool(data.get("coverageComplete"), "missing_coverage_complete")
     if scope == "all-hosts" and not coverage_complete:
@@ -337,10 +337,10 @@ def _handling_facts(record: VerifiedRecord) -> HandlingFacts:
     target = _safe_text(facts.get("target"), "missing_target")
     impact = _optional_text(facts.get("impact"), "invalid_impact")
     severity = facts.get("severity")
-    if severity not in _SEVERITIES:
+    if not isinstance(severity, str) or severity not in _SEVERITIES:
         raise ReportQualificationError("invalid_severity")
     state = facts.get("state")
-    if state not in _STATES:
+    if not isinstance(state, str) or state not in _STATES:
         raise ReportQualificationError("invalid_handling_state")
     work_started = _required_bool(facts.get("workStarted"), "missing_work_started")
     administrative_closure = _required_bool(
@@ -357,7 +357,7 @@ def _handling_facts(record: VerifiedRecord) -> HandlingFacts:
     next_action = _safe_text(facts.get("next"), "missing_next")
     reader_action = _optional_text(facts.get("readerAction"), "invalid_reader_action")
     owner_decision = facts.get("ownerDecision")
-    if owner_decision not in {"open", "closed", "not_required"}:
+    if not isinstance(owner_decision, str) or owner_decision not in {"open", "closed", "not_required"}:
         raise ReportQualificationError("invalid_owner_decision")
     owner_action = _optional_text(facts.get("ownerAction"), "invalid_owner_action")
     if owner_decision == "open" and owner_action is None:

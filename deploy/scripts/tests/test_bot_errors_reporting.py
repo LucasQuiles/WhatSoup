@@ -1014,3 +1014,53 @@ def test_evidence_named_on_another_host_is_refused(tmp_path: Path) -> None:
     handling["locator"] = f"remote-host-a.example.invalid:{local_path}"
     with pytest.raises(reporting.ReportQualificationError, match="evidence_not_local"):
         _qualify(document, tmp_path)
+
+
+# A JSON list or object in a field with a closed set of values is refused with
+# that field's code, as an unknown string is. Neither is hashable, so a bare
+# membership test would raise TypeError instead.
+_NON_STRING_VALUES = (pytest.param(["target"], id="list"), pytest.param({"value": "target"}, id="object"))
+
+
+@pytest.mark.parametrize("value", _NON_STRING_VALUES)
+def test_a_non_string_coverage_scope_is_refused(tmp_path: Path, value: object) -> None:
+    document = _document(tmp_path, binding=_binding(scope=value))
+    with pytest.raises(reporting.ReportQualificationError, match="invalid_coverage_scope"):
+        _qualify(document, tmp_path)
+
+
+_CLOSED_SET_FACTS = (
+    ("severity", "invalid_severity"), ("state", "invalid_handling_state"), ("ownerDecision", "invalid_owner_decision"),
+)
+_JSON_CONTAINERS = st.one_of(
+    st.lists(st.text(max_size=8), max_size=3),
+    st.dictionaries(st.text(max_size=8), st.text(max_size=8), max_size=3),
+)
+
+
+@properties
+@given(fact=st.sampled_from(_CLOSED_SET_FACTS), value=_JSON_CONTAINERS)
+@example(fact=_CLOSED_SET_FACTS[0], value=["critical"])
+@example(fact=_CLOSED_SET_FACTS[0], value={"value": "critical"})
+@example(fact=_CLOSED_SET_FACTS[1], value=["accepted"])
+@example(fact=_CLOSED_SET_FACTS[1], value={"value": "accepted"})
+@example(fact=_CLOSED_SET_FACTS[2], value=["closed"])
+@example(fact=_CLOSED_SET_FACTS[2], value={"value": "closed"})
+def test_a_non_string_handling_fact_is_refused(fact: tuple[str, str], value: object) -> None:
+    field, code = fact
+    with private_case() as (directory, _):
+        root = directory.resolve()
+        document = _document(root)
+        _replace_handling(document, root, _handling_facts(**{field: value}))
+        with pytest.raises(reporting.ReportQualificationError, match=code):
+            _qualify(document, root)
+
+
+def test_the_preview_refuses_a_non_string_scope_with_its_json_reason(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps(_document(root, binding=_binding(scope=["target"]))), encoding="utf-8")
+    result = _dispatcher_cli(tmp_path, "--format-human-report", str(request), "--human-report-approved-root", str(root))
+    assert result.returncode == 3, result.stderr
+    assert "Traceback" not in result.stderr
+    assert json.loads(result.stderr.strip().splitlines()[-1]) == {"outcome": "inconclusive", "reason": "invalid_coverage_scope"}
