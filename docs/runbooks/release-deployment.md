@@ -688,6 +688,10 @@ the macOS procedure; on Linux use GNU `mv -T` where the block uses BSD `mv -fh`.
      (`-ef` compares device and inode, following the link). If it is another
      file, moving the wrapper is a release switch for `release:activate`, not
      a respelling;
+   - `NEW` is also the pathname the wrapper resolves to, link by link as setup
+     resolves it. Two release trees can hard-link one wrapper file, so `-ef`
+     alone passes for the wrong tree, and the wrapper takes its tree from the
+     path it is run through;
    - the temporary link `~/.local/bin/.whatsoup.relink` does not exist in any
      form.
 
@@ -716,6 +720,14 @@ the macOS procedure; on Linux use GNU `mv -T` where the block uses BSD `mv -fh`.
      [ "$(cd -P "$(dirname "$NEW")" 2>/dev/null && pwd)" = "$(dirname "$NEW")" ] || fail "NEW is not the resolved path: $NEW"
      [ -f "$NEW" ] || fail "NEW is not an existing regular file: $NEW"
      [ "$NEW" -ef "$W" ] || fail "NEW is not the file the wrapper runs: $NEW"
+     p="$W"; n=0
+     while [ -L "$p" ]; do
+       n=$((n + 1)); [ "$n" -le 40 ] || fail "the wrapper's link chain is longer than 40 links"
+       t="$(readlink "$p")" || fail "could not read the link $p"
+       case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+     done
+     d="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd)" || fail "the wrapper does not resolve: $p"
+     [ "$d/$(basename "$p")" = "$NEW" ] || fail "NEW is not the path the wrapper resolves to: $d/$(basename "$p")"
      if [ -e "$T" ] || [ -L "$T" ]; then fail "$T already exists; inspect it"; fi
      ln -s "$NEW" "$T" || fail "could not create $T"
      if ! mv -fh "$T" "$W"; then

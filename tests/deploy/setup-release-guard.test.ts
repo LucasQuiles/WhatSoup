@@ -880,6 +880,57 @@ describe('deploy/setup.sh from this repository on a Linux host whose bot runs a 
   });
 });
 
+describe('release-deployment.md: the block that respells a relative wrapper', () => {
+  /** The pasteable block under "Helper links after a macOS activation", with NEW filled in. */
+  function respellBlock(newTarget: string): string {
+    const runbook = fs.readFileSync(path.join(repoRoot, 'docs', 'runbooks', 'release-deployment.md'), 'utf8');
+    const start = runbook.indexOf('   ```bash\n   (\n     fail()');
+    const end = runbook.indexOf('\n   )\n   ```', start);
+    if (start === -1 || end === -1) throw new Error('respelling block not found in release-deployment.md');
+    const body = runbook.slice(start + '   ```bash\n'.length, end + '\n   )'.length);
+    return body
+      .split('\n')
+      .map((line) => line.replace(/^ {3}/, ''))
+      .join('\n')
+      .replace(`NEW='<the path printed after "Bot wrapper: … ->">'`, `NEW=${JSON.stringify(newTarget)}`);
+  }
+
+  it('stops before any change when NEW is another tree whose wrapper is the same file (a hard link)', () => {
+    const host = makeHost();
+    const r1 = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const r2 = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    fs.unlinkSync(wrapperOf(r2));
+    fs.linkSync(wrapperOf(r1), wrapperOf(r2));
+    fs.symlinkSync(path.relative(host.bin, wrapperOf(r1)), path.join(host.bin, 'whatsoup'));
+    const before = snapshot(host.base);
+
+    const result = spawnSync('bash', ['-c', respellBlock(wrapperOf(r2))], {
+      env: { ...cleanGitEnv(), HOME: host.home },
+      encoding: 'utf8',
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain('stop: NEW is not the path the wrapper resolves to');
+    expect(result.stdout).not.toContain('relinked');
+    expect(snapshot(host.base)).toEqual(before);
+  });
+
+  // The block renames with BSD `mv -fh`, so the success path runs only on macOS.
+  it.runIf(process.platform === 'darwin')('respells a relative wrapper as its resolved absolute path', () => {
+    const host = makeHost();
+    const r1 = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    fs.symlinkSync(path.relative(host.bin, wrapperOf(r1)), path.join(host.bin, 'whatsoup'));
+
+    const result = spawnSync('bash', ['-c', respellBlock(wrapperOf(r1))], {
+      env: { ...cleanGitEnv(), HOME: host.home },
+      encoding: 'utf8',
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('relinked');
+    expect(fs.readlinkSync(path.join(host.bin, 'whatsoup'))).toBe(wrapperOf(r1));
+    expect(fs.readdirSync(host.bin)).toEqual(['whatsoup']);
+  });
+});
+
 describe('deploy/setup.sh --help', () => {
   it('documents the selection flags and the release-host refusal', () => {
     const help = spawnSync('bash', ['deploy/setup.sh', '--help'], { cwd: repoRoot, encoding: 'utf8' });
