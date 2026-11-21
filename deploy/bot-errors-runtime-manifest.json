@@ -328,7 +328,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "9df4077372be1f121d961881264988aebc6a148c8e6870771138c220ab1fe497",
+      "sha256": "70131131894c3e8f5fa260478b951a46aba53c6f7e0d334f1599a1597b575881",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -701,7 +701,7 @@
     },
     {
       "path": "deploy/scripts/lib/incident_authority.py",
-      "sha256": "97c42b563697fba3ca7cfdb4473083c983d354e61b599e6f54729f4affe4b984",
+      "sha256": "20a48cca23cbf616640a17186e999049efcdebfd35338f9ff58155652f4199f9",
       "mustContain": [
         "class IncidentAuthorityClient:",
         "def canonical_signal(",

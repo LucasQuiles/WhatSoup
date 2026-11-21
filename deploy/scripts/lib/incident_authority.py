@@ -467,7 +467,12 @@ class _Destination:
 
 
 def _validate_destination(url: str) -> _Destination:
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        # urlsplit raises for some malformed addresses (an unclosed IPv6
+        # literal, for one); that is a wrong local setting like the rest.
+        raise AuthorityProtocolError("authority_destination_invalid") from exc
     if parsed.scheme not in {"http", "https"}:
         raise AuthorityProtocolError("authority_destination_scheme_invalid")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:

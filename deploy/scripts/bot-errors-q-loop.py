@@ -907,7 +907,7 @@ def send_message(
             detail = json.dumps(result, sort_keys=True)[:500]
             raise RuntimeError(f"send_message returned error: {detail}")
     except Exception as exc:  # noqa: BLE001 - log and keep daemon alive.
-        log_event("send_failed", {"error": str(exc), "preview": text[:240]})
+        log_event("send_not_ready" if isinstance(exc, AuthorityNotReady) else "send_failed", {"error": str(exc), "preview": text[:240]})
         return False
     log_event("send_ok", {"result": result, "preview": text[:240]})
     return True

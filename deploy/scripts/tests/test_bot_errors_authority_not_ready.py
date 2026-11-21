@@ -288,6 +288,33 @@ def test_a_malformed_authority_reply_stays_terminal(tmp_path, credential_root):
     assert len(list(paths["quarantine"].glob("*authority-rejected*"))) == 1
 
 
+def test_a_malformed_authority_address_holds_the_event_as_not_ready(tmp_path):
+    # urlsplit raises ValueError for an unclosed IPv6 literal. The address is
+    # checked before the credential is read, so no credential file is needed.
+    mod = _load(tmp_path / "malformed-address")
+    paths = mod.setup_dirs()
+    _seed_outbox(paths, _event("evt-malformed-address"))
+    env = {
+        "BOT_ERRORS_INCIDENT_AUTHORITY_URL": "http://[::1/api/signals",
+        "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(tmp_path / "not-read.credential"),
+    }
+    with patch.dict(os.environ, env):
+        mod.begin_incident_authority_cycle()
+        counts = mod.authorize_ready_events(paths)
+
+    assert counts == {"accepted": 0, "unavailable": 0, "rejected": 0, "not_ready": 1}
+    _assert_held_in_outbox(paths, "authority_destination_invalid")
+    record = mod.authority_not_ready_record(paths)
+    assert record is not None and record["reason"] == "authority_destination_invalid"
+    outcomes = [
+        (line["outcome"], line["reason"])
+        for line in map(json.loads, mod.incident_authority_record_path(paths).read_text().splitlines())
+    ]
+    assert outcomes == [("not_ready", "authority_destination_invalid")]
+    dispatch = (paths["logs"] / "dispatch.jsonl").read_text()
+    assert "incident_authority_not_ready" in dispatch
+
+
 def test_a_rate_refusal_stops_asking_for_the_rest_of_the_cycle(tmp_path, credential_root):
     mod = _load(tmp_path / "rate-limited")
     paths = mod.setup_dirs()

@@ -352,6 +352,39 @@ def test_observe_delivers_on_a_host_with_nothing_configured(tmp_path):
     assert mod.authority_not_ready_record(paths) is None
 
 
+_MALFORMED_AUTHORITY = "http://[::1/api/signals"  # urlsplit raises ValueError
+
+
+def test_observe_delivers_with_a_malformed_authority_address(tmp_path):
+    # The real request function: the event is neither held nor changed, the
+    # alert is sent, and the record names the setting as not ready.
+    mod = _load_dispatcher(tmp_path / "malformed-address")
+    paths = mod.setup_dirs()
+    event = _event("evt-malformed-address")
+    _open_incident(mod, paths, event)
+    queued = _seed_outbox(paths, event)
+    before = queued.read_bytes()
+    messages: list = []
+    env = {
+        "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _MALFORMED_AUTHORITY,
+        "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": str(tmp_path / "not-read.credential"),
+    }
+    with patch.dict(os.environ, env), patch.object(
+        mod, "send_whatsapp", side_effect=lambda text, *_a, **_k: messages.append(text)
+    ):
+        mod.begin_incident_authority_cycle()
+        counts = mod.authorize_ready_events(paths)
+        assert queued.read_bytes() == before, "the observe preflight must not write the event"
+        assert counts == {"accepted": 0, "unavailable": 0, "rejected": 0, "not_ready": 0}
+        assert mod.authority_not_ready_record(paths) is None
+        mod.process_one(queued, paths)
+    assert len(messages) == 1
+    assert list(paths["outbox"].glob("*.json")) == []
+    assert [(r["outcome"], r["reason"]) for r in _dispatcher_records(mod, paths)] == [
+        ("not_ready", "authority_destination_invalid")
+    ]
+
+
 @pytest.mark.parametrize("outcome", OUTCOME_NAMES)
 def test_the_observe_preflight_never_touches_an_event_and_asks_once(tmp_path, outcome):
     mod = _load_dispatcher(tmp_path / f"preflight-{outcome}")
@@ -864,6 +897,32 @@ def test_enforce_still_stops_a_q_loop_notice_without_a_grant(tmp_path):
     assert sent is False and sends == []
     records = _records(q_loop.INCIDENT_AUTHORITY_RECORD)
     assert [(r["outcome"], r["mode"]) for r in records] == [("not_configured", "enforce")]
+
+
+def test_enforce_logs_a_q_loop_notice_held_by_a_malformed_address_as_not_ready(tmp_path):
+    q_loop = _load_q_loop(tmp_path / "q-loop-malformed-address", "enforce")
+    sends: list = []
+    env = {
+        "BOT_ERRORS_INCIDENT_AUTHORITY_URL": _MALFORMED_AUTHORITY,
+        "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE": str(tmp_path / "not-read.credential"),
+    }
+    with patch.dict(os.environ, env), patch.object(q_loop, "validate_bot_errors_target", lambda: None), patch.object(
+        q_loop, "rpc_call", side_effect=lambda *a, **_k: sends.append(a) or {"ok": True}
+    ):
+        sent = q_loop.send_message(
+            q_loop.default_state(),
+            "socket.invalid",
+            "checkpoint text",
+            authority_event_id="q-loop-checkpoint-malformed-address",
+            authority_observed_epoch=1_763_600_000,
+        )
+    assert sent is False and sends == []
+    records = _records(q_loop.INCIDENT_AUTHORITY_RECORD)
+    assert [(r["outcome"], r["reason"], r["mode"]) for r in records] == [
+        ("not_ready", "authority_destination_invalid", "enforce")
+    ]
+    kinds = [record.get("recordKind") for record in _records(q_loop.EVENT_LOG)]
+    assert "send_not_ready" in kinds and "send_failed" not in kinds
 
 
 def test_the_health_report_summarises_the_last_day_of_the_record(tmp_path):
