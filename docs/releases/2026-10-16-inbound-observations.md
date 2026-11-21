@@ -27,7 +27,8 @@
   the fixed sources `inbound_no_consumer` and `inbound_store_failed`.
   An accepted emission suppresses repeated alerts for that reason for
   15 minutes on the monotonic clock. Failed or thrown emissions suppress retries
-  for one minute; a later observation can retry after that interval. There is no
+  for one minute, counted from the end of the failed attempt; a later
+  observation can retry after that interval. There is no
   background retry timer. Log attempts are separately limited to once per reason
   every 15 minutes, while the observation counters continue to increment.
 - A persistence failure can occur after the message row was written. Its

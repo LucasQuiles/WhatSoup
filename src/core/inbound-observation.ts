@@ -16,7 +16,8 @@
 // includes bookkeeping after the message row is written, so the row may still
 // be retained: it claims non-admission with retention unknown, not loss. An
 // accepted emission starts a 15-minute per-reason window. Failed or thrown
-// emissions retry on the first observation after a one-minute interval, so an
+// emissions retry on the first observation after a one-minute interval,
+// counted from the end of the failed attempt, so an
 // outage cannot amplify every message into another delivery attempt. Timing uses
 // the monotonic clock (performance.now()), so a wall-clock step cannot lengthen the suppression
 // of a loss alert. The rest are advisory. Queue displacement keeps
@@ -106,10 +107,16 @@ function emitLocalLossAlert(instance: string, reason: AlertingReason): { emissio
   if (until !== undefined && now < until) return { emissionAccepted: false, status: 'rate_limited' };
   // Reserve before calling the emitter: throws and re-entry must not bypass the bound.
   nextAlertAt.set(reason, now + FAILED_ALERT_RETRY_MS);
-  const result = reason === 'transport.no_consumer' ? emitNoConsumerAlert(instance) : emitStoreFailedAlert(instance);
-  const emissionAccepted = result.accepted || result.status === 'captured' || result.status === 'legacy_accepted_unconfirmed';
-  if (emissionAccepted) nextAlertAt.set(reason, performance.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
-  return { emissionAccepted, status: result.status };
+  let emissionAccepted = false;
+  try {
+    const result = reason === 'transport.no_consumer' ? emitNoConsumerAlert(instance) : emitStoreFailedAlert(instance);
+    emissionAccepted = result.accepted || result.status === 'captured' || result.status === 'legacy_accepted_unconfirmed';
+    return { emissionAccepted, status: result.status };
+  } finally {
+    // Count both windows from the end of the attempt: a slow failed or thrown
+    // emission must not leave the next attempt free to start at once.
+    nextAlertAt.set(reason, performance.now() + (emissionAccepted ? INBOUND_OBSERVATION_ALERT_WINDOW_MS : FAILED_ALERT_RETRY_MS));
+  }
 }
 
 /**

@@ -240,6 +240,29 @@ describe('accepted alert windows and bounded failed-delivery retries', () => {
     });
   });
 
+  it.each(['failed', 'threw'] as const)(
+    'counts the retry interval from the end of a slow %s attempt, not from its start',
+    (outcome) => {
+      doubles.emitAlert.mockImplementationOnce(() => {
+        // The attempt outlasts the retry interval before it fails.
+        vi.advanceTimersByTime(90_000);
+        if (outcome === 'threw') throw new Error('outbox stalled');
+        return { ok: false, channel: 'none', status: 'failed' };
+      });
+
+      observeInbound('WhatSoup', 'ingest.store_failed');
+      observeInbound('WhatSoup', 'ingest.store_failed');
+      vi.advanceTimersByTime(59_999);
+      observeInbound('WhatSoup', 'ingest.store_failed');
+      expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1);
+      observeInbound('WhatSoup', 'ingest.store_failed');
+
+      expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
+      expect(getInboundObservationHealth().counts['ingest.store_failed']).toBe(4);
+    },
+  );
+
   it.each(['durably_queued', 'captured', 'legacy_accepted_unconfirmed'] as const)(
     'an accepted %s emission is reported as itself and starts the window',
     (status) => {
