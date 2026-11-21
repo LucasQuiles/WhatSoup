@@ -813,8 +813,17 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   - A `blocked` run is recorded as `auth_snapshot_skipped` with note
     `capture-blocked:<reason>`. It does not page
     `whatsapp_auth_bond_local_failure`, but it still sets the guard's last
-    capture error, so health classifies the bond `auth_bond_at_risk` while
-    the block holds, as before. The block holds from the close handler's
+    capture error, as before; the authenticated `/health` body shows it in
+    `whatsapp.auth_bond.backup.last_capture_error`. While the block holds,
+    `whatsapp.connection.auth_failure_class` reports the logout's own 401
+    class, not `auth_bond_at_risk`, because health checks the logout before
+    the bond: `serverside_logout_irreversible` for a confirmed device
+    removal, `auth_401_ambiguous_parked` or `auth_401_uninspected_exit` for an
+    unconfirmed 401. After the next open in the same process, the error
+    keeps the bond `auth_bond_at_risk` until a capture succeeds, unless an
+    earlier bond check decides the class first: a transient read, the
+    fresh-write grace or a bond `status` other than `present`. The block
+    holds from the close handler's
     logout decision, even when the logout alert could not be enqueued, until
     the next open.
   - Each capture's sweep removes the staging copies of other processes: a

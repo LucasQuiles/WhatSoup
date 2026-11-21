@@ -1268,8 +1268,15 @@ A run that ends deferred re-arms the settled snapshot. A settled snapshot
 refused by the 5-minute floor is re-armed for the rest of the interval. A run
 that ends failed is not re-armed, as before; it pages. A blocked run is refused
 because publishing would be unsafe. It does not page, but it still sets the
-guard's last capture error, so health classifies the bond `auth_bond_at_risk`
-while the block holds, as before. An aborted run is
+guard's last capture error, as before; the authenticated `/health` body shows
+it in `whatsapp.auth_bond.backup.last_capture_error`. While the block holds,
+`auth_failure_class` reports the logout's own 401 class, because
+`classifyAuthFailure` checks the logout before the bond. Only a confirmed
+device removal reports `serverside_logout_irreversible`; an unconfirmed 401
+keeps its own class. After the next open in the same process, the error keeps
+the bond `auth_bond_at_risk` until a capture succeeds, unless an earlier bond
+check decides the class first: a transient read, the fresh-write grace or a
+bond `status` other than `present`. An aborted run is
 covered by the reconnect after a restore, or by the next process's open.
 
 **Abort.** `restoreLatestIfNeeded()` aborts an in-flight run immediately before
