@@ -706,7 +706,7 @@ function extractShellFunction(source: string, name: string): string {
 }
 
 /** Run setup.sh's own install_wrapper_link (extracted verbatim) with a chosen BIN_DIR; SHIMS go first on PATH. */
-function runLinkHelper(bin: string, call: string[], shims?: string) {
+function runLinkHelper(bin: string, call: string[], shims?: string, extraEnv: NodeJS.ProcessEnv = {}) {
   const harness = [
     'set -euo pipefail',
     `BIN_DIR=${JSON.stringify(bin)}`,
@@ -715,8 +715,8 @@ function runLinkHelper(bin: string, call: string[], shims?: string) {
     'echo "helper-returned"',
     '',
   ].join('\n');
-  const env = shims ? { ...process.env, PATH: `${shims}:${process.env.PATH ?? ''}` } : process.env;
-  return spawnSync('bash', ['-c', harness, 'harness', ...call], { encoding: 'utf8', env });
+  const base = shims ? { ...process.env, PATH: `${shims}:${process.env.PATH ?? ''}` } : process.env;
+  return spawnSync('bash', ['-c', harness, 'harness', ...call], { encoding: 'utf8', env: { ...base, ...extraEnv } });
 }
 
 describe('deploy/setup.sh install_wrapper_link', () => {
@@ -799,6 +799,44 @@ describe('deploy/setup.sh install_wrapper_link', () => {
     expect(snapshot(base)).toEqual(before);
   });
 
+  it('renames over a link that turned into a link to a directory after the check, and puts nothing inside it', () => {
+    const { base, bin, next, link } = linkFixture();
+    const shims = path.join(base, 'shims');
+    const dir = path.join(base, 'elsewhere');
+    fs.mkdirSync(dir);
+    // The race: right after the new link is made, the destination becomes a link to a directory.
+    writeExecutable(path.join(shims, 'ln'), [
+      '#!/bin/bash',
+      '/bin/ln "$@" || exit $?',
+      '/bin/rm -f "$RACE_LINK"',
+      '/bin/ln -s "$RACE_DIR" "$RACE_LINK"',
+      '',
+    ].join('\n'));
+
+    const result = runLinkHelper(bin, ['install_wrapper_link', 'whatsoup', wrapperOf(next)], shims, {
+      RACE_LINK: link,
+      RACE_DIR: dir,
+    });
+    expect(fs.readdirSync(dir)).toEqual([]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(fs.readlinkSync(link)).toBe(wrapperOf(next));
+    expect(fs.readdirSync(bin)).toEqual(['whatsoup']);
+  });
+
+  it('fails when the link does not name the target after the rename, and removes the temporary link', () => {
+    const { base, bin, current, next, link } = linkFixture();
+    const shims = path.join(base, 'shims');
+    // A rename that reports success but moves nothing.
+    writeExecutable(path.join(shims, 'mv'), '#!/bin/sh\nexit 0\n');
+
+    const result = runLinkHelper(bin, ['install_wrapper_link', 'whatsoup', wrapperOf(next)], shims);
+    expect(result.status).toBe(1);
+    expect(result.stdout).not.toContain('helper-returned');
+    expect(result.stderr).toContain(`${link} names ${wrapperOf(current)} after the rename, not ${wrapperOf(next)}`);
+    expect(fs.readlinkSync(link)).toBe(wrapperOf(current));
+    expect(fs.readdirSync(bin)).toEqual(['whatsoup']);
+  });
+
   // Source check, kept on purpose: no behavioural test can observe the instant
   // between `ln -sf` unlinking the old name and creating the new one. The
   // rename-failure test above proves the old link survives a failed swap.
@@ -806,7 +844,7 @@ describe('deploy/setup.sh install_wrapper_link', () => {
     expect(setupSource).not.toContain('ln -sf');
     const install = extractShellFunction(setupSource, 'install_wrapper_link');
     expect(install).toContain('ln -s "$target" "$tmp"');
-    expect(install).toContain('mv -f "$tmp" "$link"');
+    expect(install).toContain('mv -f "$no_deref" "$tmp" "$link"');
   });
 });
 

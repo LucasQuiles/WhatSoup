@@ -261,30 +261,41 @@ refuse_release_bound_change() {
 # install_wrapper_link NAME TARGET: point $BIN_DIR/NAME at TARGET. The new link
 # is made beside the old one and renamed over it, so NAME is never missing or
 # half-written (a forced `ln` unlinks the old name first). A directory at NAME,
-# or a link to one, is refused: mv would move the new link into it. TARGET is
-# made executable only when it is not already, so a run from a live release
-# writes nothing inside it.
+# or a link to one, is refused. The rename does not follow a link at NAME
+# either (GNU mv -T, BSD mv -h), so a link that turns into a link to a
+# directory after the check is replaced, not moved into; the link is read back
+# after the rename. TARGET is made executable only when it is not already, so a
+# run from a live release writes nothing inside it.
 install_wrapper_link() {
-  local name="$1" target="$2" link tmp
+  local name="$1" target="$2" link tmp no_deref named
   link="$BIN_DIR/$name"
   [ -x "$target" ] || chmod +x "$target"
-  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
-    echo "  ✓ $name → $target (unchanged)"
-    return 0
-  fi
   if [ -d "$link" ]; then
     echo "  ✗ $link is a directory or links to one; not replacing it" >&2
     exit 1
   fi
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+    echo "  ✓ $name → $target (unchanged)"
+    return 0
+  fi
+  # Only GNU mv answers --version. The flavour is read from mv itself, not from
+  # PLATFORM: a macOS host can have GNU coreutils first on PATH.
+  if mv --version >/dev/null 2>&1; then no_deref=-T; else no_deref=-h; fi
   tmp="$BIN_DIR/.$name.setup-$$"
   rm -f "$tmp"
   if ! ln -s "$target" "$tmp"; then
     echo "  ✗ could not create the new link $tmp; $link is unchanged" >&2
     exit 1
   fi
-  if ! mv -f "$tmp" "$link"; then
+  if ! mv -f "$no_deref" "$tmp" "$link"; then
     rm -f "$tmp"
     echo "  ✗ could not replace $link" >&2
+    exit 1
+  fi
+  named="$(readlink "$link" 2>/dev/null || true)"
+  if [ "$named" != "$target" ]; then
+    if [ "$(readlink "$tmp" 2>/dev/null || true)" = "$target" ]; then rm -f "$tmp"; fi
+    echo "  ✗ $link names ${named:-nothing} after the rename, not $target" >&2
     exit 1
   fi
   echo "  ✓ $name → $target"
