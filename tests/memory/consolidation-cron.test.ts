@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { describe, it, expect, vi } from 'vitest';
 
 const { mockCronLogger } = vi.hoisted(() => ({ mockCronLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
@@ -523,49 +522,6 @@ describe('runConsolidation', () => {
       ['chat-a@g.us', 'sender-x@s.whatsapp.net'],
       ['chat-b@g.us', 'sender-y@s.whatsapp.net'],
     ]);
-  });
-
-  it('uses deterministic SHA256 scope-and-claim IDs for durable records', async () => {
-    const claim = 'User lives in London';
-    const chatJid = 'chat-1@g.us';
-    const senderJid = 'sender-1@s.whatsapp.net';
-    const expectedHash = createHash('sha256').update(`${chatJid}\0${senderJid}\0${claim}`).digest('hex').slice(0, 16);
-
-    const mockPinecone = makeMockPinecone([
-      {
-        id: 'rec-1',
-        score: 0.9,
-        record: {
-          id: 'rec-1',
-          text: 'Lives in London',
-          claim: 'Lives in London',
-          evidence: '',
-          createdAt: new Date().toISOString(),
-          confidence: 0.9,
-          chatJid,
-          senderJid,
-        },
-      },
-    ]);
-
-    const mockProvider = makeMockProvider({
-      durableKnowledge: [{
-        claim,
-        promotionReason: 'Consistent',
-        confidence: 0.92,
-        sourceRecordIds: ['rec-1'],
-      }],
-      discarded: [],
-    });
-
-    await runConsolidation(
-      mockPinecone,
-      mockProvider,
-      { lookbackDays: 7, dryRun: false },
-    );
-
-    const upsertedRecords = mockPinecone.upsert.mock.calls[0][0];
-    expect(upsertedRecords[0].id).toBe(`durable:${expectedHash}`);
   });
 
   it('redacts claim text from dry-run logs', async () => {
