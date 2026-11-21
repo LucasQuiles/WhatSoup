@@ -10,7 +10,7 @@ import { isRecord } from '../lib/type-guards.ts';
 
 export interface TurnRecoveryCatchupReconcileOptions {
   readonly enabled: boolean;
-  /** Max caught-up groups closed per supervisor scan; reconciler default when absent. */
+  /** Max delivery candidates selected per scan; closure also requires fulfillment confirmation. */
   readonly groupLimit?: number;
 }
 

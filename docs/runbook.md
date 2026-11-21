@@ -2471,13 +2471,16 @@ Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `alre
 contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
 message text, JIDs, or media.
 
-**Schema 66 to 69 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
+**Schema 66 to 70 rollback.** Migration 66 adds only the closure table; migration 67 adds only the
 protected-delivery tables; migration 68 adds only the protected secret-input table; migration 69 adds
-only the failed-terminal reply-debt index. After a migration is recorded, a binary whose ceiling is
-below it refuses the database and will not write: a schema-65 binary refuses a schema-66 database, a
-schema-66 binary refuses a schema-67 database, a schema-67 binary refuses a schema-68 database, and a
-schema-68 binary refuses a schema-69 database, all as `future_schema`. **Binary-only rollback is
-unavailable** for any of them. Keep the 69-aware release for containment or forward repair. Restoring a pre-migration
+only the failed-terminal reply-debt index; migration 70 adds operator catch-up resolution evidence.
+After a migration is recorded, a binary whose ceiling is below it refuses the database and will not
+write: a schema-65 binary refuses a schema-66 database, a schema-66 binary refuses a schema-67
+database, a schema-67 binary refuses a schema-68 database, a schema-68 binary refuses a schema-69
+database, and a schema-69 runtime refuses a schema-70 database, all as `future_schema`.
+**Binary-only rollback is unavailable** for any of them. Raw closure tools use their own schema and
+proof checks and can open supported schema-70 files. Keep the 70-aware runtime for containment or
+forward repair. Restoring a pre-migration
 backup is an owner decision that requires a proven zero-new-writes window. **Never overwrite a newer
 database with an older backup**: messages received after the upgrade would be lost.
 
@@ -2491,20 +2494,53 @@ bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
   --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
 ```
 
-The old binary creates the database at its own ceiling, this release migrates it to 69, and the old
-binary reopens it. From a schema-68 previous release, exit `0` means the old binary refused with
-`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 69 exceeds binary
-ceiling 68; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
+The old binary creates the database at its own ceiling, this release migrates it to 70, and the old
+binary reopens it. From a schema-69 previous release, exit `0` means the old binary refused with
+`DatabaseCompatibilityError` reason `future_schema` ("Database schema migration 70 exceeds binary
+ceiling 69; refusing writes") and `rehearsal.db` stayed byte-identical. The output also reports the
 hashes of every file in the work directory, including the WAL and shared-memory sidecars, as
 `filesBeforeOldReopen` and `filesAfterOldReopen`; the exit code does not compare them, so read them
 there.
 
 #### Close a proven operator catch-up recovery (admitted inbound sequences)
 
+A later successful reply establishes delivery of that later reply, not fulfillment of an older
+request. Closure now requires `--confirm-original-fulfillment` and an `--evidence-ref` documenting
+that the original request was addressed. Both are required for dry runs and idempotent repeats,
+not only writes. The periodic reconciler and bulk closure tool cannot
+supply that confirmation from ordinary later traffic; those recoveries remain pending.
+
+For a new authorized operator response, authenticated `POST /send` accepts `operatorCatchup`:
+`{ "planId": "RECOVERY_PLAN_ID", "sourceSeq": 101, "actor": "operator:IDENTITY", "evidenceRef": "evidence:AUTHORIZATION" }`.
+The resolved recipient must match the pending original request and its canonical conversation.
+The send is recorded once with unsafe replay policy, the original source sequence and plan binding.
+A repeated request is refused even after a transport failure: inspect the existing operation;
+do not retry an ambiguous send. The response's `operatorOpId` identifies the new operation;
+`fulfillment: "unverified"` is deliberate. Submission or echo does not establish fulfillment.
+The original failed turn, quarantined operation and exhausted recovery attempts remain intact.
+
+Stored-echo recovery requires the provider message ID and the operation's exact chat. It does not
+require the message's derived conversation key to equal the older operation key: a phone mapping
+can arrive between the send and history ingestion. History-body upgrades must stay in the
+placeholder's original chat so a provider-ID collision cannot supply another chat's authorship.
+
+After the bound operation is echoed and original fulfillment is independently established,
+use the same command below with `--source-seqs 101 --operator-op OP_ID` instead of `--catchup-seq`.
+This path requires schema 70, supports exactly one original request per operation, and records
+an append-only resolution with retained delivery proof. It never fabricates a new inbound turn.
+It refuses an operation whose provider message ID another operation in the same chat also claims:
+one stored echo cannot prove two requests.
+The direct-operation output contains keyed fingerprints and counts, not raw identifiers.
+First inspect without `--confirm`; repeat the same tuple with `--confirm` only under authority.
+Existing unbound sends cannot be retroactively claimed by this path. Preserve their open outcome
+until separate evidence and an authorized repair establish it; never resend merely to obtain a binding.
+
+
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
 of pending source inbounds. It never sends or replays a message. The database must already exist
 and its migration ledger must be contiguous from 1 through the current migration, with at least 43
-entries; any later schema, including 66, is accepted. The command neither creates a database nor runs
+entries; supported schemas 43 through 70 are accepted, and schemas above 70 are rejected.
+The command neither creates a database nor runs
 migrations. It closes only sources that were admitted as `inbound_events` with pending disposition
 links; a continuity gap whose source was never admitted cannot use it. Use `close-continuity-gap` for
 those gaps.
@@ -2521,7 +2557,8 @@ npm run close-recovery-catchup -- \
   --source-seqs 101,102 \
   --catchup-seq 110 \
   --actor operator:IDENTITY \
-  --evidence-ref evidence:REFERENCE
+  --evidence-ref evidence:REFERENCE \
+  --confirm-original-fulfillment
 ```
 
 A successful dry run emits a redacted `ready: true` inspection and changes no rows. It contains
@@ -2551,6 +2588,7 @@ npm run close-recovery-catchup -- \
   --catchup-seq 110 \
   --actor operator:IDENTITY \
   --evidence-ref evidence:REFERENCE \
+  --confirm-original-fulfillment \
   --confirm
 ```
 
@@ -2592,15 +2630,13 @@ back it up alongside the database if you rely on cross-run fingerprint correlati
 identifying information by itself and only lets past/future runs against the SAME database correlate —
 it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
 
-#### Close every caught-up operator catch-up recovery (batch)
+#### Inspect operator catch-up recovery candidates (batch)
 
-`npm run close-recovery-catchups` closes every open `recovery_pending_operator_catchup` group whose
-conversation has caught up, in one pass. It selects each group's target with the automatic reconciler's
-rule (`selectOperatorCatchupCandidates`: the earliest same-chat `operator_catchup_delivery_proofs` target
-later than every source sequence). Each group is then proven with `inspectOperatorCatchupRecovery` or
-closed with `closeOperatorCatchupRecoveryRaw`, the same primitive as the single-group command above, so it
-adds no proof rule of its own. Closures record the operator's `--actor` and `--evidence-ref`, not the
-reconciler's.
+`npm run close-recovery-catchups` enumerates pending groups and later same-chat delivery candidates.
+It cannot attest fulfillment of each original request, so those groups remain pending with
+`closure_rejected`. A later reply, or one evidence reference for the whole batch, is insufficient.
+Use the single-group command above with specific original-request evidence to close a recovery.
+The batch command does not accept `--confirm-original-fulfillment`.
 
 ```bash
 npm --silent run close-recovery-catchups -- \
@@ -2608,12 +2644,9 @@ npm --silent run close-recovery-catchups -- \
 ```
 
 The dry run (the default) changes no database rows. It still creates the redaction salt file described
-above on first use. Add `--confirm --backup-dir /abs/dir` to close. `--confirm` without `--backup-dir` is a
-usage error. The confirmed pass first writes a quick_check-verified, mode-0600 backup into that directory.
-If the backup fails, nothing is closed. The pass then re-enumerates the groups on the writable connection,
-and each group closes in its own writer transaction. Groups that are already closed no longer appear, so
-repeating the command closes nothing more. `--group-limit N` (default 50) applies the reconciler's two
-budgets.
+above on first use. The existing `--confirm --backup-dir /abs/dir` mode still creates a verified backup,
+but cannot bypass the original-fulfillment requirement and closes no unconfirmed group.
+`--group-limit N` (default 50) applies the reconciler's two budgets.
 
 Output is one JSON document: `ok`, `dryRun`, `groupLimit`, `backup`, `summary` (`examined`, `ready`,
 `closed`, `idempotent`, `skipped`, `linksClosed`, `errors`), and `groups[]`. Each group carries the same

@@ -1,8 +1,8 @@
 # Provider-Event Lifecycle Implementation Tasks
 
-**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 69. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 70. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
-**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-69 base, terminal recovery is planned as 71 and the provider lifecycle ledger as 72; migration 70 is reserved for another pending batch; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
+**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-69 base, terminal recovery is planned as 71 and the provider lifecycle ledger as 72; migration 70 holds the append-only operator catch-up resolutions; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
 
 > **REQUIRED COMPANION SKILL:** superpowers:spec-driven-development
 
@@ -47,8 +47,8 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
    non-echoed recovery owners a five-minute fail-closed abandonment path that closes
    the inbound, preserves evidence/replay veto, and releases scope without asserting
    delivery truth. Implement that prerequisite as forward migration 71 on current
-   canonical source (schema 69 here; migration 70 is reserved for another pending
-   batch); do not alter historical migrations or merge the stale
+   canonical source (schema 70 here; migration 70 holds the append-only operator
+   catch-up resolutions); do not alter historical migrations or merge the stale
    DGX recovery branch wholesale.
 4. Migration 53 is now part of the schema-66 source baseline. Preserve its
    exact-head review and fleet-compatibility obligations; source presence does
@@ -138,7 +138,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
 ## Tasks
 
 #### TSK-010: Land migration-71 canonical terminal no-send/recovery-owner prerequisites
-- **Status:** pending — canonical source is at schema 69; the specified canonical `not_sent` and bounded terminal-closure prerequisite remains open, with forward allocation 71 (migration 70 is reserved for another pending batch)
+- **Status:** pending — canonical source is at schema 70; the specified canonical `not_sent` and bounded terminal-closure prerequisite remains open, with forward allocation 71 (migration 70 holds the append-only operator catch-up resolutions)
 - **Traces-from:** REQ-006, CON-002, CON-004, DES-006
 - **Owns-AC:** REQ-006.AC-06, CON-002.AC-06, CON-004.AC-07
 - **Checks:** CHK-075, CHK-076, CHK-078
@@ -170,8 +170,8 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     required sibling not-sent. Cover missing/late-created siblings and crash-between-
     chunks; any echoed/submitted/maybe-sent/pending/sending/quarantined/generic-failure
     sibling dominates. Prove no-send never clears provider/tool/lifecycle replay veto.
-  - [ ] Base this work on current canonical source (schema 69 here; migration 70 is
-    reserved for another pending batch) and allocate forward migration 71 for
+  - [ ] Base this work on current canonical source (schema 70 here; migration 70 holds
+    the append-only operator catch-up resolutions) and allocate forward migration 71 for
     canonical outbound/terminal `not_sent`, immutable transfer
     deadlines, and append-only `turn_recovery_terminal_closures` witnesses. The unique
     witness retains exact terminal/job/inbound/op identity, nullable job for valid
@@ -218,7 +218,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     contract but must not redefine terminal outbound truth inside this PR.
 
 #### TSK-001: Verify canonical schema lineage and deployment evidence
-- **Status:** in progress — the 2026-10-06 source audit was at schema 66; current canonical source is at schema 69, where protected-delivery persistence occupies migration 67, protected-secret input staging persistence occupies migration 68 and the failed-terminal reply-debt index occupies migration 69; migration 70 is reserved for another pending migration batch. The historical base `482b707d716aee5641db25d40c2a954caee5d78f` understood migrations through 46 and included the schema-ceiling guard plus CHK-071. Migration 53 is now in source; verify its exact-head review/publication evidence and current fleet compatibility rather than treating it as an unpublished change.
+- **Status:** in progress — the 2026-10-06 source audit was at schema 66; current canonical source is at schema 70, where protected-delivery persistence occupies migration 67, protected-secret input staging persistence occupies migration 68 and the failed-terminal reply-debt index occupies migration 69; migration 70 holds the append-only operator catch-up resolutions. The historical base `482b707d716aee5641db25d40c2a954caee5d78f` understood migrations through 46 and included the schema-ceiling guard plus CHK-071. Migration 53 is now in source; verify its exact-head review/publication evidence and current fleet compatibility rather than treating it as an unpublished change.
 - **Traces-from:** CON-005, DES-008, DES-009
 - **Owns-AC:** CON-005.AC-01, CON-005.AC-05
 - **Checks:** CHK-001, CHK-071
@@ -242,7 +242,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
   - [x] Add the marked `CHK-071` conformance case under
     `tests/spec-conformance/provider-event-lifecycle/` so real SQLite future-schema
     rejection and the then-current allocation were checked. Rerun that
-    conformance case against the shared 69/70/71/72 allocation before accepting
+    conformance case against the shared 70/71/72 allocation before accepting
     the forward implementation; a historical checkbox is not current proof.
   - [x] Add or relocate the remaining marked `CHK-001` plan-stage conformance case
     without duplicating existing migration unit coverage.

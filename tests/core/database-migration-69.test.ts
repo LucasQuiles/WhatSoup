@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CURRENT_SCHEMA_MIGRATION, Database, migratedSchemaSnapshot } from '../../src/core/database.ts';
 import { ensureFailedTerminalDebtIndex, runMigration69 } from '../../src/core/database-migration-69.ts';
+import { assertOperatorCatchupResolutionSchema } from '../../src/core/database-migration-70.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 // Only the database component's logger is captured, so the rebuild line can be
@@ -64,6 +65,39 @@ function rebuildLines(): unknown[][] {
   return databaseLog.warn!.mock.calls.filter(([, message]) => message === REBUILD_LINE);
 }
 
+// Migration 70 (operator catch-up resolutions) adds a column, so a ledger rewound below 70 must
+// also lose that migration's objects, or the reopen re-runs its ADD COLUMN. Triggers go first:
+// SQLite refuses to drop a column that a trigger still names.
+const CATCHUP_MIGRATION = 70;
+function dropCatchupMigrationObjects(raw: DatabaseSync): void {
+  raw.exec('DROP TRIGGER operator_catchup_resolution_outbound_immutable');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_source_immutable');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_no_legacy_close');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_fulfillment_required');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_no_corroboration');
+  raw.exec('DROP TABLE operator_catchup_resolutions');
+  raw.exec('ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed');
+}
+
+// Migration 70's objects present in a file: its table and triggers (all named
+// operator_catchup_resolution*) and its column on inbound_disposition_links.
+function catchupMigrationObjects(raw: DatabaseSync): string[] {
+  const named = (raw.prepare(
+    "SELECT type || ' ' || name AS object FROM sqlite_master WHERE name LIKE 'operator_catchup_resolution%' ORDER BY object",
+  ).all() as Array<{ object: string }>).map((row) => row.object);
+  const column = raw.prepare(
+    "SELECT 1 FROM pragma_table_info('inbound_disposition_links') WHERE name = 'original_fulfillment_confirmed'",
+  ).get();
+  return column === undefined ? named : [...named, 'column original_fulfillment_confirmed'];
+}
+
+// The versions the startup runner applied, in order, read from its 'Migration applied' line.
+function appliedVersions(): unknown[] {
+  return databaseLog.info!.mock.calls
+    .filter(([, message]) => message === 'Migration applied')
+    .map(([fields]) => (fields as { version: unknown }).version);
+}
+
 // A file whose index name is held by a UNIQUE index on another table; `keep` is the
 // last migration receipt left in its ledger.
 function fileWithForeignIndexName(label: string, name: string, keep: number) {
@@ -71,6 +105,7 @@ function fileWithForeignIndexName(label: string, name: string, keep: number) {
   const first = new Database(dbPath);
   first.open();
   first.raw.exec(`DROP INDEX ${INDEX}`);
+  if (keep < CATCHUP_MIGRATION) dropCatchupMigrationObjects(first.raw);
   first.raw.prepare('DELETE FROM schema_migrations WHERE version > ?').run(keep);
   first.raw.exec('CREATE TABLE other_records (id INTEGER PRIMARY KEY, record_key TEXT NOT NULL)');
   first.raw.exec(`CREATE UNIQUE INDEX ${name} ON other_records(record_key)`);
@@ -105,18 +140,26 @@ describe('migration 69 — failed-terminal reply-debt index', () => {
     const dbPath = join(tmp.make('upgrade'), 'bot.db');
     const first = new Database(dbPath);
     first.open();
-    // Emulate the previous schema: no receipt for this migration and no index.
+    // Emulate a schema-68 file: no receipt and no object for this migration or for
+    // migration 70, which runs after it.
     first.raw.exec(`DROP INDEX ${INDEX}`);
-    first.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(MIGRATION);
-    expect(ledgerVersions(first.raw)).not.toContain(MIGRATION);
+    dropCatchupMigrationObjects(first.raw);
+    first.raw.prepare('DELETE FROM schema_migrations WHERE version >= ?').run(MIGRATION);
+    expect(ledgerVersions(first.raw)).toEqual(versionsThrough(MIGRATION - 1));
     expect(indexDefinition(first.raw)).toBeNull();
+    expect(catchupMigrationObjects(first.raw)).toEqual([]);
     first.close();
 
-    db = new Database(dbPath);
-    db.open();
+    databaseLog.info!.mockClear();
+    const reopened = new Database(dbPath);
+    db = reopened;
+    reopened.open();
 
-    expect(ledgerVersions(db.raw)).toEqual(versionsThrough(CURRENT_SCHEMA_MIGRATION));
-    expect(indexDefinition(db.raw)).toBe(DEFINITION);
+    expect(appliedVersions()).toEqual([MIGRATION, CATCHUP_MIGRATION]);
+    expect(ledgerVersions(reopened.raw)).toEqual(versionsThrough(CURRENT_SCHEMA_MIGRATION));
+    expect(indexDefinition(reopened.raw)).toBe(DEFINITION);
+    // Checks receipt 70, the column's shape and the exact SQL of every migration-70 object.
+    expect(() => assertOperatorCatchupResolutionSchema(reopened.raw)).not.toThrow();
   });
 
   it('re-running the migration on a database that has the index succeeds', () => {
@@ -135,6 +178,7 @@ describe('migration 69 — failed-terminal reply-debt index', () => {
     const first = new Database(dbPath);
     first.open();
     // Dropping the table drops its indexes; the startup table repair must still run.
+    dropCatchupMigrationObjects(first.raw);
     first.raw.exec('DROP TABLE turn_terminal_records');
     first.raw.prepare('DELETE FROM schema_migrations WHERE version >= ?').run(MIGRATION);
     expect(ledgerVersions(first.raw)).toEqual(versionsThrough(MIGRATION - 1));

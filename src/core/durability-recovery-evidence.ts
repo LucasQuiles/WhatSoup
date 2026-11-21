@@ -6,6 +6,7 @@ import { withTransaction } from './db-tx.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
 import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
+import { notOperatorCatchupSql } from './delivery-corroboration-sql.ts';
 
 const log = createChildLogger('durability');
 const RECOVERY_ACTOR = 'durability_engine';
@@ -211,6 +212,7 @@ export class DurabilityRecoveryEvidence {
          AND candidate.chat_jid = selected.chat_jid
          AND candidate.status = 'echoed'
          AND candidate.id > selected.id
+         AND ${notOperatorCatchupSql('candidate')}
         WHERE terminal.delivery_kind = 'delivery_unknown'
           AND terminal.inbound_seq IS NOT NULL
           AND terminal.inbound_seq_key = terminal.inbound_seq

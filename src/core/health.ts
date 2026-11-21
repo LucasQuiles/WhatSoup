@@ -32,7 +32,7 @@ import {
   hasTransientAuthReadIssue,
 } from '../lib/auth-bond-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
-import { sendTracked } from './durability.ts';
+import { sendTrackedWithReceipt, operatorCatchupBindingSchema, type OperatorCatchupBinding } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 import { getModelAdvisories } from '../lib/model-advisor.ts';
@@ -1521,14 +1521,28 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // Issue 3150: echo the JID the pipeline actually dispatched to (it may
         // have been canonicalized onto an existing @lid conversation) so
         // callers can verify routing.
+        let operatorCatchup: OperatorCatchupBinding | undefined;
+        if (isRecord(parsed) && Object.hasOwn(parsed, 'operatorCatchup')) {
+          const checked = operatorCatchupBindingSchema.safeParse(parsed.operatorCatchup);
+          if (!checked.success || !deps.durability) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'invalid operator catch-up request' }));
+            return;
+          }
+          operatorCatchup = checked.data;
+        }
         let resolvedChatJid: string | undefined;
+        let operatorOpId: number | undefined;
         sendPipeline.executeSend(parsed, async (prepared) => {
           resolvedChatJid = prepared.chatJid;
           // QR-086: the admin /send is an authenticated infra action — tag it as
           // a system caller ('health') so the outbound-identity guard's spec
           // §4.2-step-B exemption applies and a deliberate admin send to a cold
           // target is not floored under enforce mode.
-          await sendTracked(deps.connectionManager, prepared.chatJid, prepared.text, deps.durability, { replayPolicy: 'unsafe', caller: 'health' });
+          const opId = await sendTrackedWithReceipt(deps.connectionManager, prepared.chatJid, prepared.text, deps.durability, {
+            replayPolicy: 'unsafe', caller: 'health', operatorCatchup,
+          });
+          if (operatorCatchup) operatorOpId = opId;
           return {};
         })
           .then(() => {
@@ -1536,6 +1550,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             res.end(JSON.stringify({
               ok: true,
               ...(resolvedChatJid !== undefined ? { chatJid: resolvedChatJid } : {}),
+              ...(operatorOpId !== undefined ? { operatorOpId, fulfillment: 'unverified' } : {}),
             }));
           })
           .catch((err) => {

@@ -843,7 +843,7 @@ describe('operator settle of an orphan recovery transfer', () => {
         ) VALUES ('per_chat', ?, ?, ?, ?, 'catchup-turn', 'catchup-manager', 1, 'replied',
                   'finalized_replied', 'echoed', ?, 1)
       `).run(t.conversationKey, deliveryJid, catchupSeq, catchupSeq, catchupOpId);
-      expect(closeOperatorCatchupRecovery(db, {
+      expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
         planId,
         conversationKey: t.conversationKey,
         expectedSourceSeqs: [t.inboundSeq],

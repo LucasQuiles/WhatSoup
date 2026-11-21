@@ -49,6 +49,17 @@ function createCurrentDatabase(dbPath: string): void {
   db.close();
 }
 
+function removeSchema70Objects(raw: DatabaseSync): void {
+  // Rewinding the ledger alone leaves a newer schema in the legacy fixture.
+  for (const { name } of raw.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'operator_catchup_resolution_%'").all() as Array<{ name: string }>) {
+    raw.exec(`DROP TRIGGER ${name}`);
+  }
+  raw.exec(`
+    DROP TABLE operator_catchup_resolutions;
+    ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed;
+  `);
+}
+
 function injectNextSchemaInspectionFailure(failure: Error): void {
   const originalPrepare = DatabaseSync.prototype.prepare;
   let injected = false;
@@ -839,6 +850,7 @@ describe('database schema ceiling', () => {
     initial.open();
     initial.close();
     const rewind = new DatabaseSync(dbPath);
+    removeSchema70Objects(rewind);
     rewind.prepare('DELETE FROM schema_migrations WHERE version = ?').run(latest);
     rewind.close();
 
@@ -1292,6 +1304,7 @@ describe('database schema ceiling', () => {
     initial.close();
     if (latest < CURRENT_SCHEMA_MIGRATION) {
       const rewind = new DatabaseSync(dbPath);
+      removeSchema70Objects(rewind);
       rewind.prepare('DELETE FROM schema_migrations WHERE version > ?').run(latest);
       rewind.close();
     }

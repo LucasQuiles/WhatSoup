@@ -26,8 +26,7 @@ import {
   outboundFailureWarrantsUserNotice,
   type OutboundFailureEvidenceV1,
 } from '../../core/outbound-failure-disposition.ts';
-import { toConversationKey } from '../../core/conversation-key.ts';
-import { resolvePhoneFromJid } from '../../core/access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid } from '../../core/access-list.ts';
 // Bot reply storage is handled by the Baileys echo via ingest → storeMessageIfNew
 import { recordResponse, recordAttempt } from './rate-limits-db.ts';
 import { chatFailureMessage, type ChatFailureCause } from './response-messages.ts';
@@ -753,7 +752,7 @@ export class ChatRuntime implements Runtime {
     const sendStart = Date.now();
     let mainOpId: number | undefined;
     if (this.durability) {
-      const conversationKey = toConversationKey(msg.chatJid);
+      const conversationKey = canonicalConversationKey(msg.chatJid, this.db);
       mainOpId = this.durability.createOutboundOp({
         conversationKey, chatJid: msg.chatJid, opType: 'text',
         payload: JSON.stringify({ text: responseText }), replayPolicy: 'unsafe',

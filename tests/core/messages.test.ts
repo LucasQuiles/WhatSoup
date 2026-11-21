@@ -148,11 +148,12 @@ describe('messages', () => {
 
   it('storeMessageIfNew upgrades a history placeholder when the live body arrives', () => {
     const id = `msg-${randomBytes(4).toString('hex')}`;
+    // The placeholder's stale self-authorship must give way to the live body's.
     db.raw.prepare(`
       INSERT INTO messages
         (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
       VALUES
-        (@chat_jid, @conversation_key, @sender_jid, @message_id, 'history', 0, @timestamp)
+        (@chat_jid, @conversation_key, @sender_jid, @message_id, 'history', 1, @timestamp)
     `).run({
       chat_jid: 'old-group@g.us',
       conversation_key: 'old-group_at_g.us',
@@ -177,7 +178,7 @@ describe('messages', () => {
     expect(upgraded).toBe(true);
     const row = db.raw.prepare(`
       SELECT chat_jid, conversation_key, sender_jid, sender_name, content, content_text,
-             content_type, timestamp, raw_message
+             content_type, is_from_me, timestamp, raw_message
       FROM messages
       WHERE message_id = ?
     `).get(id) as {
@@ -188,6 +189,7 @@ describe('messages', () => {
       content: string | null;
       content_text: string | null;
       content_type: string;
+      is_from_me: number;
       timestamp: number;
       raw_message: string | null;
     };
@@ -200,6 +202,7 @@ describe('messages', () => {
       content: 'live body',
       content_text: 'Live body summary',
       content_type: 'text',
+      is_from_me: 0,
       timestamp: BASE_TS,
       raw_message: '{"message":"live"}',
     });

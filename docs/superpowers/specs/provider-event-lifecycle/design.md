@@ -1,8 +1,8 @@
 # Provider-Event Lifecycle Design
 
-**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 69. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+**Status:** Active specification — the source reconciliation at `59cc562bc` (2026-10-06) was audited at schema 66; the current canonical schema is 70. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
-**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-69 base, terminal recovery is planned as 71 and the provider lifecycle ledger as 72; migration 70 is reserved for another pending batch; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
+**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-69 base, terminal recovery is planned as 71 and the provider lifecycle ledger as 72; migration 70 holds the append-only operator catch-up resolutions; recheck before implementation. The 2026-10-06 reconciliation remains historical schema-66 audit evidence.
 
 ## Context
 
@@ -559,7 +559,7 @@ provider-content replay path.
   shape. Canonical base `482b707d716aee5641db25d40c2a954caee5d78f`
   understands migrations through 46. Migrations 47 through 52 are already consumed by
   later durable work, and the audited schema-66 source baseline includes migration 53 for outbound
-  quarantine disposition and retirement receipts. Migration 67 is occupied by protected-delivery persistence, migration 68 by protected-secret input staging persistence and migration 69 by the failed-terminal reply-debt index, and migration 70 is reserved for another pending migration batch. The terminal-recovery prerequisite uses migration 71 for
+  quarantine disposition and retirement receipts. Migration 67 is occupied by protected-delivery persistence, migration 68 by protected-secret input staging persistence and migration 69 by the failed-terminal reply-debt index, and migration 70 holds the append-only operator catch-up resolutions. The terminal-recovery prerequisite uses migration 71 for
   durable terminal `not_sent` plus bounded terminal-non-echoed recovery closure.
   Migration 71 does not alter historical 37-53. It adds the typed outbound/terminal
   no-send shape, an immutable singleton answer-set seal plus late-sibling rejection
@@ -637,7 +637,7 @@ provider-content replay path.
   (`cf1fc6e3e2d3faa3cae80737466f52d40e34b9bf`); and PR #1770
   (`84ba01a04941d29becbaa4ffac274e604ee89820` merged as
   `56e232223132d33c347cd2d2521620f911d4f4b6`) separates active recovery work
-  from audit health without supplying canonical no-send truth. Migrations through 66 are already allocated in the audited source baseline, migration 67 is occupied by protected-delivery persistence, migration 68 by protected-secret input staging persistence and migration 69 by the failed-terminal reply-debt index, and migration 70 is reserved for another pending migration batch. Land the terminal recovery prerequisite on migration 71,
+  from audit health without supplying canonical no-send truth. Migrations through 66 are already allocated in the audited source baseline, migration 67 is occupied by protected-delivery persistence, migration 68 by protected-secret input staging persistence and migration 69 by the failed-terminal reply-debt index, and migration 70 holds the append-only operator catch-up resolutions. Land the terminal recovery prerequisite on migration 71,
   then provider-event lifecycle on migration 72.
   Unpublished live-checkout shutdown commits remain a
   separate review lane. The lifecycle PR contains

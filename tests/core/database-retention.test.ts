@@ -1186,7 +1186,7 @@ describe('database retention', () => {
       `outbound-op:${witnessed.outboundOpId}`,
       witnessed.jobId,
     );
-    closeOperatorCatchupRecovery(db, {
+    closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: 'retention-witness-plan',
       conversationKey: 'witnessed-completed-conversation',
       expectedSourceSeqs: [sourceSeq],
@@ -1326,7 +1326,7 @@ describe('database retention', () => {
       repliedOp,
       proofTimestamp,
     ).lastInsertRowid);
-    closeOperatorCatchupRecovery(db, {
+    closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: 'retention-superseded-plan',
       conversationKey: 'superseded-completed-conversation',
       expectedSourceSeqs: [sourceSeq],

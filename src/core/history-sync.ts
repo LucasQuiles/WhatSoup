@@ -106,7 +106,8 @@ interface Statements {
 /**
  * The upsert:
  *   - If no row with this message_id exists, inserts the full body.
- *   - If a row exists and its content_type is 'history', upgrades in place.
+ *   - A same-chat row with content_type 'history' upgrades in place.
+ *     A provider-id collision from another chat leaves the placeholder unchanged.
  *   - If a row exists and its content_type is not 'history' (live-path row),
  *     the DO UPDATE's WHERE clause causes it to no-op — the live row wins.
  *
@@ -131,6 +132,7 @@ const UPSERT_BODY_SQL = `
     quoted_message_id = excluded.quoted_message_id,
     timestamp = excluded.timestamp
   WHERE messages.content_type = '${PLACEHOLDER_CONTENT_TYPE}'
+    AND messages.chat_jid = excluded.chat_jid
 `;
 
 const INSERT_PLACEHOLDER_SQL = `
@@ -140,7 +142,7 @@ const INSERT_PLACEHOLDER_SQL = `
     (?, ?, ?, ?, '${PLACEHOLDER_CONTENT_TYPE}', ?, ?)
 `;
 
-const CHECK_SQL = 'SELECT content_type FROM messages WHERE message_id = ?';
+const CHECK_SQL = 'SELECT content_type, chat_jid FROM messages WHERE message_id = ?';
 
 function prepareStatements(db: Database): Statements {
   return {
@@ -196,7 +198,7 @@ function processHistoryMessage(
       parsedMsg.rawMessage = PROTECTED_MESSAGE_MARKER;
     }
 
-    const before = stmts.check.get(msgId) as { content_type?: string } | undefined;
+    const before = stmts.check.get(msgId) as { content_type?: string; chat_jid: string } | undefined;
     const result = stmts.upsertBody.run({
       chat_jid: parsedMsg.chatJid,
       conversation_key: conversationKey,
@@ -217,10 +219,9 @@ function processHistoryMessage(
     });
 
     if (!before) return 'inserted';
-    // A row existed. If it was a placeholder the WHERE clause just upgraded it.
-    // If it was a live-path row the WHERE clause suppressed the update.
+    // Only a same-chat placeholder can supply the body and authorship evidence.
     if (before.content_type === PLACEHOLDER_CONTENT_TYPE && result.changes > 0) return 'upgraded';
-    if (before.content_type === PLACEHOLDER_CONTENT_TYPE && result.changes === 0) {
+    if (before.content_type === PLACEHOLDER_CONTENT_TYPE && result.changes === 0 && before.chat_jid === parsedMsg.chatJid) {
       // Defensive: placeholder row existed but UPSERT did not fire. Should not
       // be reachable under normal operation (WHERE clause matches 'history').
       // If we see this, parseIncomingMessage may have normalized messageId in
