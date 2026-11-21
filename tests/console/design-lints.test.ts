@@ -876,6 +876,9 @@ describe('soup/no-brand-regression', () => {
     'const x = <a href="https://github.com.example/LucasQuiles/WhatSoup">Guide</a>',
     'const x = <a href="https://github.com/LucasQuiles/WhatSoupOther">Guide</a>',
     'const x = <a href="https://github.com/LucasQuiles/WhatSoup documentation">Guide</a>',
+    'const x = <a href="https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/release-deployment.md/extra">Guide</a>',
+    'const x = <a href="https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/release-deployment.md#steps">Guide</a>',
+    'const x = <a href="https://github.com/LucasQuiles/WhatSoup/blob/main/README.md">Guide</a>',
   ])('keeps visible copy and unrelated targets guarded: %s', async (source) => {
     const messages = await lintWarnings(source)
     expect(hasWarning(messages, 'no-brand-regression')).toBe(true)
