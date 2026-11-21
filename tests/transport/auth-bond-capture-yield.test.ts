@@ -1439,4 +1439,65 @@ describe('C8 FIX 4: refused and aborted results are built without reading the di
     expect(foldedOutcome.status, 'the folded request never settled').not.toBe('pending');
     expect(shutdown.status, 'shutdownCaptures never settled').not.toBe('pending');
   });
+
+  it('N18h: control: an abort before any run has settled leaves no unread snapshot for a later failure', async () => {
+    const fx = makeFixture('n18h', 4);
+    // The backup comes from another guard, so this guard restores with no run of its own settled.
+    const seeder = new AuthBondGuard({ authDir: fx.authDir, stateRoot: fx.stateRoot, instanceName: fx.name });
+    expect(await seeder.capture('connection-open')).toMatchObject({ ok: true, captured: true });
+    expect(await outcomeWithin(seeder.shutdownCaptures())).toEqual({ status: 'fulfilled', value: undefined });
+    // Run 1's first yield parks, and run 2's first yield rejects.
+    const hook: { next: 'park' | 'reject' | null; parked: number } = { next: 'park', parked: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      captureYield: async () => {
+        const next = hook.next;
+        hook.next = null;
+        if (next === 'park') {
+          hook.parked += 1;
+          await new Promise<void>(() => undefined);
+        }
+        if (next === 'reject') throw new Error('c8-fix4-control-hook-fault');
+        await macrotask();
+      },
+    });
+
+    const first = guard.capture('connection-open');
+    expect(hook.parked).toBe(1);
+    // A definite, non-transient fault, as in N6, so the restore runs and aborts run 1.
+    writeFileSync(join(fx.authDir, 'creds.json'), JSON.stringify({ registrationId: 9 }));
+    const restored = guard.restoreLatestIfNeeded();
+    const aborted = await outcomeWithin(first);
+    // Coverage: a restore aborted run 1 before its first live snapshot, with no
+    // run settled, and the guard keeps running.
+    expect(restored).toMatchObject({ attempted: true, restored: true });
+    expect(aborted).toMatchObject({
+      status: 'fulfilled',
+      value: {
+        ok: false,
+        captured: false,
+        aborted: true,
+        path: null,
+        error: 'auth bond capture aborted: auth restore in progress',
+      },
+    });
+
+    hook.next = 'reject';
+    const outcome = await outcomeWithin(guard.capture('creds-update-settled'));
+
+    expect(outcome).toMatchObject({
+      status: 'fulfilled',
+      value: { ok: false, captured: false, deferred: false, path: null },
+    });
+    const failed = fulfilledValue(outcome);
+    expect(failed.error).toContain('c8-fix4-control-hook-fault');
+    // As in N18f: run 2 failed before its own first snapshot, and its result
+    // still carries a live creds.json read, not run 1's unread snapshot.
+    expect(failed.snapshot.creds.exists).toBe(true);
+    expect(typeof failed.snapshot.creds.sha256).toBe('string');
+    expect(failed.snapshot.issues).not.toContain('auth_bond_capture_result_unread');
+    expect(await outcomeWithin(guard.shutdownCaptures())).toEqual({ status: 'fulfilled', value: undefined });
+  });
 });
