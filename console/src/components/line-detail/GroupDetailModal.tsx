@@ -755,6 +755,7 @@ function SettingsTab({
 // ── Main modal ────────────────────────────────────────────────────────────────
 
 export function GroupDetailModal({ open, group, lineName, myJid, onClose }: GroupDetailModalProps) {
+  const queryClient = useQueryClient()
   const groupId = group?.id
   const [tabState, setTabState] = useState<{ groupId?: string; activeTab: TabId }>({
     groupId: undefined,
@@ -771,6 +772,10 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
     enabled: open && !!group,
     staleTime: 30_000,
   })
+  const refreshAfterMutation = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ['groups', lineName] })
+    void refetch()
+  }, [queryClient, lineName, refetch])
 
   // `if (!group) return null` guard stays — header/body cannot render without group.
   // Modal owns the open gate (the `open` half of the legacy guard dies).
@@ -785,7 +790,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
   const isAdmin = !!myParticipant?.admin
 
   const color = avatarColor(group.id)
-  const initials = getInitials(group.subject)
+  const initials = getInitials(source.subject)
 
   return (
     <Modal
@@ -806,11 +811,11 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
           {initials}
         </div>
         <div className="flex-1 min-w-0">
-          <div id="group-detail-dialog-title" title={group.subject} className="soup-modal-title truncate">
-            {group.subject}
+          <div id="group-detail-dialog-title" title={source.subject} className="soup-modal-title truncate">
+            {source.subject}
           </div>
           <div className="c-label">
-            {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
+            {source.participants.length} participant{source.participants.length !== 1 ? 's' : ''}
           </div>
         </div>
         <ActionButton
@@ -855,7 +860,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
               detail={detail}
               lineName={lineName}
               isAdmin={isAdmin}
-              onRefresh={() => refetch()}
+              onRefresh={refreshAfterMutation}
             />
           </div>
         )}
@@ -866,7 +871,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
               lineName={lineName}
               isAdmin={isAdmin}
               myJid={myJid}
-              onRefresh={() => refetch()}
+              onRefresh={refreshAfterMutation}
             />
           </div>
         )}
@@ -876,7 +881,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
               detail={detail}
               lineName={lineName}
               isAdmin={isAdmin}
-              onRefresh={() => refetch()}
+              onRefresh={refreshAfterMutation}
               onClose={onClose}
             />
           </div>
