@@ -83,6 +83,41 @@ describe('security boundary guard — IncidentStore authority', () => {
     }));
   });
 
+  it.each([
+    ['a direct call', ['def alternate(socket):', '    json_rpc_call(socket, "tools/call", {})']],
+    ['an alias', ['def alternate(socket):', '    transport = json_rpc_call', '    transport(socket, "tools/call", {})']],
+    ['a dynamic lookup', ['def alternate(socket):', '    getattr(module, "json_rpc_call")(socket, "tools/call", {})']],
+    ['a hand-off from an unlisted function', ['def alternate(event):', '    route_owner_critical(event, json_rpc_call=json_rpc_call)']],
+  ])('blocks the dispatcher JSON-RPC transport used through %s', (_shape, body) => {
+    const findings = scanFileForSecurityBoundaryViolations('deploy/scripts/bot-errors-dispatcher.py', body.join('\n'));
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.raw-dispatch-send',
+      line: 2,
+    }));
+  });
+
+  it('admits the dispatcher JSON-RPC call and the owner-route hand-offs it holds today', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-dispatcher.py',
+      [
+        'def send_whatsapp(text, socket_path):',
+        '    result = json_rpc_call(',
+        '        socket_path,',
+        '    )',
+        'def drain_owner_route_queue(paths):',
+        '    route_owner_critical(',
+        '        json_rpc_call=json_rpc_call,',
+        '    )',
+        'def send_credential_pages(paths):',
+        '    send_credential_page(',
+        '        json_rpc_call=json_rpc_call,',
+        '    )',
+      ].join('\n'),
+    );
+    expect(findings.filter((finding) => finding.code === 'security.incident-authority.raw-dispatch-send'))
+      .toEqual([]);
+  });
+
   it('blocks a Q-loop RPC bypass and chat-granted phase mutation', () => {
     const findings = scanFileForSecurityBoundaryViolations(
       'deploy/scripts/bot-errors-q-loop.py',

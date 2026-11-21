@@ -79,6 +79,16 @@ export interface SecurityBoundaryEvaluation {
 
 const TS_EXT_RE = /\.ts$/;
 
+// The only dispatcher function that may call the raw JSON-RPC transport: it is
+// the WhatsApp transport that send_authorized_whatsapp gates.
+const DISPATCHER_JSON_RPC_CALLER = 'send_whatsapp';
+
+// Dispatcher functions that may hand the raw JSON-RPC transport on by keyword.
+const DISPATCHER_JSON_RPC_HANDOFFS: ReadonlyMap<string, string> = new Map([
+  ['drain_owner_route_queue', 'passes it to route_owner_critical; the owner-route rules cover its sender'],
+  ['send_credential_pages', 'passes it to send_credential_page; the owner-route rules cover its sender'],
+]);
+
 function emptyCounts(): SecurityBoundaryCounts {
   return {
     incidentAuthorityPreflights: 0,
@@ -126,6 +136,9 @@ function scanOperationalSecurityBoundaries(
     if (file === 'deploy/scripts/bot-errors-dispatcher.py' && name === 'send_whatsapp') {
       add('security.incident-authority.raw-dispatch-send', line,
         'dispatcher WhatsApp transport cannot be aliased or dynamically resolved');
+    } else if (file === 'deploy/scripts/bot-errors-dispatcher.py' && name === 'json_rpc_call') {
+      add('security.incident-authority.raw-dispatch-send', line,
+        'dispatcher JSON-RPC transport cannot be aliased or dynamically resolved');
     } else if (file === 'deploy/scripts/bot-errors-dispatcher.py' && name === 'email_fallback') {
       add('security.incident-authority.raw-dispatch-email', line,
         'dispatcher e-mail transport cannot be aliased or dynamically resolved');
@@ -168,6 +181,14 @@ function scanOperationalSecurityBoundaries(
       if (/\bemail_fallback\s*\(/.test(line) && !definition && currentFunction !== 'send_authorized_email') {
         add('security.incident-authority.raw-dispatch-email', lineNumber,
           'dispatcher e-mail effects must pass through send_authorized_email');
+      }
+      if (/\bjson_rpc_call\s*\(/.test(line) && !definition && currentFunction !== DISPATCHER_JSON_RPC_CALLER) {
+        add('security.incident-authority.raw-dispatch-send', lineNumber,
+          'dispatcher JSON-RPC effects must stay inside send_whatsapp');
+      }
+      if (/\bjson_rpc_call\s*=\s*json_rpc_call\b/.test(line) && !DISPATCHER_JSON_RPC_HANDOFFS.has(currentFunction)) {
+        add('security.incident-authority.raw-dispatch-send', lineNumber,
+          'dispatcher JSON-RPC transport may be handed on only to the owner route');
       }
     }
     if (file === 'deploy/scripts/bot-errors-q-loop.py') {

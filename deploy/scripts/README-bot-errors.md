@@ -102,8 +102,12 @@ The Q loop asks the same authority before bootstrap, nudge, or checkpoint
 messages. Owner copies and credential re-pages pass through the shared sender
 in `lib/owner_route.py`, which checks the receipt in enforce mode. The
 repository security boundary guard rejects direct dispatcher, owner-route, or
-Q-loop transports. The mode decision lives inside those wrappers, so the
-guard's call-site counts hold in both modes; the guard does not check the mode.
+Q-loop transports. In the dispatcher this includes the raw JSON-RPC transport
+under `send_whatsapp`: a call outside `send_whatsapp`, an alias, a dynamic
+lookup, or a keyword hand-off outside the two owner-route callers
+(`drain_owner_route_queue`, `send_credential_pages`) is rejected. The mode
+decision lives inside those wrappers, so the guard's call-site counts hold in
+both modes; the guard does not check the mode.
 The guard also pins the authority preflight ahead of credential observation,
 suppression, flap/storm mutation, and delivery, inventories the full `deploy/`
 tree, rejects test-only dry seams in service definitions, and verifies the two
