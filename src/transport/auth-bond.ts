@@ -207,8 +207,14 @@ export class AuthBondGuard {
    * incomplete read that defers. The second fails as before.
    */
   private readonly incompleteTreeReads = new WeakSet<AuthBondSnapshot>();
-  /** The last settled run's result snapshot, carried by refused and aborted results. */
+  /**
+   * The last settled run's result snapshot, carried by refused and aborted
+   * results. Never an unread snapshot: that is no evidence, and a failure with
+   * no snapshot of its own reads the cache instead.
+   */
   private lastCaptureRunSnapshot: AuthBondSnapshot | null = null;
+  /** The snapshots unreadSnapshot() built; finishCaptureRun() never stores one. */
+  private readonly unreadSnapshots = new WeakSet<AuthBondSnapshot>();
 
   constructor(options: AuthBondGuardOptions) {
     this.authDir = options.authDir;
@@ -885,17 +891,32 @@ export class AuthBondGuard {
    *
    * The run sees the abort on a microtask through its wake promise, publishes
    * nothing new, and leaves its staging folder for the next process's sweep.
-   * A trailing run settles aborted without starting.
+   * A trailing run settles aborted without starting. Its result reads nothing
+   * from disk, and the abort runs even if settling it throws.
    */
   async shutdownCaptures(): Promise<void> {
     this.capturesShutDown = true;
     const trailing = this.trailingCapture;
-    this.trailingCapture = null;
-    if (trailing !== null) trailing.settle(this.refusedCaptureResult());
     const active = this.activeCapture;
-    if (active === null) return;
-    this.abortActiveCapture('shutdown');
-    await active.promise;
+    this.trailingCapture = null;
+    try {
+      if (trailing !== null) this.settleRefused(trailing);
+    } finally {
+      if (active !== null) {
+        this.abortActiveCapture('shutdown');
+        await active.promise;
+      }
+    }
+  }
+
+  /** Settle a folded request refused, even if building its result throws. */
+  private settleRefused(trailing: TrailingCapture): void {
+    try {
+      trailing.settle(this.refusedCaptureResult());
+    } catch {
+      // Deliberately: a folded caller settles even when its result cannot be built.
+      trailing.settle(this.refusedCaptureResultWith(this.unreadSnapshot()));
+    }
   }
 
   private abortActiveCapture(cause: CaptureAbortCause): void {
@@ -1006,7 +1027,7 @@ export class AuthBondGuard {
       this.consecutiveIncompleteReadRuns = outcome === 'deferred' && run.incompleteRead
         ? this.consecutiveIncompleteReadRuns + 1
         : 0;
-      this.lastCaptureRunSnapshot = result.snapshot;
+      if (!this.unreadSnapshots.has(result.snapshot)) this.lastCaptureRunSnapshot = result.snapshot;
       const { phaseMs } = run;
       this.emitCaptureEvent({
         kind: 'finished',
@@ -1046,7 +1067,7 @@ export class AuthBondGuard {
     if (trailing === null) return;
     this.trailingCapture = null;
     if (this.capturesShutDown) {
-      trailing.settle(this.refusedCaptureResult());
+      this.settleRefused(trailing);
       return;
     }
     void this.startCaptureRun(
@@ -1142,15 +1163,24 @@ export class AuthBondGuard {
     return { ...snapshot, backup: this.backupSnapshot() };
   }
 
-  /** Refused and aborted results never walk: the run's snapshot, the last run's, or the cache. */
+  /** A failure result never walks: the run's snapshot, the last run's, or the cache. */
   private snapshotWithoutWalk(run: CaptureRun | null): AuthBondSnapshot {
     return run?.lastSnapshot ?? this.lastCaptureRunSnapshot ?? this.inspectCached();
   }
 
+  /** Refused and aborted results read nothing: the run's snapshot, the last run's, or an unread one. */
+  private snapshotWithoutRead(run: CaptureRun | null): AuthBondSnapshot {
+    return run?.lastSnapshot ?? this.lastCaptureRunSnapshot ?? this.unreadSnapshot();
+  }
+
   private refusedCaptureResult(): AuthBondCaptureResult {
+    return this.refusedCaptureResultWith(this.snapshotWithoutRead(null));
+  }
+
+  private refusedCaptureResultWith(snapshot: AuthBondSnapshot): AuthBondCaptureResult {
     return {
       ok: false,
-      snapshot: this.snapshotWithoutWalk(null),
+      snapshot,
       captured: false,
       deferred: false,
       aborted: true,
@@ -1160,7 +1190,7 @@ export class AuthBondGuard {
   }
 
   private abortedCaptureResult(run: CaptureRun, cause: CaptureAbortCause): AuthBondCaptureResult {
-    return this.abortedCaptureResultWith(this.snapshotWithoutWalk(run), cause);
+    return this.abortedCaptureResultWith(this.snapshotWithoutRead(run), cause);
   }
 
   private abortedCaptureResultWith(snapshot: AuthBondSnapshot, cause: CaptureAbortCause): AuthBondCaptureResult {
@@ -1197,19 +1227,39 @@ export class AuthBondGuard {
    *
    * A latest.json whose backupPath is truthy but not a string passes the
    * manifest's object check and then throws on every read of the backup half,
-   * the read that builds the failure result included. This result reads nothing
-   * from disk, so it cannot throw that way: its snapshot carries no tree data
-   * and status 'unknown' (no current evidence), and its backup half comes from
-   * the guard's own fields without reading latest.json. An abort stays an abort
+   * the read that builds the failure result included. This result carries
+   * unreadSnapshot(), so it cannot throw that way. An abort stays an abort
    * and leaves the guard's health fields alone; anything else is recorded as a
    * failure, as thrownCaptureResult records one. Both builders format thrown
    * values with captureErrorText, which cannot throw either.
    */
   private unreadCaptureResult(run: CaptureRun, err: unknown, resultErr: unknown): AuthBondCaptureResult {
+    if (err instanceof CaptureAbortedError) {
+      return this.abortedCaptureResultWith(this.unreadSnapshot(), err.abortCause);
+    }
+    this.lastCaptureAt = this.now().toISOString();
+    this.lastCaptureReason = run.reason;
+    this.lastCaptureError = `${captureErrorText(err)}; failure result unreadable: ${captureErrorText(resultErr)}`;
+    return {
+      ok: false,
+      snapshot: this.unreadSnapshot(),
+      captured: false,
+      deferred: false,
+      path: null,
+      error: this.lastCaptureError,
+    };
+  }
+
+  /**
+   * A snapshot that reads nothing from disk, so it cannot throw: no tree data,
+   * status 'unknown' (no current evidence), and the backup half from the
+   * guard's own fields, without reading latest.json.
+   */
+  private unreadSnapshot(): AuthBondSnapshot {
     const unread: AuthBondFileSnapshot = {
       path: this.authDir, exists: false, mode: null, size: null, mtime: null, sha256: null, error: null,
     };
-    const snapshotFor = (): AuthBondSnapshot => ({
+    const snapshot: AuthBondSnapshot = {
       status: 'unknown',
       authDir: unread,
       creds: { ...unread, path: join(this.authDir, 'creds.json') },
@@ -1219,19 +1269,9 @@ export class AuthBondGuard {
       totalBytes: null,
       backup: this.backupHalf(null, null),
       issues: ['auth_bond_capture_result_unread'],
-    });
-    if (err instanceof CaptureAbortedError) return this.abortedCaptureResultWith(snapshotFor(), err.abortCause);
-    this.lastCaptureAt = this.now().toISOString();
-    this.lastCaptureReason = run.reason;
-    this.lastCaptureError = `${captureErrorText(err)}; failure result unreadable: ${captureErrorText(resultErr)}`;
-    return {
-      ok: false,
-      snapshot: snapshotFor(),
-      captured: false,
-      deferred: false,
-      path: null,
-      error: this.lastCaptureError,
     };
+    this.unreadSnapshots.add(snapshot);
+    return snapshot;
   }
 
   private blockedCaptureResult(
