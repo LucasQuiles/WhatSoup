@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { isAbsolute, join, sep } from 'node:path';
 
 // One temporary root per Vitest run (Vitest globalSetup).
@@ -90,66 +100,78 @@ export function workerHomePrefix(tempRoot: string): string {
 }
 
 export type RemoveTree = (root: string) => void;
+export type RemoveEntry = (path: string) => void;
 
-function removeTree(root: string): void {
-  rmSync(root, { recursive: true, force: true, ...RUN_ROOT_REMOVE_RETRY });
+function removeEntry(path: string): void {
+  rmSync(path, { recursive: true, force: true, ...RUN_ROOT_REMOVE_RETRY });
 }
 
-// What makes a root this run's: the token in its marker, and the device and
-// inode its directory had when this run made it. A pathname is not reserved:
-// after a rename another directory can take it.
-export interface RunRootOwner {
-  token: string;
-  dev: bigint;
-  ino: bigint;
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-// The same file system node, compared as scripts/lib/guard-core.ts compares
-// source inventory nodes (sameSourceNode).
-function sameNode(left: { dev: bigint; ino: bigint }, right: { dev: bigint; ino: bigint }): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+// Removes the root with its marker last, so that the marker outlives a removal
+// that stops part way and the next attempt checks the token as the first did.
+// On Linux, Node's rmSync returns as if done when remove_all meets an entry that
+// another process removed first (ENOENT), as a worker's own exit-hook HOME
+// removal does while teardown runs. Each entry but the marker is removed on its
+// own, and a failure of one does not stop the others. The marker goes only when
+// it is the last entry, and then the empty root goes with rmdirSync. One window
+// is left: an entry made after the last listing makes rmdirSync fail and leaves
+// the root without its marker. The next attempt refuses it, so the run fails
+// closed; nothing is removed that this attempt did not verify.
+function removeTree(root: string, remove: RemoveEntry = removeEntry): void {
+  const failures: string[] = [];
+  for (const name of readdirSync(root)) {
+    if (name === RUN_ROOT_MARKER) continue;
+    try {
+      remove(join(root, name));
+    } catch (error) {
+      failures.push(errorMessage(error));
+    }
+  }
+  if (failures.length > 0) throw new Error(failures.join('; '));
+  if (readdirSync(root).some((name) => name !== RUN_ROOT_MARKER)) return;
+  rmSync(join(root, RUN_ROOT_MARKER), { force: true });
+  rmdirSync(root);
 }
 
-// 'own': this run's directory with its marker. 'unmarked': this run's directory
-// with no marker entry. 'other': anything else that is present, such as another
-// directory at the path or a marker that is not this run's readable token.
-// Every path returns a state; an unexpected error is 'other'.
-type RootState = 'own' | 'unmarked' | 'gone' | 'other';
+function isGone(root: string): boolean {
+  try {
+    return lstatSync(root, { throwIfNoEntry: false }) === undefined;
+  } catch {
+    return false;
+  }
+}
 
-function runRootState(root: string, owner: RunRootOwner): RootState {
+// 'own': a directory at its canonical path whose marker is a regular file
+// holding this run's token. 'other': anything else that is present, a root
+// without its marker included. Never throws.
+type RootState = 'own' | 'gone' | 'other';
+
+function runRootState(root: string, token: string): RootState {
   try {
     if (!isAbsolute(root)) return 'other';
-    const stat = lstatSync(root, { bigint: true, throwIfNoEntry: false });
+    const stat = lstatSync(root, { throwIfNoEntry: false });
     if (stat === undefined) return 'gone';
-    if (!stat.isDirectory() || !sameNode(stat, owner) || realpathSync(root) !== root) return 'other';
+    if (!stat.isDirectory() || realpathSync(root) !== root) return 'other';
     const marker = join(root, RUN_ROOT_MARKER);
-    const markerStat = lstatSync(marker, { throwIfNoEntry: false });
-    if (markerStat === undefined) return 'unmarked';
-    if (!markerStat.isFile()) return 'other';
-    return readFileSync(marker, 'utf8') === owner.token ? 'own' : 'other';
+    if (lstatSync(marker, { throwIfNoEntry: false })?.isFile() !== true) return 'other';
+    return readFileSync(marker, 'utf8') === token ? 'own' : 'other';
   } catch {
-    return 'other';
+    // The root itself may have gone between two of the calls above.
+    return isGone(root) ? 'gone' : 'other';
   }
 }
 
 export type RemoveResult = { outcome: 'removed' } | { outcome: 'refused' } | { outcome: 'present'; reason: string };
 
-// One attempt; never throws. A refusal is reported on stderr. `started` is true
-// once an earlier attempt of this run found its own marker and began to remove
-// the root. A removal can stop part way with the marker already gone: on Linux,
-// Node's rmSync returns as if done when remove_all meets an entry that another
-// process removed first (ENOENT), as a worker's own exit-hook HOME removal does
-// while teardown runs. So from then on a missing marker is accepted on the
-// directory this run made; another directory or a different marker never is.
-export function removeRunRoot(
-  root: string,
-  owner: RunRootOwner,
-  remove: RemoveTree = removeTree,
-  started = false,
-): RemoveResult {
-  const state = runRootState(root, owner);
+// One attempt; never throws. Every attempt requires this run's token, so a root
+// without it is never removed; a refusal is reported on stderr.
+export function removeRunRoot(root: string, token: string, remove: RemoveTree = removeTree): RemoveResult {
+  const state = runRootState(root, token);
   if (state === 'gone') return { outcome: 'removed' };
-  if (state === 'other' || (state === 'unmarked' && !started)) {
+  if (state === 'other') {
     process.stderr.write(`vitest-run-root: refusing to remove ${root}: not this run's marked root\n`);
     return { outcome: 'refused' };
   }
@@ -157,9 +179,9 @@ export function removeRunRoot(
   try {
     remove(root);
   } catch (error) {
-    reason = `could not remove ${root}: ${error instanceof Error ? error.message : String(error)}`;
+    reason = `could not remove ${root}: ${errorMessage(error)}`;
   }
-  return lstatSync(root, { throwIfNoEntry: false }) === undefined ? { outcome: 'removed' } : { outcome: 'present', reason };
+  return isGone(root) ? { outcome: 'removed' } : { outcome: 'present', reason };
 }
 
 // The top-level entries left in the root, without walking the tree: their
@@ -186,8 +208,18 @@ function pause(ms: number): void {
 export interface RunRootOptions {
   // Test seam: the tree removal, so a removal that keeps failing is reproducible.
   remove?: RemoveTree;
-  // Test seam: the exit hook's total wait, RUN_ROOT_EXIT_WAIT_MS by default.
+  // Test seam: the removal of one top-level entry inside the default tree
+  // removal, so a removal that stops part way is reproducible.
+  removeEntry?: RemoveEntry;
+  // Test seam: the exit hook's total wait. Anything but a finite number >= 0
+  // means RUN_ROOT_EXIT_WAIT_MS.
   exitWaitMs?: number;
+}
+
+function exitWaitMs(requested: number | undefined): number {
+  return typeof requested === 'number' && Number.isFinite(requested) && requested >= 0
+    ? requested
+    : RUN_ROOT_EXIT_WAIT_MS;
 }
 
 // Vitest only logs an error thrown by a globalSetup teardown and still exits 0,
@@ -200,29 +232,27 @@ function failRunClosed(): void {
 export function startRunRoot(parent: string = defaultTempParent(), options: RunRootOptions = {}): () => void {
   const previous = process.env[RUN_ROOT_ENV];
   const root = realpathSync(mkdtempSync(join(parent, RUN_ROOT_PREFIX)));
-  const { dev, ino } = lstatSync(root, { bigint: true });
   chmodSync(root, 0o700);
-  const owner: RunRootOwner = { token: randomUUID(), dev, ino };
-  writeFileSync(join(root, RUN_ROOT_MARKER), owner.token, { mode: 0o600 });
+  const token = randomUUID();
+  writeFileSync(join(root, RUN_ROOT_MARKER), token, { mode: 0o600 });
   process.env[RUN_ROOT_ENV] = root;
 
   // Teardown makes one attempt and the exit hook makes the last ones, so a root
   // that is gone when the process exits is a clean run. The run fails closed
   // when the exit hook's wait ends with the root present, or at once when the
-  // root is not provably this run's.
-  let started = false;
+  // root does not carry this run's token.
+  const remove = options.remove ?? ((path: string): void => removeTree(path, options.removeEntry));
   let removed = false;
   const attempt = (): RemoveResult => {
     if (removed) return { outcome: 'removed' };
-    const result = removeRunRoot(root, owner, options.remove, started);
-    started ||= result.outcome !== 'refused';
+    const result = removeRunRoot(root, token, remove);
     removed = result.outcome === 'removed';
     return result;
   };
   // Vitest ends the main process with process.exit() on SIGINT/SIGTERM, which
   // skips teardown but still emits `exit`.
   const reapAtExit = (): void => {
-    const waitMs = options.exitWaitMs ?? RUN_ROOT_EXIT_WAIT_MS;
+    const waitMs = exitWaitMs(options.exitWaitMs);
     // A monotonic clock, so a wall-clock step cannot extend the wait.
     const deadline = performance.now() + waitMs;
     let result = attempt();
@@ -235,11 +265,10 @@ export function startRunRoot(parent: string = defaultTempParent(), options: RunR
     }
     if (result.outcome === 'removed') return;
     failRunClosed();
-    if (result.outcome === 'present') {
-      process.stderr.write(
-        `vitest-run-root: could not remove ${root} within ${waitMs} ms (${result.reason}); ${remainingEntries(root)}\n`,
-      );
-    }
+    const verdict = result.outcome === 'present'
+      ? `could not remove ${root} within ${waitMs} ms (${result.reason})`
+      : `left ${root} in place`;
+    process.stderr.write(`vitest-run-root: ${verdict}; ${remainingEntries(root)}\n`);
   };
   process.once('exit', reapAtExit);
 
