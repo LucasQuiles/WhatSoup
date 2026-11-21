@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -240,6 +241,28 @@ describe('Vitest run root whose path another directory took', () => {
     });
   });
 
+  it('does not list the entries of a directory that took the root path when the last attempt fails', () => {
+    let calls = 0;
+    const remove = (root: string): void => {
+      calls += 1;
+      if (calls < 2) return;
+      // In the exit hook: the run's directory moves aside and another one, with
+      // one file in it, takes its path.
+      renameSync(root, `${root}-moved`);
+      mkdirSync(root, { mode: 0o700 });
+      writeFileSync(join(root, 'not-this-run.txt'), 'keep');
+    };
+    withLateRun({ remove, exitWaitMs: 0 }, ({ root, teardown, exitHooks, reports }) => {
+      teardown();
+      exitHooks()[0]!();
+      expect(process.exitCode).toBe(1);
+      expect(reports()).toContain(`could not remove ${root} within 0 ms`);
+      expect(reports()).toContain("its entries were not listed: the path no longer names this run's directory");
+      expect(reports()).not.toContain('not-this-run.txt');
+      expect(readFileSync(join(root, 'not-this-run.txt'), 'utf8')).toBe('keep');
+    });
+  });
+
   it("refuses a directory at the root path that carries this run's marker", () => {
     const remove = vi.fn((root: string): void => rmSync(root, { recursive: true, force: true }));
     withLateRun({ remove }, ({ root, teardown, reports }) => {
@@ -279,6 +302,31 @@ describe('Vitest run root whose path another directory took', () => {
       expect(reports()).toContain(`refusing to remove ${root}: not this run's marked root`);
       expect(remove).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('Vitest run root set-up', () => {
+  // mkdtempSync applies the umask, so a mask without the owner read bit leaves
+  // the new root unreadable until chmodSync; the run opens it after that.
+  it('makes and opens its root under a umask that masks the owner read bit', () => {
+    const parent = realpathSync(tmp.make('parent'));
+    const previous = process.env[RUN_ROOT_ENV];
+    const before = new Set<unknown>(process.listeners('exit'));
+    const mask = process.umask(0o477);
+    try {
+      expect(() => startRunRoot(parent)).not.toThrow();
+      expect(lstatSync(process.env[RUN_ROOT_ENV]!).mode & 0o777).toBe(0o700);
+    } finally {
+      process.umask(mask);
+      // A root that a failed set-up left unreadable would stop the parent's
+      // removal after the case.
+      for (const name of readdirSync(parent)) chmodSync(join(parent, name), 0o700);
+      for (const listener of process.listeners('exit') as unknown as ExitListener[]) {
+        if (!before.has(listener)) process.off('exit', listener);
+      }
+      if (previous === undefined) delete process.env[RUN_ROOT_ENV];
+      else process.env[RUN_ROOT_ENV] = previous;
+    }
   });
 });
 

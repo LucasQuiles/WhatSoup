@@ -187,8 +187,15 @@ export function removeRunRoot(
 }
 
 // The top-level entries left in the root, without walking the tree: their
-// number and the first REMAINING_ENTRIES_SHOWN names in sorted order.
-function remainingEntries(root: string): string {
+// number and the first REMAINING_ENTRIES_SHOWN names in sorted order. They are
+// listed only while the path still names this run's directory, so the names of
+// another directory that took the path are not printed; the check narrows that
+// window and cannot close it for a pathname.
+function remainingEntries(root: string, owner: RunRootOwner): string {
+  const state = runRootState(root, owner);
+  if (state !== 'own' && state !== 'unmarked') {
+    return "its entries were not listed: the path no longer names this run's directory";
+  }
   let names: string[];
   try {
     names = readdirSync(root).sort();
@@ -231,15 +238,28 @@ function failRunClosed(): void {
 export function startRunRoot(parent: string = defaultTempParent(), options: RunRootOptions = {}): () => void {
   const previous = process.env[RUN_ROOT_ENV];
   const root = realpathSync(mkdtempSync(join(parent, RUN_ROOT_PREFIX)));
+  // Before the open: a umask that masks the owner read bit would make it fail.
+  chmodSync(root, 0o700);
   // Held open until an attempt removes the root: while a descriptor is open the
   // directory's inode stays allocated, so no other directory can get the same
   // device and inode, and "same node at the path" means "the directory this run
   // made". A run that ends without removing it leaves the close to process exit.
-  let rootFd: number | undefined = openSync(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  const { dev, ino } = fstatSync(rootFd, { bigint: true });
-  chmodSync(root, 0o700);
-  const owner: RunRootOwner = { token: randomUUID(), dev, ino };
-  writeFileSync(join(root, RUN_ROOT_MARKER), owner.token, { mode: 0o600 });
+  const fd = openSync(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  let owner: RunRootOwner;
+  try {
+    const { dev, ino } = fstatSync(fd, { bigint: true });
+    owner = { token: randomUUID(), dev, ino };
+    writeFileSync(join(root, RUN_ROOT_MARKER), owner.token, { mode: 0o600 });
+  } catch (error) {
+    // No teardown is handed out, so nothing else would close the descriptor.
+    try {
+      closeSync(fd);
+    } catch {
+      // The set-up error is the one to report.
+    }
+    throw error;
+  }
+  let rootFd: number | undefined = fd;
   process.env[RUN_ROOT_ENV] = root;
 
   // Teardown makes one attempt and the exit hook makes the last ones, so a root
@@ -281,7 +301,7 @@ export function startRunRoot(parent: string = defaultTempParent(), options: RunR
     failRunClosed();
     if (result.outcome === 'present') {
       process.stderr.write(
-        `vitest-run-root: could not remove ${root} within ${waitMs} ms (${result.reason}); ${remainingEntries(root)}\n`,
+        `vitest-run-root: could not remove ${root} within ${waitMs} ms (${result.reason}); ${remainingEntries(root, owner)}\n`,
       );
     }
   };
