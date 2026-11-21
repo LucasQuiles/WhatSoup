@@ -3,11 +3,27 @@
  * consumer are recorded under closed inbound-observation labels, and each
  * exit keeps its existing behaviour: nothing new reaches the consumer.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { logRef, emitAlert } = vi.hoisted(() => ({
+const { logRef, emitAlert, mockConfig } = vi.hoisted(() => ({
   logRef: {} as Record<string, ReturnType<typeof vi.fn>>,
   emitAlert: vi.fn(),
+  // The connection preflight reads and may repair the auth folder and its state
+  // root, so both live in a per-run folder (set in beforeEach), never a fixed path.
+  mockConfig: {
+    adminPhones: new Set(['15550100001']),
+    authDir: '',
+    stateRoot: '',
+    dbPath: ':memory:',
+    mediaDir: '',
+    botName: 'WhatSoup',
+    accessMode: 'allowlist',
+    healthPort: 9090,
+    models: { conversation: 'm', extraction: 'm', validation: 'm', fallback: 'm' },
+  },
 }));
 
 vi.mock('@whiskeysockets/baileys', async () => {
@@ -15,18 +31,7 @@ vi.mock('@whiskeysockets/baileys', async () => {
   return baileysMock();
 });
 
-vi.mock('../../src/config.ts', () => ({
-  config: {
-    adminPhones: new Set(['15550100001']),
-    authDir: '/tmp/wa-test-auth-inbound-observation-transport',
-    dbPath: ':memory:',
-    mediaDir: '/tmp/whatsoup-test-media-inbound-observation-transport/tmp',
-    botName: 'WhatSoup',
-    accessMode: 'allowlist',
-    healthPort: 9090,
-    models: { conversation: 'm', extraction: 'm', validation: 'm', fallback: 'm' },
-  },
-}));
+vi.mock('../../src/config.ts', () => ({ config: mockConfig }));
 
 vi.mock('../../src/logger.ts', async () => {
   const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
@@ -67,6 +72,12 @@ function makeMockSocket() {
   return { sock, emit };
 }
 
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'inbound-observation-transport-'));
+
+afterAll(() => {
+  rmSync(fixtureRoot, { recursive: true, force: true });
+});
+
 const counts = () => getInboundObservationHealth().counts;
 const totalCount = () => Object.values(counts()).reduce((sum, n) => sum + n, 0);
 
@@ -77,6 +88,9 @@ describe('transport inbound exits record observations', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockConfig.authDir = join(fixtureRoot, 'auth');
+    mockConfig.stateRoot = join(fixtureRoot, 'state');
+    mockConfig.mediaDir = join(fixtureRoot, 'media');
     emitAlert.mockReturnValue({ ok: true, channel: 'outbox', status: 'durably_queued' });
     const mock = makeMockSocket();
     emit = mock.emit;
