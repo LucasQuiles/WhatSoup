@@ -45,7 +45,7 @@ export default function App() {
   // starts a session — no data hooks fire before the gate opens.
   const session = useConsoleSession()
   if (session.state === 'locked') {
-    return <UnlockScreen onUnlocked={session.onUnlocked} />
+    return <UnlockScreen onUnlocked={session.onUnlocked} notice={session.notice} lockPersistenceError={session.lockPersistenceError} onRetry={session.onRetry} />
   }
   if (session.state === 'checking') {
     return <PageLoader />

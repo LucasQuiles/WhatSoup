@@ -537,3 +537,84 @@ describe('App — connection-status surface', () => {
     });
   });
 });
+
+
+describe('App session revocation journey', () => {
+  it('prevents a retry lock from overlapping an in-flight unlock', async () => {
+    const meta = document.createElement('meta');
+    meta.name = 'fleet-auth-mode';
+    meta.content = 'session';
+    document.head.appendChild(meta);
+    sessionStorage.setItem('whatsoup.console.lock-requested', '1');
+    let finishUnlock!: (response: Response) => void;
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push(`${init?.method} ${url}`);
+      if (url === '/api/console-session' && init?.method === 'POST') {
+        return new Promise<Response>(resolve => { finishUnlock = resolve; });
+      }
+      if (url === '/api/console-session' && init?.method === 'DELETE') return new Response('{}');
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    try {
+      renderApp('/');
+      fireEvent.change(screen.getByLabelText('fleet token'), { target: { value: 'test-token' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Unlock' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Retry lock' }));
+      await act(async () => { await Promise.resolve(); });
+      expect(requests).toEqual(['POST /api/console-session']);
+      await act(async () => { finishUnlock(new Response(JSON.stringify({ expiresIn: 3600 }))); });
+      await screen.findByTestId('page-soup-kitchen');
+      fireEvent.click(screen.getByRole('button', { name: 'Lock console' }));
+      await screen.findByRole('heading', { name: 'Console locked' });
+      await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+      expect(requests).toEqual(['POST /api/console-session', 'DELETE /api/console-session']);
+    } finally {
+      cleanup();
+      meta.remove();
+      sessionStorage.clear();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('closes the app immediately, preserves uncertainty through remount, and retries the real API path', async () => {
+    const meta = document.createElement('meta');
+    meta.name = 'fleet-auth-mode';
+    meta.content = 'session';
+    document.head.appendChild(meta);
+    let finishLock!: (response: Response) => void;
+    const requests: string[] = [];
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push(`${init?.method} ${url}`);
+      if (url === '/api/auth-ticket') return new Response(JSON.stringify({ ticket: 'ticket', expiresIn: 30 }));
+      if (url === '/api/console-session' && init?.method === 'DELETE') {
+        return new Promise<Response>(resolve => { finishLock = resolve; });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const first = renderApp('/');
+      await screen.findByTestId('page-soup-kitchen');
+      fireEvent.click(screen.getByRole('button', { name: 'Lock console' }));
+      expect(screen.queryByTestId('page-soup-kitchen')).toBeNull();
+      expect(screen.getByRole('status').textContent).toContain('Revoking server session');
+      await act(async () => { finishLock(new Response('', { status: 503 })); });
+      expect(screen.getByRole('alert').textContent).toContain('revocation could not be confirmed');
+      first.unmount();
+      renderApp('/');
+      expect(screen.queryByTestId('page-soup-kitchen')).toBeNull();
+      expect(requests).toEqual(['POST /api/auth-ticket', 'DELETE /api/console-session']);
+      fireEvent.click(screen.getByRole('button', { name: 'Retry lock' }));
+      await act(async () => { finishLock(new Response(JSON.stringify({ ok: true }))); });
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'Console locked' })).toBeDefined();
+      expect(requests).toEqual(['POST /api/auth-ticket', 'DELETE /api/console-session', 'DELETE /api/console-session']);
+    } finally {
+      cleanup();
+      meta.remove();
+      sessionStorage.clear();
+      vi.unstubAllGlobals();
+    }
+  });
+});

@@ -164,6 +164,12 @@ describe('console session endpoints', () => {
       credentials: 'same-origin',
     }));
   });
+
+  it('reports an unconfirmed revocation when the server rejects DELETE', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(503, 'private server detail')));
+    const { lockConsole } = await import('../../console/src/lib/api.ts');
+    await expect(lockConsole()).rejects.toThrow('Session revocation could not be confirmed (503).');
+  });
 });
 
 describe('api console-session helpers', () => {
