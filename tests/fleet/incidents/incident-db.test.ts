@@ -234,6 +234,25 @@ describe('openIncidentDb', () => {
     expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
   });
 
+  // SQLite's quote() stops a TEXT value at an embedded NUL, so a digest of
+  // quoted text would take these two values for one.
+  it('fails closed on an existing copy that differs only after an embedded NUL', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    const raw = new DatabaseSync(dbPath());
+    raw.prepare(`UPDATE meta SET value = 'kept' || char(0) || 'old' WHERE key = 'canary'`).run();
+    raw.prepare('VACUUM INTO ?').run(copyPath);
+    raw.prepare(`UPDATE meta SET value = 'kept' || char(0) || 'new' WHERE key = 'canary'`).run();
+    raw.close();
+    const bytes = readFileSync(copyPath);
+    const inode = lstatSync(copyPath).ino;
+
+    expect(() => openIncidentDb(dbPath())).toThrow(/schema-v\d+\.bak.*move it aside/);
+    expect(readFileSync(copyPath).equals(bytes)).toBe(true);
+    expect(lstatSync(copyPath).ino).toBe(inode);
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
+  });
+
   it('keeps an existing copy equal in content and migrates', () => {
     const previous = writePreviousVersionDatabase();
     const copyPath = `${dbPath()}.schema-v${previous}.bak`;

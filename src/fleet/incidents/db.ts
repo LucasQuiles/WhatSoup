@@ -100,24 +100,38 @@ function isValidPreMigrationCopy(copyPath: string, version: number): boolean {
 
 // The digest covers every sqlite_master entry (type, name, table and SQL, not
 // the page numbers a copy renumbers) and every row of every table it lists,
-// sqlite_sequence included. Each value is SQLite's own quote() text and rows
-// are sorted by that text, so the digest depends on content alone, never on
+// sqlite_sequence included. Each value is its storage class (typeof) plus its
+// exact bytes: hex(CAST(value AS BLOB)) for text, blob and integer, and
+// printf('%!.17g') for a real, whose text form keeps 15 digits only. quote()
+// is not used, because it stops a text value at an embedded NUL. Rows are
+// sorted by those strings, so the digest depends on content alone, never on
 // row order or page layout. Indexes are covered through their definitions.
+// The reads run in one read transaction, so every table comes from the same
+// snapshot; no write lock is taken.
 function contentDigest(db: DatabaseSync): string {
   const hash = createHash('sha256');
-  const entries = db
-    .prepare('SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name')
-    .all() as Array<{ type: string; name: string; tbl_name: string; sql: string | null }>;
   const quoteName = (name: string) => `"${name.replaceAll('"', '""')}"`;
-  for (const entry of entries) {
-    hash.update(`${JSON.stringify([entry.type, entry.name, entry.tbl_name, entry.sql])}\n`);
-    if (entry.type !== 'table') continue;
-    const columns = db.prepare('SELECT name FROM pragma_table_info(?)').all(entry.name) as Array<{ name: string }>;
-    const values = columns.map((column) => `quote(${quoteName(column.name)})`).join(', ');
-    const order = columns.map((_column, index) => String(index + 1)).join(', ');
-    for (const row of db.prepare(`SELECT ${values} FROM ${quoteName(entry.name)} ORDER BY ${order}`).iterate()) {
-      hash.update(`${JSON.stringify(Object.values(row as Record<string, unknown>))}\n`);
+  db.exec('BEGIN');
+  try {
+    const entries = db
+      .prepare('SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name')
+      .all() as Array<{ type: string; name: string; tbl_name: string; sql: string | null }>;
+    for (const entry of entries) {
+      hash.update(`${JSON.stringify([entry.type, entry.name, entry.tbl_name, entry.sql])}\n`);
+      if (entry.type !== 'table') continue;
+      const columns = db.prepare('SELECT name FROM pragma_table_info(?)').all(entry.name) as Array<{ name: string }>;
+      const values = columns
+        .map(({ name }) => quoteName(name))
+        .map((column) => `typeof(${column}), CASE typeof(${column}) WHEN 'real' THEN printf('%!.17g', ${column})`
+          + ` ELSE hex(CAST(${column} AS BLOB)) END`)
+        .join(', ');
+      const order = columns.flatMap((_column, index) => [String(2 * index + 1), String(2 * index + 2)]).join(', ');
+      for (const row of db.prepare(`SELECT ${values} FROM ${quoteName(entry.name)} ORDER BY ${order}`).iterate()) {
+        hash.update(`${JSON.stringify(Object.values(row as Record<string, unknown>))}\n`);
+      }
     }
+  } finally {
+    db.exec('ROLLBACK');
   }
   return hash.digest('hex');
 }
@@ -222,10 +236,20 @@ function keepPreMigrationCopy(
   const copyPath = `${dbPath}.schema-v${fromVersion}.bak`;
   removeLeftoverCopies(copyPath);
   if (pathEntryExists(copyPath)) {
-    if (isCurrentPreMigrationCopy(db, dbPath, copyPath, fromVersion)) return;
-    throw new IncidentStoreCorruptError(
-      `pre-migration copy ${copyPath} is not a current copy of this schema v${fromVersion} database; move it aside`,
-    );
+    if (!isCurrentPreMigrationCopy(db, dbPath, copyPath, fromVersion)) {
+      throw new IncidentStoreCorruptError(
+        `pre-migration copy ${copyPath} is not a current copy of this schema v${fromVersion} database; move it aside`,
+      );
+    }
+    // An open that linked this copy may have died or failed before its folder
+    // flush, so the copy and the folder are flushed again before migrating.
+    try {
+      flushFile(copyPath);
+      fsyncDirectoryRequired(dirname(copyPath));
+    } catch {
+      throw new IncidentStoreCorruptError(`pre-migration copy failed: ${copyPath}`);
+    }
+    return;
   }
   const tmpPath = `${copyPath}.tmp-${process.pid}-${randomUUID()}`;
   try {
