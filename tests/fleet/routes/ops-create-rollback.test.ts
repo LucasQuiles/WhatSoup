@@ -17,7 +17,19 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { handleCreateLine } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
+import { configRoot, dataRoot, stateRoot } from '../../../src/fleet/paths.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
+
+// The health-token copy must not query the host keyring from a test.
+vi.mock('../../../src/lib/keyring.ts', () => ({ lookupCredential: vi.fn(() => null) }));
+
+// The message of the manager selected on Linux without systemd, whose enable and
+// disable both reject (src/fleet/platform.ts NoSystemdServiceManager; pinned in
+// tests/fleet/platform-service-manager.test.ts).
+const NO_SYSTEMD_ERROR = 'Service management requires systemd. If running under WSL, enable systemd:\n'
+  + '  1. Add "[boot]\\nsystemd=true" to /etc/wsl.conf\n'
+  + '  2. Restart WSL: wsl --shutdown\n'
+  + 'Alternatively, run instances directly: node src/bootstrap.ts <name>';
 
 function failingDeps(): OpsDeps {
   return makeDeps<any>({
@@ -153,5 +165,95 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     // configRoot dir cleaned up too.
     const configDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'fresh-agent');
     expect(fs.existsSync(configDir)).toBe(false);
+  });
+
+  function seedUserFiles() {
+    const claudeDir = path.join(agentCwd, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    const files = [
+      { path: path.join(claudeDir, 'CLAUDE.md'), bytes: Buffer.from('# user instructions\n'), mode: 0o644 },
+      { path: path.join(claudeDir, 'settings.json'), bytes: Buffer.from('{ "user": true }\n'), mode: 0o640 },
+    ];
+    for (const file of files) {
+      fs.writeFileSync(file.path, file.bytes);
+      fs.chmodSync(file.path, file.mode);
+    }
+    return files;
+  }
+
+  function createRequest(name: string) {
+    return mockReq({
+      method: 'POST',
+      body: JSON.stringify({
+        name, type: 'agent', adminPhones: ['15551234567'],
+        agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
+        claudeMd: 'AGENT_PROMPT — must not outlive a failed create\n',
+      }),
+    });
+  }
+
+  function expectRestoredAndRemoved(name: string, files: ReturnType<typeof seedUserFiles>) {
+    for (const file of files) {
+      expect(fs.readFileSync(file.path)).toEqual(file.bytes);
+      expect(fs.statSync(file.path).mode & 0o777).toBe(file.mode);
+    }
+    for (const dir of [path.join(configRoot(), name), dataRoot(name), stateRoot(name)]) {
+      expect(fs.existsSync(dir)).toBe(false);
+    }
+  }
+
+  async function expectRetryIsNotRefused(name: string) {
+    const retry = mockRes();
+    await handleCreateLine(createRequest(name), retry, makeDeps<any>({}) as OpsDeps);
+    expect(retry._status).toBe(201);
+  }
+
+  it.each([
+    ['a rejected compensating disable', new Error('disable response lost'), new Error('enable response lost')],
+    ['the no-systemd manager rejecting both calls', new Error(NO_SYSTEMD_ERROR), new Error(NO_SYSTEMD_ERROR)],
+  ])('restores user files and removes the instance after a rejected enable and %s', async (_case, disableError, enableError) => {
+    const files = seedUserFiles();
+    const name = 'uncompensated-agent';
+    const deps = makeDeps<any>({
+      serviceManager: {
+        enable: vi.fn().mockRejectedValue(enableError),
+        disable: vi.fn().mockRejectedValue(disableError),
+      } as any,
+    }) as OpsDeps;
+    const res = mockRes();
+
+    await handleCreateLine(createRequest(name), res, deps);
+
+    expectRestoredAndRemoved(name, files);
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({
+      schema: 'fleet-error-v1', operation: 'instance_create', stage: 'rollback', code: 'rollback_failed',
+      mutation_state: 'unknown', rollback_state: 'failed', retryable: false, correlation_id: expect.any(String),
+    });
+    expect(res._body).not.toContain('systemd');
+    expect(res._body).not.toContain('response lost');
+    expect(deps.serviceManager.disable).toHaveBeenCalledWith(name);
+    expect(deps.realtime.publish).not.toHaveBeenCalled();
+    await expectRetryIsNotRefused(name);
+  });
+
+  it('restores user files when enable succeeded, a later step failed and the disable rejected', async () => {
+    const files = seedUserFiles();
+    const name = 'late-failure-agent';
+    const deps = makeDeps<any>({
+      serviceManager: { disable: vi.fn().mockRejectedValue(new Error('disable response lost')) } as any,
+      discovery: { scan: vi.fn(() => { throw new Error('scan failed after enable'); }) } as any,
+    }) as OpsDeps;
+    const res = mockRes();
+
+    await handleCreateLine(createRequest(name), res, deps);
+
+    expect(deps.serviceManager.enable).toHaveBeenCalledWith(name);
+    expect(res._status).toBe(500);
+    // The service may still be enabled; the response says so instead of claiming a rollback.
+    expect(JSON.parse(res._body)).toMatchObject({
+      code: 'rollback_failed', stage: 'rollback', mutation_state: 'unknown', rollback_state: 'failed', retryable: false,
+    });
+    expectRestoredAndRemoved(name, files);
   });
 });

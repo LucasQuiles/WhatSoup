@@ -1292,7 +1292,7 @@ describe('handleCreateLine', () => {
     expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(false);
   });
 
-  it('preserves partial state when post-enable rollback cannot disable the service', async () => {
+  it('removes partial state and reports an unknown service state when post-enable rollback cannot disable the service', async () => {
     const name = 'enable-rollback-fails';
     const svc = mockServiceManager();
     svc.disable.mockRejectedValueOnce(new Error('disable failed'));
@@ -1325,13 +1325,13 @@ describe('handleCreateLine', () => {
     expect(rollbackBody.code).toBe('rollback_failed');
     expect(rollbackBody.operation).toBe('instance_create');
     expect(rollbackBody.stage).toBe('rollback');
-    expect(rollbackBody.mutation_state).toBe('rollback_failed');
+    expect(rollbackBody.mutation_state).toBe('unknown');
     expect(rollbackBody.rollback_state).toBe('failed');
     expect(svc.enable).toHaveBeenCalledWith(name);
     expect(svc.disable).toHaveBeenCalledWith(name);
-    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(true);
-    expect(fs.existsSync(path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name))).toBe(true);
-    expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(true);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+    expect(fs.existsSync(path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name))).toBe(false);
+    expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(false);
   });
 
   it('treats a legacy sibling without healthPort as occupying the runtime default port during create', async () => {

@@ -197,7 +197,7 @@ describe('ops-lifecycle handlers', () => {
     }
   });
 
-  it('retains recovery state when a failed enable cannot be compensated', async () => {
+  it('removes the instance files and reports an unknown service state when a failed enable cannot be compensated', async () => {
     const name = 'enable-uncertain';
     const deps = makeDeps<any>({}) as OpsDeps;
     vi.mocked(deps.serviceManager.enable).mockRejectedValueOnce(new Error('enable response lost'));
@@ -209,10 +209,10 @@ describe('ops-lifecycle handlers', () => {
 
     expect(res._status).toBe(500);
     expect(JSON.parse(res._body)).toMatchObject({ operation: 'instance_create', stage: 'rollback', code: 'rollback_failed',
-      mutation_state: 'rollback_failed', rollback_state: 'failed', retryable: false });
+      mutation_state: 'unknown', rollback_state: 'failed', retryable: false });
     expect(deps.serviceManager.disable).toHaveBeenCalledWith(name);
-    expect(fs.existsSync(path.join(tmpDir, 'config', 'whatsoup', 'instances', name, 'config.json'))).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, 'data', 'whatsoup', 'instances', name))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, 'config', 'whatsoup', 'instances', name))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'data', 'whatsoup', 'instances', name))).toBe(false);
     expect(deps.realtime.publish).not.toHaveBeenCalled();
   });
 

@@ -526,24 +526,38 @@ export async function handleCreateLine(
     jsonResponse(res, 201, { name, healthPort });
   } catch (err) {
     // A rejected enable call can have changed service state before losing its response.
+    let disableFailure: { error: unknown } | undefined;
     if (serviceEnableAttempted) {
       try {
         await deps.serviceManager.disable(name);
       } catch (rollbackErr) {
-        log.error(
-          { err: rollbackErr, originalErr: err, instance: name },
-          'failed to disable service after instance creation failure',
-        );
-        jsonResponse(res, 500, mutationError(rollbackErr, { operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed' }, 'rollback_failed'));
-        return;
+        disableFailure = { error: rollbackErr };
       }
     }
+    // The filesystem rollback never depends on the service: restoring the user's
+    // files and removing the instance folders always runs, so a failed create
+    // leaves no overwritten workspace file and no folder that refuses a retry.
     const cleanupErrors = cleanupPartial(name, createdExtras);
     if (cleanupErrors.length > 0) {
       const response = mutationError(cleanupErrors[0], {
         operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed',
       }, 'rollback_failed');
-      log.error({ err: new AggregateError(cleanupErrors), originalErr: err, instance: name, correlationId: response.correlation_id }, 'instance creation rollback cleanup incomplete');
+      log.error({
+        err: new AggregateError(cleanupErrors), originalErr: err, disableErr: disableFailure?.error,
+        instance: name, correlationId: response.correlation_id,
+      }, 'instance creation rollback cleanup incomplete');
+      jsonResponse(res, 500, response);
+      return;
+    }
+    if (disableFailure) {
+      // Files are restored and folders removed; only the service state is unknown.
+      const response = mutationError(disableFailure.error, {
+        operation: 'instance_create', stage: 'rollback', mutationState: 'unknown', rollbackState: 'failed',
+      }, 'rollback_failed');
+      log.error(
+        { err: disableFailure.error, originalErr: err, instance: name, correlationId: response.correlation_id },
+        'failed to disable service after instance creation failure; instance files were rolled back',
+      );
       jsonResponse(res, 500, response);
       return;
     }
