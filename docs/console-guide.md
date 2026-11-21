@@ -113,35 +113,49 @@ The left panel shows every instance with its status, phone number, message count
 Deletion succeeds only after the stop and disable calls returned, or reported the
 service as already absent, and the config, data and state directories are removed.
 A success does not prove that the instance process has exited: some service
-managers return from a stop after a timeout without observing the exit. Each delete
-failure carries `instance`, `mutation_state: unknown`, `retryable: false` and a
-correlation id that the server log line also carries:
+managers return from a stop after a timeout without observing the exit. The three
+projected delete failures (HTTP 500) carry `instance`, `mutation_state: unknown`,
+`retryable: false` and a correlation id that the server log line also carries:
 `service_stop_failed` (nothing was removed), `service_disable_failed` (the stop
 returned; the files are kept) and `instance_cleanup_failed` (some directories may
-remain). The line detail page shows the recovery message and stays open. Inspect the
+remain). The preflight refusal (HTTP 409) has only `error` and `instance`, and an
+invalid name (HTTP 400) has only `error`; the console then shows only the HTTP
+status. The line detail page shows the recovery message and stays open. Inspect the
 remaining directories and the correlated server log, correct the failure, then
 explicitly retry deletion. A failure can leave only part of the instance; it does
 not mean that deletion had no effect.
 
-A failed creation always runs its filesystem rollback: it removes the instance's
-config, data and state directories, restores each workspace file it overwrote
-(`.claude/CLAUDE.md`, `.claude/settings.json`) with its bytes and mode, and removes
-the workspace files it added. A rejected enable call can have changed service state
-before losing its response, so creation also attempts disable. The response has one
-of three outcomes, each with a correlation id that the server log carries:
+Validation failures and a failure to create the instance's config directory answer
+before anything needs rolling back. A later failure of creation rolls back: its
+filesystem rollback removes the instance's config, data and state directories,
+restores each workspace file it overwrote (`.claude/CLAUDE.md`,
+`.claude/settings.json`) with its bytes and mode, and removes the workspace files it
+added. Once the enable call was made, creation also attempts disable, because a
+rejected enable can have changed service state before losing its response. The
+response has one of four outcomes:
 
 - `rolled_back` with `rollback_state: succeeded`: the disable (when one was needed)
-  returned and the filesystem rollback finished. This does not prove that an earlier
-  service state was restored, and a `.claude` directory or permission change that
-  creation made in the workspace stays.
-- `rollback_failed` with `mutation_state: unknown`: the disable failed, but the files
-  were restored and the directories removed, so another creation of the same name is
-  not refused. Inspect the service state first.
-- `rollback_failed` with `mutation_state: rollback_failed`: the filesystem rollback
-  was incomplete. Files or directories may remain, and another creation is refused
-  while the config directory exists.
+  returned and the filesystem rollback finished. The response carries a correlation
+  id, but no server log line does. This does not prove that an earlier service state
+  was restored, and a `.claude` directory or permission change that creation made in
+  the workspace stays.
+- `rollback_failed` with `mutation_state: unknown`: the enable call was rejected and
+  the disable failed too. The files were restored and the directories removed;
+  inspect the service state before creating the line again.
+- `rollback_failed` with `mutation_state: rollback_failed` after an enable that
+  succeeded and a disable that failed: no filesystem rollback runs, because the
+  service may run with this configuration. The directories and the workspace files
+  stay as creation wrote them, as in earlier releases.
+- `rollback_failed` with `mutation_state: rollback_failed` after an incomplete
+  filesystem rollback: files or directories may remain.
 
-The API does not automatically retry an uncertain service operation.
+The last three outcomes have a server log line with the response's correlation id;
+the log line also tells the two `rollback_failed` / `rollback_failed` outcomes
+apart. Removing the directories clears the refusal that an existing config
+directory causes, but the name can still be refused until discovery has scanned
+again, because the server may have listed the instance while enable was pending.
+The automated test covers the directory condition only. The API does not
+automatically retry an uncertain service operation.
 
 ![Unhealthy Instance Management](screenshots/ops-unhealthy.png)
 
