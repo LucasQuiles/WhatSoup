@@ -113,8 +113,9 @@ describe('Vitest run root', () => {
     }
   });
 
-  // The retry window can expire while a writer is still active. That must not
-  // pass as a clean run, and the exit hook must still get the last attempt.
+  // The retry window can expire while a writer is still active. Teardown then
+  // leaves the verdict to the exit hook, the last attempt: the run is clean when
+  // the hook removes the root, and fails closed when the root outlasts its wait.
   it.each([
     {
       outcome: 'a removal that exhausts its retries',
@@ -122,13 +123,21 @@ describe('Vitest run root', () => {
         throw Object.assign(new Error(`ENOTEMPTY: directory not empty, rmdir '${root}'`), { code: 'ENOTEMPTY' });
       },
       report: 'could not remove',
+      writerStops: true,
     },
     {
       outcome: 'a removal that returns with the root still present',
       block: (): void => {},
       report: 'is still present after removal',
+      writerStops: true,
     },
-  ])('fails the run closed and keeps its exit hook after $outcome', ({ block, report }) => {
+    {
+      outcome: 'a writer that never stops',
+      block: (): void => {},
+      report: 'is still present after removal',
+      writerStops: false,
+    },
+  ])('keeps its exit hook after $outcome and lets the hook decide the exit status', ({ block, report, writerStops }) => {
     const parent = realpathSync(tmp.make('parent'));
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
@@ -140,23 +149,28 @@ describe('Vitest run root', () => {
             if (writerActive) block(root);
             else rmSync(root, { recursive: true, force: true });
           },
+          exitWaitMs: 50,
         });
         const root = process.env[RUN_ROOT_ENV]!;
-        workerHome(root, 'intact');
+        const home = workerHome(root, 'intact');
         process.exitCode = undefined;
 
         expect(() => teardown()).not.toThrow();
         expect(process.env[RUN_ROOT_ENV]).toBe(previous);
         expect(existsSync(root)).toBe(true);
-        expect(process.exitCode).toBe(1);
+        expect(process.exitCode).toBeUndefined();
         expect(stderr).toHaveBeenCalledWith(expect.stringContaining(report));
         const remaining = addedExitListeners();
         expect(remaining).toHaveLength(1);
 
-        // The writer has stopped by the time the process exits.
-        writerActive = false;
+        // The writer has stopped by the time the process exits, or never does.
+        writerActive = !writerStops;
         remaining[0]!();
-        expect(existsSync(root)).toBe(false);
+        expect(existsSync(root)).toBe(!writerStops);
+        expect(process.exitCode).toBe(writerStops ? undefined : 1);
+        const reports = stderr.mock.calls.map(([chunk]) => String(chunk)).join('');
+        expect(reports.includes(`could not remove ${root} within 50 ms`)).toBe(!writerStops);
+        expect(reports.includes(join(basename(home), 'credential-bin', 'secret-tool'))).toBe(!writerStops);
       });
     } finally {
       stderr.mockRestore();

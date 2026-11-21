@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, sep } from 'node:path';
 
 // One temporary root per Vitest run (Vitest globalSetup).
@@ -28,10 +28,22 @@ export const WORKER_HOME_PREFIX = 'ws-vh-';
 // tree while it is removed.
 export const REMOVE_RETRY = { maxRetries: 5, retryDelay: 100 } as const;
 
-// The run root gets a longer bounded window: a child process that a test file
-// left running may still write into a worker HOME when the run ends. Node backs
-// off linearly, so ten retries wait at most 5.5 s in total.
+// One removal attempt on the run root. Node 24's native rmSync sleeps whole
+// seconds between retries, sleep(i * retryDelay / 1000), so these ten retries
+// wait about 1 s in total, not 5.5 s; the exit hook's wait below is the window
+// a late writer gets.
 export const RUN_ROOT_REMOVE_RETRY = { maxRetries: 10, retryDelay: 100 } as const;
+
+// The total time the exit hook waits for the run root to go, in one bound; it
+// starts no attempt after it. A child process that a test file left running may
+// still write into a worker HOME when the run ends: the list probe's late writer
+// runs 2.5 s, and one attempt takes up to about 1 s. Ten seconds covers that
+// three times over on a slow host and stays well inside the 30 s and 120 s
+// timeouts of the callers that run `vitest list` in a child process.
+export const RUN_ROOT_EXIT_WAIT_MS = 10_000;
+const RUN_ROOT_EXIT_PAUSE_MS = 100;
+// The final failure names this many remaining entries at most.
+const REMAINING_ENTRIES_SHOWN = 20;
 
 // /tmp, not os.tmpdir(): the macOS per-user TMPDIR is long enough to push
 // test socket paths past the 104-byte sun_path limit.
@@ -80,30 +92,79 @@ function removeTree(root: string): void {
   rmSync(root, { recursive: true, force: true, ...RUN_ROOT_REMOVE_RETRY });
 }
 
-// Never throws. A refused or failed removal, or a root that is still present
-// afterwards, is reported on stderr and returns false; the caller fails the run.
-export function removeRunRoot(root: string, token: string, remove: RemoveTree = removeTree): boolean {
-  if (!isMarkedRunRoot(root, token)) {
-    process.stderr.write(`vitest-run-root: refusing to remove ${root}: not this run's marked root\n`);
-    return false;
+// 'own': it carries this run's marker. 'unmarked': its marker file is missing.
+// 'other': anything else that is present, such as another run's marker.
+type RootState = 'own' | 'unmarked' | 'gone' | 'other';
+
+function runRootState(root: string, token: string): RootState {
+  if (!isAbsolute(root)) return 'other';
+  try {
+    const stat = lstatSync(root, { throwIfNoEntry: false });
+    if (stat === undefined) return 'gone';
+    if (stat.isSymbolicLink() || !stat.isDirectory() || realpathSync(root) !== root) return 'other';
+    return readFileSync(join(root, RUN_ROOT_MARKER), 'utf8') === token ? 'own' : 'other';
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'other';
+    return lstatSync(root, { throwIfNoEntry: false }) === undefined ? 'gone' : 'unmarked';
   }
+}
+
+export type RemoveResult = { outcome: 'removed' } | { outcome: 'refused' } | { outcome: 'present'; reason: string };
+
+// One attempt; never throws. A refusal is reported on stderr. `started` is true
+// once an earlier attempt of this run found its own marker and began to remove
+// the root. A removal can stop part way with the marker already gone: on Linux,
+// Node's rmSync returns as if done when remove_all meets an entry that another
+// process removed first (ENOENT), as a worker's own exit-hook HOME removal does
+// while teardown runs. So from then on a missing marker is accepted; a
+// different marker never is.
+export function removeRunRoot(
+  root: string,
+  token: string,
+  remove: RemoveTree = removeTree,
+  started = false,
+): RemoveResult {
+  const state = runRootState(root, token);
+  if (state === 'gone') return { outcome: 'removed' };
+  if (state === 'other' || (state === 'unmarked' && !started)) {
+    process.stderr.write(`vitest-run-root: refusing to remove ${root}: not this run's marked root\n`);
+    return { outcome: 'refused' };
+  }
+  let reason = `${root} is still present after removal`;
   try {
     remove(root);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`vitest-run-root: could not remove ${root}: ${reason}\n`);
-    return false;
+    reason = `could not remove ${root}: ${error instanceof Error ? error.message : String(error)}`;
   }
-  if (lstatSync(root, { throwIfNoEntry: false }) !== undefined) {
-    process.stderr.write(`vitest-run-root: ${root} is still present after removal\n`);
-    return false;
+  return lstatSync(root, { throwIfNoEntry: false }) === undefined ? { outcome: 'removed' } : { outcome: 'present', reason };
+}
+
+// The entries left in the root, relative to it: their number and the first
+// REMAINING_ENTRIES_SHOWN in sorted order.
+function remainingEntries(root: string): string {
+  let names: string[];
+  try {
+    names = readdirSync(root, { encoding: 'utf8', recursive: true }).sort();
+  } catch {
+    return 'its entries could not be listed';
   }
-  return true;
+  const shown = names.slice(0, REMAINING_ENTRIES_SHOWN);
+  return `${names.length} entries remain (${shown.length} shown): ${shown.join(', ')}`;
+}
+
+// A blocking sleep that needs no timer: the exit hook runs synchronously, so a
+// timer would never fire. Atomics.wait on a cell that nothing notifies returns
+// after `ms`.
+const pauseCell = new Int32Array(new SharedArrayBuffer(4));
+function pause(ms: number): void {
+  if (ms > 0) Atomics.wait(pauseCell, 0, 0, ms);
 }
 
 export interface RunRootOptions {
   // Test seam: the tree removal, so a removal that keeps failing is reproducible.
   remove?: RemoveTree;
+  // Test seam: the exit hook's total wait, RUN_ROOT_EXIT_WAIT_MS by default.
+  exitWaitMs?: number;
 }
 
 // Vitest only logs an error thrown by a globalSetup teardown and still exits 0,
@@ -121,24 +182,45 @@ export function startRunRoot(parent: string = defaultTempParent(), options: RunR
   writeFileSync(join(root, RUN_ROOT_MARKER), token, { mode: 0o600 });
   process.env[RUN_ROOT_ENV] = root;
 
-  // Only a removal that worked ends the attempts. Until then the exit hook stays
-  // registered, so a root that teardown could not remove gets one more try.
+  // Teardown makes one attempt and the exit hook makes the last ones, so a root
+  // that is gone when the process exits is a clean run. The run fails closed
+  // when the exit hook's wait ends with the root present, or at once when the
+  // root is not provably this run's.
+  let started = false;
   let removed = false;
-  const reap = (): boolean => {
-    if (!removed) removed = removeRunRoot(root, token, options.remove);
-    return removed;
+  const attempt = (): RemoveResult => {
+    if (removed) return { outcome: 'removed' };
+    const result = removeRunRoot(root, token, options.remove, started);
+    started ||= result.outcome !== 'refused';
+    removed = result.outcome === 'removed';
+    return result;
   };
   // Vitest ends the main process with process.exit() on SIGINT/SIGTERM, which
   // skips teardown but still emits `exit`.
   const reapAtExit = (): void => {
-    if (!reap()) failRunClosed();
+    const waitMs = options.exitWaitMs ?? RUN_ROOT_EXIT_WAIT_MS;
+    const deadline = Date.now() + waitMs;
+    let result = attempt();
+    while (result.outcome === 'present' && Date.now() < deadline) {
+      pause(Math.min(RUN_ROOT_EXIT_PAUSE_MS, deadline - Date.now()));
+      result = attempt();
+    }
+    if (result.outcome === 'removed') return;
+    failRunClosed();
+    if (result.outcome === 'present') {
+      process.stderr.write(
+        `vitest-run-root: could not remove ${root} within ${waitMs} ms (${result.reason}); ${remainingEntries(root)}\n`,
+      );
+    }
   };
   process.once('exit', reapAtExit);
 
   return () => {
     try {
-      if (reap()) process.off('exit', reapAtExit);
-      else failRunClosed();
+      const result = attempt();
+      if (result.outcome === 'removed') process.off('exit', reapAtExit);
+      else if (result.outcome === 'refused') failRunClosed();
+      else process.stderr.write(`vitest-run-root: ${result.reason}; the exit hook tries again\n`);
     } finally {
       if (previous === undefined) delete process.env[RUN_ROOT_ENV];
       else process.env[RUN_ROOT_ENV] = previous;
