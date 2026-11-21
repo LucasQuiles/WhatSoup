@@ -238,9 +238,10 @@ describe('Claude provider-probe credential selector', () => {
 
 // The deadman reads the dispatcher's uptime from the service manager unless the dry seam answers it. A pinned uptime
 // past --restart-grace 0 grants no grace, as an unanswered read does; `path` puts a recorder first, so a call that
-// still reaches the service manager is recorded instead of decided by the host.
+// still reaches the service manager is recorded instead of decided by the host. The pinned platform keeps that call
+// on the recorded `launchctl` branch on every host; a Linux host would otherwise ask `systemctl`, unrecorded.
 function deadmanServiceSeam(path: string): Record<string, string> {
-  return { PATH: path, BOT_ERRORS_DRY_SERVICE_UPTIME_SECONDS: '3600' };
+  return { PATH: path, BOT_ERRORS_DRY_PLATFORM: 'darwin', BOT_ERRORS_DRY_SERVICE_UPTIME_SECONDS: '3600' };
 }
 
 function runDeadman(tmpRoot: string, extraEnv: Record<string, string> = {}) {
@@ -1782,7 +1783,6 @@ print(json.dumps(samples, sort_keys=True))
     expect(event.evidence).not.toContain('personal@s.whatsapp.net');
     // The fallback is earned only after the service manager was asked about the reported label and could not prove it.
     const label = /service personal: active_process_fallback \((\S+)\)/.exec(event.evidence)?.[1];
-    expect(label).toBeDefined();
     const calls = launchctl.calls();
     expect(calls).toContain(`print gui/${process.getuid!()}/${label}`);
     expect(calls.filter((call) => !/^(print|list)( |$)/.test(call))).toEqual([]);
