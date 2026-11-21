@@ -100,9 +100,16 @@ function makeTree(dir: string, kind: TreeKind, opts: { units?: boolean } = {}): 
   );
   fs.copyFileSync(path.join(repoRoot, '.nvmrc'), path.join(dir, '.nvmrc'));
   fs.writeFileSync(path.join(dir, 'package.json'), '{}\n');
-  for (const stub of ['install-host-dependencies.sh', 'ensure-node-installed.sh', 'whatsoup-host-doctor.sh']) {
+  for (const stub of ['install-host-dependencies.sh', 'ensure-node-installed.sh']) {
     writeExecutable(path.join(dir, 'deploy', 'scripts', stub), '#!/bin/bash\nexit 0\n');
   }
+  // The last preflight step; REPOINT_WRAPPER_TO lets a test move the wrapper between setup's first check and a step.
+  writeExecutable(path.join(dir, 'deploy', 'scripts', 'whatsoup-host-doctor.sh'), [
+    '#!/bin/bash',
+    'if [ -n "${REPOINT_WRAPPER_TO:-}" ]; then /bin/ln -sfn "$REPOINT_WRAPPER_TO" "$HOME/.local/bin/whatsoup"; fi',
+    'exit 0',
+    '',
+  ].join('\n'));
   for (const target of Object.values(LINKS)) {
     if (!fs.existsSync(path.join(dir, target))) writeExecutable(path.join(dir, target), '#!/bin/bash\nexit 0\n');
   }
@@ -552,6 +559,36 @@ describe('deploy/setup.sh release guard: each refusal runs no step and changes n
     linkWrapper(host, wrapperOf(current));
 
     expectRefusal(host, next, ['--timers-only'], TIMERS, { platform: 'Darwin' });
+  });
+
+  it('checks again at step 3: a wrapper moved during the preflight is refused before any link changes', () => {
+    const host = makeHost();
+    const active = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const other = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    linkWrapper(host, wrapperOf(active));
+
+    const run = runSetup(host, active, ['--wrappers-only'], { env: { REPOINT_WRAPPER_TO: wrapperOf(other) } });
+    expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(2);
+    expect(run.events).toEqual(PREFLIGHT_EVENTS);
+    expect(run.stderr).toContain(`Refusing to ${WRAPPERS}`);
+    expect(fs.readlinkSync(path.join(host.bin, 'whatsoup'))).toBe(wrapperOf(other));
+    expect(fs.readdirSync(host.bin)).toEqual(['whatsoup']);
+  });
+
+  it('checks again at step 4 on macOS: a wrapper moved during the preflight renders no timer plist', () => {
+    const host = makeHost();
+    const active = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const other = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    linkWrapper(host, wrapperOf(active));
+
+    const run = runSetup(host, active, ['--timers-only'], {
+      platform: 'Darwin',
+      env: { REPOINT_WRAPPER_TO: wrapperOf(other) },
+    });
+    expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(2);
+    expect(run.events).toEqual(PREFLIGHT_EVENTS);
+    expect(run.stderr).toContain(`Refusing to ${TIMERS}`);
+    expect(fs.existsSync(path.join(host.home, 'Library'))).toBe(false);
   });
 
   it('refuses --wrappers-only combined with --skip-wrappers', () => {
