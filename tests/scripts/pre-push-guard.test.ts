@@ -1013,8 +1013,9 @@ describe('verify chain composition (push-gate manifest)', () => {
   it('verify:push:branch invokes the test-integrity baseline gate', () => {
     // Regression guard: PR #677 surfaced that verify:push:branch did NOT run
     // guard:test-integrity, so a weak-assertion violation slipped past the
-    // local pre-push hook and was caught only by CI. The CI quality job runs
-    // this gate; the local push gate must too so the dev cycle is fail-fast.
+    // local pre-push hook and was caught only by CI. Server-side only the trusted
+    // private-test-integrity.yml workflow runs this scan now (Quality no longer
+    // does); the local push gate must run it too so the dev cycle is fail-fast.
     const chain = branchChain;
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
@@ -1272,15 +1273,13 @@ describe('quality workflow composition', () => {
     );
   });
 
-  it('runs one read-only Node 24 semantic shadow step before integrity and expensive suites', () => {
+  it('runs one read-only Node 24 semantic shadow step before the expensive suites', () => {
     const semanticMatches = qualityWorkflow.match(/name: Semantic quality \(shadow\)/g) ?? [];
     const semanticIndex = qualityWorkflow.indexOf('name: Semantic quality (shadow)');
-    const integrityInstallIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
     const suiteIndex = qualityWorkflow.indexOf('name: Test suite + coverage thresholds');
 
     expect(semanticMatches).toHaveLength(1);
     expect(semanticIndex).toBeGreaterThanOrEqual(0);
-    expect(semanticIndex).toBeLessThan(integrityInstallIndex);
     expect(semanticIndex).toBeLessThan(suiteIndex);
     expect(qualityWorkflow).toContain('name: quality (24.x)');
     expect(qualityWorkflow).not.toContain("if: matrix.node == '24.x'");
@@ -1294,31 +1293,28 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).not.toContain('path: semantic-quality.json');
   });
 
-  it('installs the private test-integrity plugin before requiring the baseline gate', () => {
-    const installIndex = qualityWorkflow.indexOf('name: Install test-integrity plugin');
-    const gateIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
-
-    expect(installIndex).toBeGreaterThanOrEqual(0);
-    expect(gateIndex).toBeGreaterThan(installIndex);
-    expect(qualityWorkflow).toContain('TEST_INTEGRITY_DEPLOY_KEY');
-    expect(qualityWorkflow).toContain('LucasQuiles/test-integrity.git');
-    expect(qualityWorkflow).toContain('TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c');
-    expect(qualityWorkflow).toContain('mkdir -p "$plugin_dir" "$HOME/.ssh"');
-    expect(qualityWorkflow).toContain('fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"');
-    expect(qualityWorkflow).toContain('if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then');
-    expect(qualityWorkflow).not.toContain('git clone --depth 1');
-    expect(qualityWorkflow).not.toMatch(/git -C "\$plugin_dir" push/);
-    expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
+  it('leaves the private test-integrity check to the trusted private workflow', () => {
+    // The Quality job runs the change's own code, so it holds no deploy key and installs no
+    // private plugin; private-test-integrity.yml runs the pinned plugin after Quality completes.
+    for (const reference of [
+      'TEST_INTEGRITY_DEPLOY_KEY',
+      'test-integrity.git',
+      'name: Install test-integrity plugin',
+      'name: Test integrity baseline check',
+      'guard:test-integrity',
+    ]) {
+      expect(qualityWorkflow).not.toContain(reference);
+    }
   });
 
   it('uses the shared quality installer before Python-backed gates run', () => {
     const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
     const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
-    const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
+    const tokenomicsIndex = qualityWorkflow.indexOf('name: Tokenomics Python tests');
 
     expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
     expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
-    expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
+    expect(tokenomicsIndex).toBeGreaterThan(pythonDepsIndex);
     expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
     expect(qualityWorkflow).toContain("python-version: '3.12'");
     expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');

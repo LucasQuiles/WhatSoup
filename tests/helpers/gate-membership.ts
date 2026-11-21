@@ -125,6 +125,10 @@ export const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<
     backedBy: null,
     why: 'NOTHING server-side runs it yet. The tree check needs the private term file, which a hosted runner lacks, so a quality.yml step would only print its skip line and certify nothing. A hosted term-aware check replaces this exemption later; until then the local push gate alone runs it, so scriptReachability overstates it as reachable on the pull-request path.',
   },
+  'guard:test-integrity': {
+    backedBy: null,
+    why: 'No Quality step and no full-suite test runs it: the Quality job runs pull-request code, so it holds no test-integrity deploy key and cannot run the private plugin. The trusted private-test-integrity.yml workflow runs the same pinned plugin after Quality completes. Only a same-repository pull-request run creates the required test-integrity (private) check; a push to main, a tag push and the daily main run write a receipt artifact and enforce the result in that workflow after Quality has completed, so for those runs a scanner finding can sit beside a green Quality result. Quality also runs for merge_group, which the trusted workflow skips; a merge queue is unavailable on this repository. So scriptReachability reports it reachable on the pull-request path through this exemption alone: the trusted workflow, not the full suite and not a Quality step, runs it there.',
+  },
 };
 
 /**
@@ -209,15 +213,15 @@ export function scriptReachability(
       return {
         reachable: true,
         via: 'push-gate-exemption',
-        detail: `push-gate only, backed in the full suite by ${exemption.backedBy ?? 'a CI step'} — ${exemption.why}`,
+        detail: `push-gate only (full-suite test: ${exemption.backedBy ?? 'none; see the reason'}) — ${exemption.why}`,
       };
     }
     return {
       reachable: false,
       via: 'none',
       detail:
-        `exempted as push-gate-only on the strength of a live-tree test, but the ${path} ` +
-        `workflow does not run the full suite (no coverage:check), so nothing executes it there`,
+        `exempted as push-gate-only (full-suite test: ${exemption.backedBy ?? 'none'}), but the ${path} ` +
+        `workflow does not run the full suite (no coverage:check), so that workflow never runs it — ${exemption.why}`,
     };
   }
   return {

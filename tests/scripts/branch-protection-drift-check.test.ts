@@ -18,9 +18,12 @@ import {
  * The comparator is pure so it is testable without a token; the CLI feeds it whatever
  * `gh api .../branches/main/protection` returned.
  */
+// Hardcoded on purpose: deriving this from the committed file would make the no-drift test pass by construction.
+const REQUIRED_CONTEXTS = ['CodeQL', 'gitleaks', 'quality (24.x)', 'quality (25.x)', 'test-integrity (private)'];
+
 function observed(overrides: Record<string, unknown> = {}): ObservedProtection {
   return {
-    required_status_checks: { strict: true, contexts: ['CodeQL', 'quality (24.x)', 'quality (25.x)'] },
+    required_status_checks: { strict: true, contexts: [...REQUIRED_CONTEXTS] },
     required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true },
     enforce_admins: false,
     allow_force_pushes: false,
@@ -41,11 +44,29 @@ describe('branch-protection-drift-check — diffProtection', () => {
     const expected = loadExpectedProtection();
     const findings = diffProtection(
       expected,
-      observed({ required_status_checks: { strict: true, contexts: ['CodeQL', 'quality (24.x)'] } }),
+      observed({
+        required_status_checks: { strict: true, contexts: REQUIRED_CONTEXTS.filter((c) => c !== 'quality (25.x)') },
+      }),
     );
     expect(findings).toHaveLength(1);
     expect(findings[0].field).toBe('required_status_checks.contexts');
     expect(findings[0].detail).toContain('quality (25.x)');
+  });
+
+  it('detects test-integrity (private) being dropped from classic protection', () => {
+    const expected = loadExpectedProtection();
+    const findings = diffProtection(
+      expected,
+      observed({
+        required_status_checks: {
+          strict: true,
+          contexts: REQUIRED_CONTEXTS.filter((c) => c !== 'test-integrity (private)'),
+        },
+      }),
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].field).toBe('required_status_checks.contexts');
+    expect(findings[0].detail).toContain('no longer required: test-integrity (private)');
   });
 
   it('detects required approvals being lowered to zero', () => {
@@ -75,7 +96,7 @@ describe('branch-protection-drift-check — diffProtection', () => {
     const expected = loadExpectedProtection();
     const findings = diffProtection(
       expected,
-      observed({ required_status_checks: { strict: true, contexts: ['CodeQL', 'quality (24.x)', 'quality (25.x)', 'new-gate'] } }),
+      observed({ required_status_checks: { strict: true, contexts: [...REQUIRED_CONTEXTS, 'new-gate'] } }),
     );
     expect(findings).toHaveLength(1);
     expect(findings[0].detail).toContain('new-gate');
@@ -85,7 +106,7 @@ describe('branch-protection-drift-check — diffProtection', () => {
     const expected = loadExpectedProtection();
     const findings = diffProtection(
       expected,
-      observed({ required_status_checks: { strict: true, contexts: ['quality (25.x)', 'CodeQL', 'quality (24.x)'] } }),
+      observed({ required_status_checks: { strict: true, contexts: [...REQUIRED_CONTEXTS].reverse() } }),
     );
     expect(findings).toEqual([]);
   });
