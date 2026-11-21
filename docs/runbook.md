@@ -1638,7 +1638,7 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 **Recovery cascade:**
 
 1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
-   - Tracker records the stall and emits a user-visible warning (format depends on `toolUpdateMode`)
+   - Tracker records the stall and emits a user-visible warning in `full` and `friendly` modes (wording depends on the mode); in `minimal` mode and when `toolUpdateMode` is unset, the user sees only the typing indicator
    - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first.
    - **Liveness gate (CPU progress):** when the grace expires, the provider's process tree is CPU-sampled twice across a 5s window (`src/runtimes/agent/tree-liveness.ts`). A tree that burned CPU or changed shape is a **working long step, not a hang** (heavy browser automation, long bash/MCP calls): the kill is deferred, the grace re-arms, and the chat gets a rate-limited `_Long-running step still active (~N min in) — continuing. Send /new to interrupt._` notice. Extensions are bounded by `WHATSOUP_LONG_OP_CEILING_MS` (default 2 h) from the first fire of the quiet stretch. A flat tree — or any assessment failure — kills exactly as before: SIGKILL plus "_A tool call stalled and was terminated. Send your message again to retry._"
 

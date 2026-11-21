@@ -786,6 +786,78 @@ describe('AddLineWizard — reset-on-open (C-B3W4-3)', () => {
   })
 })
 
+describe('AddLineWizard — tool update defaults', () => {
+  it('shows the default tool update choice for a new form', async () => {
+    render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('')
+  })
+
+  it('creates a default line without storing a tool update mode', async () => {
+    render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToReviewStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1))
+    expect(mockCreateLine.mock.calls[0]?.[0]).not.toHaveProperty('toolUpdateMode')
+    expect(mockUpdateConfig.mock.calls[0]?.[1]).not.toHaveProperty('toolUpdateMode')
+  })
+
+  it('stores minimal when the operator picks Minimal', async () => {
+    render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'minimal' } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^next$/i }))
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: /create line/i })).toBeDefined())
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /create line/i }))
+    })
+
+    await waitFor(() => expect(mockUpdateConfig).toHaveBeenCalledTimes(1))
+    expect(mockUpdateConfig.mock.calls[0]?.[1]).toMatchObject({ toolUpdateMode: 'minimal' })
+  })
+
+  it('resets a reopened form to the default tool update choice', async () => {
+    const { rerender } = render(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'full' } })
+    })
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('full')
+    rerender(<AddLineWizard open={false} onClose={vi.fn()} />)
+    mockCreateLine.mockClear()
+    wizardEventSources = []
+    rerender(<AddLineWizard open={true} onClose={vi.fn()} />)
+
+    await advanceToConfigStep()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+    })
+
+    expect((screen.getByLabelText('Tool update verbosity') as HTMLSelectElement).value).toBe('')
+  })
+})
+
 describe('AddLineWizard — step strip step labels', () => {
   it('renders step labels: Identity, Link, Model, Config, Review', () => {
     render(<AddLineWizard open={true} onClose={vi.fn()} />)

@@ -7,7 +7,8 @@
  *   - child-process spawn + JSON-line stdout parsing
  *   - SSE stream protocol writing
  *   - service-manager orchestration (stop-for-auth → spawn → start-after-auth)
- *   - module-level mutable state for concurrent-auth deduplication
+ *   - concurrent-auth deduplication through the server's AuthSessionRegistry
+ *     (`deps.authSessions`), so this module holds no mutable state of its own
  *
  * Re-exported from `ops.ts` as a migration shim so existing callers and tests
  * are unchanged; follow-up slices update imports to point here directly.
@@ -43,13 +44,12 @@ import { createSSEWriter } from '../sse-helpers.ts';
 import { projectError, serviceActionError } from '../response-error-projection.ts';
 import { NAME_MAX_LENGTH, NAME_RE, validateInstanceName } from './instance-name.ts';
 import type { OpsDeps } from './ops.ts';
+import type { AuthSessionRegistry } from './auth-session-registry.ts';
+
+/** Deps for the routes that read or write the server's auth session state. */
+export type OpsAuthDeps = OpsDeps & { authSessions: AuthSessionRegistry };
 
 const log = createChildLogger('fleet:ops-auth');
-
-// Active auth processes per instance — prevents duplicate concurrent auth sessions
-const activeAuthProcesses = new Map<string, ReturnType<typeof spawn>>();
-// In-flight auth operations — prevents concurrent auth requests from racing
-const authInFlight = new Set<string>();
 
 // Auth session wall-clock timeout (5 minutes — QR codes expire in ~60s, allows 5 scan attempts)
 const AUTH_TIMEOUT_MS = 5 * MS_PER_MINUTE;
@@ -90,9 +90,10 @@ function buildAuthHelperEnv(): NodeJS.ProcessEnv {
 export async function handleAuth(
   req: IncomingMessage,
   res: ServerResponse,
-  deps: OpsDeps,
+  deps: OpsAuthDeps,
   params: { name: string },
 ): Promise<void> {
+  const { activeAuthProcesses, authInFlight } = deps.authSessions;
   if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
@@ -361,9 +362,6 @@ export async function handleAuth(
 // record, threaded into the durable operation journal.
 // ---------------------------------------------------------------------------
 
-/** Last pairing helper event per instance, served via the status route. */
-const lastPairingEvents = new Map<string, { event: string; data: string | null; at: string }>();
-
 function readInstanceAccountScope(configPath: string): AccountScopeIdV1 | null | 'malformed' {
   // Absent or unparseable config reads as NO scope: legacy instances predate
   // the field and discovery already owns config-error reporting. Only a
@@ -439,7 +437,7 @@ export async function handlePairingPreflight(
 export async function handlePairingStatus(
   req: IncomingMessage,
   res: ServerResponse,
-  deps: OpsDeps,
+  deps: OpsAuthDeps,
   params: { name: string },
 ): Promise<void> {
   if (!validateInstanceName(params.name, res)) return;
@@ -464,7 +462,7 @@ export async function handlePairingStatus(
       : operation === 'journal_unreadable'
         ? { state: 'journal_unreadable' }
         : { state: operation.operation.state, generationId: operation.generationId, custody: operation.custody },
-    lastEvent: lastPairingEvents.get(params.name) ?? null,
+    lastEvent: deps.authSessions.lastPairingEvents.get(params.name) ?? null,
   });
 }
 
@@ -472,9 +470,10 @@ export async function handlePairingStatus(
 export async function handlePairingApply(
   req: IncomingMessage,
   res: ServerResponse,
-  deps: OpsDeps,
+  deps: OpsAuthDeps,
   params: { name: string },
 ): Promise<void> {
+  const { authInFlight } = deps.authSessions;
   if (!validateInstanceName(params.name, res)) return;
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
@@ -550,10 +549,11 @@ export async function handlePairingApply(
 // otherwise only reachable through a live pairing).
 export function buildSagaEffects(
   name: string,
-  deps: OpsDeps,
+  deps: OpsAuthDeps,
   paths: { stateRoot: string; authDir: string },
   scope: AccountScopeIdV1,
 ): PairingSagaEffects {
+  const { activeAuthProcesses, lastPairingEvents } = deps.authSessions;
   return {
     nowMs: () => systemClock.now(),
     stopService: async () => {

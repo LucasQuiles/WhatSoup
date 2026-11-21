@@ -9,7 +9,7 @@ import {
   handlePairingStatus,
 } from '../../../src/fleet/routes/ops-auth.ts';
 import { readPairingOperationRecord } from '../../../src/transport/pairing-saga.ts';
-import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
+import type { OpsAuthDeps } from '../../../src/fleet/routes/ops-auth.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 import { appendLatchTransition } from '../../../src/transport/terminal-latch.ts';
 import { parseAccountScopeId } from '../../../src/transport/auth-custody-contracts.ts';
@@ -26,7 +26,7 @@ function writeInstanceConfig(config: Record<string, unknown>): string {
   return configPath;
 }
 
-function depsFor(configPath: string): OpsDeps {
+function depsFor(configPath: string): OpsAuthDeps {
   return makeDeps({
     discovery: {
       getInstance: (name: string) =>
@@ -35,7 +35,7 @@ function depsFor(configPath: string): OpsDeps {
           : undefined,
       scan: () => undefined,
     } as never,
-  }) as unknown as OpsDeps;
+  }) as unknown as OpsAuthDeps;
 }
 
 function authedHeaders(extra: Record<string, string> = {}): Record<string, string> {

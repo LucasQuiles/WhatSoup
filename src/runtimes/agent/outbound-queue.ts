@@ -290,7 +290,7 @@ export interface IOutboundQueue {
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
-  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void;
+  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly' | 'unset'): void;
   /** Set an optional redirect JID for tool-status batches. */
   setToolUpdateRedirectJid(jid: string | null): void;
   /** Override the streaming-text aggregation window in milliseconds. */
@@ -439,8 +439,8 @@ export class OutboundQueue implements IOutboundQueue {
   private shutdownDeadlineReached = false;
   private sendFailureCount = 0;
 
-  /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
-  private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
+  /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language; 'unset' hides only tool progress. */
+  private toolUpdateMode: 'full' | 'minimal' | 'friendly' | 'unset' = 'full';
   /** Optional destination for tool-status batches; regular text still uses chatJid. */
   private toolUpdateRedirectJid: string | null = null;
   /** Debounce window for streaming text fragments. */
@@ -495,7 +495,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
-  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly'): void {
+  setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly' | 'unset'): void {
     this.toolUpdateMode = mode;
   }
 
@@ -1078,7 +1078,8 @@ export class OutboundQueue implements IOutboundQueue {
    * 3-second idle gap between tool calls, or after 30 seconds maximum —
    * whichever comes first. This prevents silent gaps during long tool chains.
    *
-   * In minimal mode, updates are suppressed to keep the user experience clean.
+   * Minimal mode suppresses updates. An unset mode batches them as full mode does, so the
+   * batch flush keeps its effects on assistant text, but sends them only to a configured redirect.
    * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
@@ -1249,12 +1250,15 @@ export class OutboundQueue implements IOutboundQueue {
     // already decided this placeholder WOULD emit; enforce the per-turn count
     // now so a single turn can't flood the chat with narration. Past the cap,
     // keep the liveness signal and drop the placeholder — content is never gated.
-    if (this.statusBudgetExhausted(attribution)) {
+    // No mode set: every step runs as in full mode; only the send and the cap notice are withheld (#3830).
+    const withholdStatus = this.toolUpdateMode === 'unset';
+    if (this.statusBudgetExhausted(attribution, !withholdStatus)) {
       return;
     }
     this.recentProgressTextAt.set(text, now);
     // Record the floor slot only on an ACTUAL emit (passed both floor and text window).
     this.lastProgressEmittedAt = now;
+    if (withholdStatus) { this.startTyping(); return; }
     this.enqueue(text, attribution);
   }
 
@@ -1764,7 +1768,7 @@ export class OutboundQueue implements IOutboundQueue {
    * never do, so content is never gated. Past the cap the liveness signal is
    * preserved (startTyping) so the user still sees "typing…" without the flood.
    */
-  private statusBudgetExhausted(attribution: OutboundAttribution): boolean {
+  private statusBudgetExhausted(attribution: OutboundAttribution, sendCapNotice = true): boolean {
     const now = Date.now();
     const windowState = statusMessageWindowState(this.senderToken, now);
     const cutoff = now - this.statusMessageWindowMs;
@@ -1795,7 +1799,7 @@ export class OutboundQueue implements IOutboundQueue {
         windowState.noticeSentAt = now;
         this.flushStreamBuffer();
         this.markVisibleTextDelivered();
-        this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
+        if (sendCapNotice) this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
     }
@@ -1807,7 +1811,7 @@ export class OutboundQueue implements IOutboundQueue {
         windowState.noticeSentAt ??= now;
         this.flushStreamBuffer();
         this.markVisibleTextDelivered();
-        this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
+        if (sendCapNotice) this.enqueuePreparedText(STATUS_CAP_NOTICE, attribution);
       }
       return true;
     }
@@ -1850,9 +1854,13 @@ export class OutboundQueue implements IOutboundQueue {
         }));
         continue;
       }
-      if (this.statusBudgetExhausted(batch.attribution)) continue;
+      // An unset mode keeps the batch's budget, text flush and visible-output effects (the
+      // full-mode path) and withholds only the tool status message, cap notice included (#3830).
+      const withholdStatus = this.toolUpdateMode === 'unset';
+      if (this.statusBudgetExhausted(batch.attribution, !withholdStatus)) continue;
       this.flushStreamBuffer();
       this.markVisibleTextDelivered();
+      if (withholdStatus) continue;
       this.enqueuePreparedText(renderToolUpdates(batch.updates, this.toolUpdateMode), batch.attribution);
     }
   }

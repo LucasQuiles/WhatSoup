@@ -256,7 +256,7 @@ const startupNotificationController = startupJournalPath === null
       send: {
         send: (chatJid, text, options) => sendTracked(connectionManager, chatJid, text, durability, options),
       },
-      genericNotificationsEnabled: config.startupNotifications && config.toolUpdateMode !== 'minimal',
+      genericNotificationsEnabled: config.startupNotifications && config.configuredToolUpdateMode !== 'minimal',
     });
 startupNotificationController?.recordStartupBoot();
 
@@ -699,7 +699,7 @@ const invalidateAgentHandoffArtifacts = instanceType === 'agent'
 // emit an info-severity completion alert with measured downtime, and queue the
 // "back online" continuity ping. This is delivered on connect via a DEDICATED,
 // un-gated path (see start()) — NOT pendingStartupMessage — because the existing
-// startup-notification path is suppressed under toolUpdateMode:'minimal'
+// startup-notification path is suppressed under an explicit toolUpdateMode:'minimal'
 // (the live agent's setting) and startupNotifications, whereas a user-requested
 // restart must always confirm. Guarded so a failure here never blocks startup.
 let selfRestartBackOnline: { chatJid: string; text: string } | null = null;
@@ -1444,7 +1444,7 @@ async function start(): Promise<void> {
       && !needsIntro
       && adminChatJid !== null
       && config.startupNotifications
-      && config.toolUpdateMode !== 'minimal'
+      && config.configuredToolUpdateMode !== 'minimal'
     )
       ? {
           recipient: adminChatJid,

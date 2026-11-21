@@ -153,7 +153,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const pineconeRerank = (data.pineconeRerank as boolean) ?? false
   const pineconeTopK = (data.pineconeTopK as number) ?? 20
   const pineconeAllowedIndexes = (data.pineconeAllowedIndexes as string[]) ?? []
-  const toolUpdateMode = (data.toolUpdateMode as string) ?? 'full'
+  const toolUpdateMode = (data.toolUpdateMode as string | undefined) ?? ''
 
   const handleFileUpload = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
@@ -824,14 +824,15 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           </Field>
 
           {/* Tool update verbosity */}
-          <Field label="Tool update verbosity" helper="Minimal suppresses technical agent lifecycle messages" confirmed>
+          <Field label="Tool update verbosity" helper="Default hides tool progress. Minimal also holds back text written before a tool call and turns off the admin back-online notice." confirmed>
             {(id) => (
               <SelectInput
                 id={id}
                 value={toolUpdateMode}
-                onChange={(e) => onChange({ toolUpdateMode: e.target.value })}
+                onChange={(e) => onChange({ toolUpdateMode: e.target.value === '' ? undefined : e.target.value })}
                 confirmed
               >
+                <option value="">Default (hide tool progress)</option>
                 <option value="full">Full</option>
                 <option value="minimal">Minimal</option>
               </SelectInput>
