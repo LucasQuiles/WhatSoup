@@ -187,7 +187,7 @@ describe('failed terminal reply obligations in recovery health', () => {
     expect(health()).toMatchObject({ open: true, reasons: ['historical_turn_catchup'],
       turn_recovery: { retained_terminal: 0, open_catchups: 1 } });
     const catchupSeq = terminal('verified-catchup', 'replied');
-    closeOperatorCatchupRecovery(db, { planId: 'failed-reply-plan', conversationKey,
+    closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true, planId: 'failed-reply-plan', conversationKey,
       expectedSourceSeqs: [seq], catchupSeq, actor: 'operator:test', evidenceRef: 'test://delivered-catchup' });
     expect(health()).toMatchObject({ open: false, turn_recovery: { retained_terminal: 0, open_catchups: 0 } });
     expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq))

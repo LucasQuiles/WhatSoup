@@ -40,13 +40,15 @@ function ledgerVersions(raw: DatabaseSync): number[] {
 
 /**
  * Tables that migrations after 65 add: 66 the closure ledger, 67 protected
- * delivery, 68 protected secret input staging.
+ * delivery, 68 protected secret input staging, 70 operator catch-up resolutions
+ * (69 adds only the failed-terminal reply-debt index).
  */
 const TABLES_AFTER_65 = [
   'continuity_gap_closures',
   'protected_deliveries',
   'protected_delivery_events',
   'protected_secret_inputs',
+  'operator_catchup_resolutions',
 ];
 
 function presentTables(raw: DatabaseSync, names: readonly string[]): string[] {
@@ -59,7 +61,7 @@ const versionsThrough = (last: number): number[] => Array.from({ length: last },
 
 describe('migration 66 through the registry', () => {
   it('a fresh database opens at the current schema with the closure table and its guards', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(70);
     const db = new Database(':memory:');
     db.open();
     try {
@@ -89,7 +91,15 @@ describe('migration 66 through the registry', () => {
     // every version above 65 and the objects those migrations add (66: the
     // closure ledger; 67: the protected-delivery tables and their indexes; 68:
     // the protected-secret input table and its indexes; 69: the failed-terminal
-    // reply-debt index).
+    // reply-debt index; 70: catch-up resolutions, fulfillment proof column and
+    // guards on pre-existing tables).
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_outbound_immutable');
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_source_immutable');
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_no_legacy_close');
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_fulfillment_required');
+    first.raw.exec('DROP TRIGGER operator_catchup_resolution_no_corroboration');
+    first.raw.exec('DROP TABLE operator_catchup_resolutions');
+    first.raw.exec('ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed');
     first.raw.exec('DROP TABLE continuity_gap_closures');
     first.raw.exec('DROP TABLE protected_delivery_events');
     first.raw.exec('DROP TABLE protected_deliveries');
@@ -99,6 +109,12 @@ describe('migration 66 through the registry', () => {
     // The fixture must really be a schema-65 file before the upgrade.
     expect(ledgerVersions(first.raw)).toEqual(versionsThrough(65));
     expect(presentTables(first.raw, TABLES_AFTER_65)).toEqual([]);
+    expect(first.raw.prepare(
+      "SELECT name FROM pragma_table_info('inbound_disposition_links') WHERE name = 'original_fulfillment_confirmed'",
+    ).all()).toEqual([]);
+    expect(first.raw.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'operator_catchup_resolution_%'",
+    ).all()).toEqual([]);
     first.close();
 
     const upgraded = new Database(dbPath);

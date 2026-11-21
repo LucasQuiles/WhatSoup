@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { assertCanonicalSchema43 } from '../../src/core/database-migration-43.ts';
+import { assertRecoveryCatchupSchema } from '../../src/core/recovery-catchup-schema.ts';
 import { isNonEmptyString } from '../../src/lib/type-guards.ts';
 
 const MAX_RECEIPTS = 200;
@@ -326,7 +326,7 @@ export function auditContinuityManifest(
   raw: DatabaseSync,
   manifest: ContinuityManifest,
 ): ContinuityManifestAudit {
-  assertCanonicalSchema43(raw);
+  assertRecoveryCatchupSchema(raw);
   const receipts = manifest.receipts.map((receipt) => classifyReceipt(raw, manifest, receipt));
   const answered = receipts.filter((row) => row.classification === 'present_answered').length;
   const unanswered = receipts.filter((row) => row.classification === 'present_unanswered').length;

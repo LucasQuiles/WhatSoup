@@ -24,6 +24,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
+import { processHistoryBatch } from '../../src/core/history-sync.ts';
 import { waitForHistorySyncThenRecover } from '../../src/core/post-connect-recovery.ts';
 
 // ---------------------------------------------------------------------------
@@ -37,12 +38,13 @@ function makeEngine(): { db: Database; engine: DurabilityEngine } {
   return { db, engine };
 }
 
-/** Insert a row into the messages table simulating an echo arriving via ingest. */
+/** Store an echo through the production history writer. */
 function ingestEcho(db: Database, messageId: string, chatJid = 'g1@g.us'): void {
-  db.raw.prepare(
-    `INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
-     VALUES (?, ?, ?, ?, 'text', 1, ?)`,
-  ).run(chatJid, chatJid, 'bot@s.whatsapp.net', messageId, Date.now());
+  expect(processHistoryBatch(db, [{
+    key: { id: messageId, remoteJid: chatJid, fromMe: true },
+    messageTimestamp: Math.floor(Date.now() / 1000),
+    message: { conversation: 'reply' },
+  }])).toMatchObject({ inserted: 1, failed: 0 });
 }
 
 function getOutbound(db: Database, id: number): Record<string, unknown> {

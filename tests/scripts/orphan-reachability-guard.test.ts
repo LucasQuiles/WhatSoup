@@ -27,6 +27,8 @@
  *      (e.g. deploy/lib/read-private-health-token.mjs → fleet/health-token-file).
  *   4. DYNAMIC_ROOTS — computed-import targets that cannot be resolved
  *      statically (see below). Empty today.
+ *   5. Registered operational package scripts outside src/; test and guard
+ *      scripts remain excluded.
  *
  * ASSUMPTION (the guard's contract): imports are statically analyzable —
  * `ts.preProcessFile` sees static `import`, re-exports, and string-LITERAL
@@ -280,7 +282,7 @@ function collectFiles(dir: string, exts: string[]): string[] {
   return out;
 }
 
-/** Every declared production root (see file header, categories 1–4). */
+/** Every declared production root (see file header, categories 1–5). */
 function loadRoots(): string[] {
   const roots = new Set<string>();
 
@@ -311,6 +313,12 @@ function loadRoots(): string[] {
 
   // 4. registered dynamic-loading surfaces
   for (const p of DYNAMIC_ROOTS) roots.add(abs(p));
+
+  // 5. The authenticated operator closure CLI is a production consumer.
+  const closureCommand = pkg.scripts?.['close-recovery-catchup'] ?? '';
+  if (/\bscripts\/close-recovery-catchup\.ts\b/.test(closureCommand)) {
+    roots.add(abs('scripts/close-recovery-catchup.ts'));
+  }
 
   return [...roots].filter((r) => existsSync(r));
 }
@@ -382,6 +390,9 @@ describe('Production-reachability dead-code guard (invariant C, #1871)', () => {
     // Sanity: the two process entrypoints must be present, else the graph is bogus.
     expect(roots).toContain('src/main.ts');
     expect(roots).toContain('src/fleet/standalone.ts');
+    expect(roots).toContain('scripts/close-recovery-catchup.ts');
+    expect(reachableSet().has(abs('src/core/operator-catchup-resolution.ts'))).toBe(true);
+    expect(roots.some((root) => root.startsWith('tests/'))).toBe(false);
   }, 60_000);
 
   it('every src/ non-test module is reachable from a declared production root, or explicitly tracked', () => {

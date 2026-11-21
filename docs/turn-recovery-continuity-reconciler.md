@@ -1,54 +1,35 @@
-# Turn-recovery continuity: automatic catch-up reconciler
+# Turn-recovery continuity: catch-up reconciler
 
-## Why
+Current contract: later traffic proves delivery only. The selector below still identifies delivery
+candidates, but closure requires explicit per-request `confirmedFulfillments` evidence matching
+the plan, conversation, exact source set and selected catch-up sequence. Periodic calls supply
+none and leave these groups pending. Historical claims below that conversation resumption alone
+proves no lost request are superseded; they do not establish original fulfillment. For bound
+operator sends and the explicit closure command, see [the runbook](runbook.md#close-a-proven-operator-catch-up-recovery-admitted-inbound-sequences).
 
-The turn-recovery subsystem does the **pend** half of *pend-and-release* correctly:
-when the agent crashes mid-turn it detects the orphaned inbound, refuses an unsafe
-replay, and records an open `recovery_pending_operator_catchup` disposition link.
-It never did the **release** half automatically.
+## Selection and fulfillment
 
-Ground-truth from the live `q` instance (2026-09-03, read-only):
+`selectOperatorCatchupCandidates` identifies later delivered replies in the same conversation
+and chat. This is a delivery candidate, not evidence that an earlier request was fulfilled.
+`reconcileOperatorCatchupRecoveries` closes a candidate only when its caller also supplies
+`confirmedFulfillments`: an exact plan, conversation, source sequence set, target sequence and
+reference to independent original-fulfillment evidence. A routine periodic pass supplies none;
+it reports `closure_rejected` and leaves the original request pending without acquiring a writer
+reservation or running schema integrity checks. The bulk closure CLI
+also leaves these groups pending; use the per-request operator command with reviewed evidence.
 
-- **27 open catch-up links** and **24 `blocked_unsafe` job tombstones** had
-  accumulated over ~6 weeks. Every one of the 8
-  `crash_reclaim_no_terminal_outbound` inbounds was checked against the message
-  log: **all 8 saw the conversation resume** — the 8/16 crash-storm cluster got
-  delivered replies within ~60–90s; the three older ones are followed by
-  hundreds of later in-thread replies. **No third-party user was silently
-  dropped; no live reply was lost.** The backlog is *stale ledger residue*, not
-  live message loss.
+A new authenticated operator send can instead bind directly to the original request and plan.
+Its schema-70 resolution requires the exact echoed operation plus explicit fulfillment confirmation.
+It preserves the failed inbound and all original recovery attempts. Resolved operator operations
+are excluded from pending counts and retained as proof. See the runbook linked above.
 
-The root cause of the residue: an open catch-up link could be closed **only** by
-a human running `scripts/close-recovery-catchup.ts` with the exact
-`--plan-id / --conversation-key / --source-seqs / --catchup-seq` tuple. There is
-no automatic closer, so links pile up indefinitely even after the conversation
-has demonstrably caught up.
-
-## What this adds (PR1 — primitive only)
-
-`reconcileOperatorCatchupRecoveries(raw, …)` in
-`src/core/recovery-catchup-closure.ts` — a **pure selector** on top of the
-existing, hardened closure primitive. It does **not** invent any new proof or
-closure semantics.
-
-For each open pending `(recovery_plan_id, conversation_key)` group it:
-
-1. Reads the exact set of still-open source seqs (`superseded_by_seq IS NULL`,
-   not already closed).
-2. Finds the **earliest later inbound on the sources' own `chat_jid`** that
-   carries a *unique* delivery proof — `MIN(target_seq)` from the fail-closed
-   `operator_catchup_delivery_proofs` view (`HAVING COUNT(*) = 1`) with
-   `target_seq > max(source seqs)`. The chat filter mirrors the closure trigger,
-   which requires `target.chat_jid = source.chat_jid` for every source: a proof
-   from another chat under the same `conversation_key` can never close the
-   group, so picking one would wedge the group on every pass.
-3. Calls `closeOperatorCatchupRecoveryRaw` **verbatim** with
-   `actor = 'auto_reconciler'` and an `auto://catchup-delivery-proof:seq=<n>`
-   evidence reference.
+The selector retains its stable enumeration and bounded attempt/examination budgets. It finds the
+earliest later inbound with unique delivery proof on the source chat; none of these predicates
+establishes semantic fulfillment. A caller's explicit evidence must match that exact tuple.
 
 ### Why this is safe
 
-The closure is defended three ways, all of which still apply unchanged:
+Closure requires explicit original-fulfillment confirmation in addition to these delivery checks:
 
 - The app-layer `inspectOperatorCatchupRecovery` re-validates the exact pending
   set, `catchupSeq > every source`, target completeness, and a unique delivery
@@ -62,21 +43,21 @@ The closure is defended three ways, all of which still apply unchanged:
 
 Because of this, the reconciler is intentionally *best-effort*: it picks a
 candidate, attempts the closure, and on any rejection records a bounded skip
-reason and moves on. Groups that are not yet provably superseded (no delivered
-catch-up reply) simply stay pending — which is correct.
+reason and moves on. Groups without both delivery proof and original-fulfillment confirmation stay pending.
 
 Groups whose source inbounds span multiple `chat_jid`s cannot be covered by a
 single catch-up (the trigger requires `target.chat_jid = source.chat_jid` for
 every source). Selection uses the earliest source's chat, so such a group is
-still attempted whenever that chat has a candidate and then fails closed as
+attempted only when that chat has a candidate and matching fulfillment confirmation, then fails closed as
 `closure_rejected`; with no candidate there it is reported as
 `no_catchup_candidate`. Either way it remains pending.
 
 ### Bounding a pass
 
-`groupLimit` (default `RECONCILE_DEFAULT_GROUP_LIMIT = 50`) caps closure
-*attempts*, not groups looked at: a group with no candidate is skipped without
-charging it. A second budget keeps the pass bounded — at most
+`groupLimit` (default `RECONCILE_DEFAULT_GROUP_LIMIT = 50`) caps selected delivery
+candidates, not groups looked at: a group with no candidate is skipped without
+charging it. Only candidates with matching fulfillment confirmation count as
+`attempted` in the reconciliation report. A second budget keeps the pass bounded — at most
 `groupLimit × RECONCILE_EXAMINATION_MULTIPLIER` (20) groups are examined per
 pass. Groups are enumerated in a stable `recovery_plan_id` order, so the budgets
 raise the starvation threshold rather than removing it. Two classes of
@@ -85,12 +66,12 @@ unattemptable group sort ahead of a closable one, with different thresholds:
 | Prefix class | Groups that hide the next one | Budget charged |
 | --- | --- | --- |
 | No catch-up candidate | `groupLimit × 20` (1000 by default) | examination |
-| Candidate the closure always rejects | `groupLimit` (50 by default) | attempt |
+| Candidate without confirmation or with rejected proof | `groupLimit` (50 by default) | candidate |
 
 The examination cap is tested before the counter is charged, so a prefix of
 *exactly* `groupLimit × 20` candidate-less groups already hides the next group.
-A group whose candidate is permanently rejected charges the attempt budget
-before the closure is tried, so it starves a closable group twenty times sooner
+A group with a delivery candidate charges the candidate budget
+before fulfillment confirmation or closure is checked, so it starves a closable group twenty times sooner
 than the candidate-less class. Neither case is reported: the report carries no
 truncation signal for a pass that stopped on either budget. Both are properties
 of the selection order, unchanged by this PR. The budgets bound the per-group
@@ -147,15 +128,10 @@ before job enumeration (so the cycle's totals include its outcome):
   skipped }`; the periodic timer discards the scan result, so this log line
   and the database rows are the live observation surfaces.
 - **Tests:** `tests/runtimes/agent/turn-recovery-catchup-reconcile-wiring.test.ts`
-  drives a REAL `Database` + `DurabilityEngine` + `TurnRecoverySupervisor`
-  end-to-end (only the socket is absent): gate-on closes a caught-up group
-  with `auto_reconciler` actors and is idempotent; gate-off (default) leaves
-  everything pending; `groupLimit` bounds a cycle and the next cycle drains
-  the remainder; a throwing reconciler resolves the scan, keeps everything
-  pending, and lands `catchup_reconcile_failed` in health. The same file
-  proves the config gate on the supervisor `AgentRuntime` actually builds:
-  enabled closes the group, absent or `enabled: false` leaves it pending, and
-  `groupLimit` is forwarded.
+  uses a real database, durability engine and supervisor. Enabling the scan
+  leaves original requests pending because the supervisor supplies no fulfillment
+  evidence. Core reconciler tests provide explicit tuple-specific confirmation
+  to exercise successful closure, idempotency and bounded failures.
 
 ### Enabling per instance
 
@@ -171,8 +147,8 @@ The reconciler is off unless the instance's `config.json` opts in:
 
 - `enabled` (boolean, required inside the block): `true` turns the
   reconciler on; `false`, or no block at all, keeps it off.
-- `groupLimit` (integer 1–1000, optional): the most caught-up groups closed
-  per scan cycle. Defaults to the reconciler's own
+- `groupLimit` (integer 1–1000, optional): the maximum selected delivery candidates
+  per scan cycle, including candidates without fulfillment confirmation. Defaults to the reconciler's own
   `RECONCILE_DEFAULT_GROUP_LIMIT` (50). The reconciler examines at most
   `groupLimit × 20` groups per pass.
 - The block is a closed shape validated at config load
@@ -184,22 +160,17 @@ The reconciler is off unless the instance's `config.json` opts in:
   rollback is `enabled: false` (or remove the block) and restart.
 - The code must also be live on the host: see the Deploy note below.
 
-**Observing it.** After a restart with the gate on:
+**Observing it.** Enabling the periodic scan supplies no original-request
+fulfillment confirmation. Expect zero closed groups; ordinary later replies
+remain delivery candidates only. A zero-error scan is not recovery evidence.
+A whole-call failure sets `lastScanFailureReason` to `catchup_reconcile_failed`;
+the turn-recovery deadman carries it as `last_failure=`. Unexpected-error skips
+are logged separately. To close a recovery, use the single-group operator
+workflow with exact original-request evidence and delivery proof.
 
-1. Logs: an info line `turn recovery catch-up reconciler closed caught-up
-   groups` for each pass that closed something. Warnings `turn recovery
-   supervisor catch-up reconciliation failed`, or errors `... recorded
-   unexpected-error skips`, mean something is wrong.
-2. Supervisor health: a whole-call failure sets the supervisor's
-   `lastScanFailureReason` to `catchup_reconcile_failed`. The turn-recovery
-   deadman carries that value in its alert text as `last_failure=`.
-3. Database: the reconciler's closures are
-   `inbound_disposition_links` rows with
-   `disposition = 'superseded_by_operator_catchup' AND actor = 'auto_reconciler'`.
-   The still-open backlog is every `recovery_pending_operator_catchup` link
-   without a matching `superseded_by_operator_catchup` row for the same
-   `(inbound_seq, recovery_plan_id)`. The wiring test's `pendingSeqs()` is
-   that selector.
+Open recovery counts exclude both matching legacy closure rows and direct
+`operator_catchup_resolutions` for the same source and plan. Original terminal,
+quarantine and recovery-attempt records remain unchanged.
 
 The per-scan counters `catchupReconcileAttempted / Closed / Skipped` are part
 of `TurnRecoverySupervisor.scanOnce()`'s result. They are visible to a direct
@@ -269,10 +240,11 @@ counts and the recovery-evidence ledger) reports them apart:
 count user-facing links only, and `turnRecoveryOpenRecoveriesSynthetic`
 counts the synthetic residue. Synthetic residue no longer raises
 `historical_turn_catchup`. Pre-fix residue inside the 7-day window appears in
-both synthetic counts, so the two must not be summed. The automatic
-reconciler can still close a synthetic group when its chat has a later
-delivered reply (the issue proposed excluding them; keeping them closable
-costs nothing and lets real proof retire residue).
+both synthetic counts, so the two must not be summed. Synthetic groups follow
+the same fulfillment contract as user-facing groups. A later delivered reply
+is only a candidate; closure requires matching, explicit original-fulfillment
+confirmation. Periodic scans supply no confirmation and leave synthetic groups
+pending without taking a writer reservation.
 
 ## Follow-ups (separate PRs)
 

@@ -1309,6 +1309,7 @@ describe('database.ts uncovered-branch coverage', () => {
     insertVersion.run(42);
     insertVersion.run(43);
     insertVersion.run(47);
+    insertVersion.run(70);
     raw.close();
 
     const db = new Database(path);
@@ -1395,11 +1396,12 @@ describe('database.ts uncovered-branch coverage', () => {
     }
     // This fixture isolates migration 26 against a partial legacy surface. It
     // intentionally bypasses fail-closed durability migrations 41 through 43
-    // and 47, covered by their dedicated upgrade and provenance suites.
+    // 47 and 70, covered by their dedicated upgrade and provenance suites.
     insertVersion.run(41);
     insertVersion.run(42);
     insertVersion.run(43);
     insertVersion.run(47);
+    insertVersion.run(70);
     raw.close();
 
     const db = new Database(path);

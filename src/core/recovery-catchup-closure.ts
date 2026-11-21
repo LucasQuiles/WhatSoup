@@ -1,8 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
-import { assertCanonicalSchema43 } from './database-migration-43.ts';
+import { assertRecoveryCatchupSchema } from './recovery-catchup-schema.ts';
 import { withTransaction } from './db-tx.ts';
 import { allFromStatement } from '../lib/db-query.ts';
+import { withoutOperatorCatchupResolutionSql } from './open-recoveries-sql.ts';
 
 export interface CloseOperatorCatchupRecoveryParams {
   planId: string;
@@ -11,6 +12,8 @@ export interface CloseOperatorCatchupRecoveryParams {
   catchupSeq: number;
   actor: string;
   evidenceRef: string;
+  /** The evidence reference must establish fulfillment of the original requests. */
+  originalFulfillmentConfirmed?: boolean;
 }
 
 export interface CloseOperatorCatchupRecoveryReceipt {
@@ -109,11 +112,14 @@ export function inspectOperatorCatchupRecovery(
   raw: DatabaseSync,
   params: CloseOperatorCatchupRecoveryParams,
 ): OperatorCatchupRecoveryInspection {
-  assertCanonicalSchema43(raw);
+  assertRecoveryCatchupSchema(raw);
   const planId = requiredText(params.planId, 'Recovery plan ID');
   const conversationKey = requiredText(params.conversationKey, 'Conversation key');
   const actor = requiredText(params.actor, 'Recovery actor');
   const evidenceRef = requiredText(params.evidenceRef, 'Recovery evidence reference', 8192);
+  if (params.originalFulfillmentConfirmed !== true) {
+    throw new Error('Original request fulfillment must be confirmed');
+  }
   const catchupSeq = positiveSeq(params.catchupSeq, 'Catch-up sequence');
   const expectedSourceSeqs = normalizedSourceSeqs(params.expectedSourceSeqs);
 
@@ -131,6 +137,7 @@ export function inspectOperatorCatchupRecovery(
     WHERE links.recovery_plan_id = ?
       AND links.disposition = 'recovery_pending_operator_catchup'
       AND source.conversation_key = ?
+      AND ${withoutOperatorCatchupResolutionSql(raw, 'links')}
     ORDER BY links.inbound_seq
   `), planId, conversationKey);
   const pendingSeqs = pending.map((row) => row.inbound_seq);
@@ -251,12 +258,13 @@ function closeInspectedOperatorCatchupRecovery(
     return { ...receipt, inserted: 0 };
   }
 
+  const storesFulfillment = raw.prepare('SELECT 1 FROM schema_migrations WHERE version = 70').get() !== undefined;
   const insert = raw.prepare(`
     INSERT INTO inbound_disposition_links (
       inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-      reason, evidence_ref, actor
+      reason, evidence_ref, actor${storesFulfillment ? ', original_fulfillment_confirmed' : ''}
     ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-              ?, ?, ?)
+              ?, ?, ?${storesFulfillment ? ', 1' : ''})
   `);
   let inserted = 0;
   for (const seq of inspection.sourceSeqs) {
@@ -276,6 +284,7 @@ function closeInspectedOperatorCatchupRecovery(
     WHERE pending_link.recovery_plan_id = ?
       AND pending_link.disposition = 'recovery_pending_operator_catchup'
       AND source.conversation_key = ?
+      AND ${withoutOperatorCatchupResolutionSql(raw, 'pending_link')}
       AND NOT EXISTS (
         SELECT 1
         FROM inbound_disposition_links closure
@@ -382,6 +391,14 @@ export const RECONCILE_DEFAULT_ACTOR = 'auto_reconciler';
 export const RECONCILE_EXAMINATION_MULTIPLIER = 20;
 
 export interface ReconcileOperatorCatchupParams {
+  /** Explicit, per-request operator evidence; ordinary later traffic supplies none. */
+  confirmedFulfillments?: ReadonlyArray<{
+    planId: string;
+    conversationKey: string;
+    sourceSeqs: number[];
+    catchupSeq: number;
+    evidenceRef: string;
+  }>;
   /** Ledger actor recorded on auto-closed links. Defaults to 'auto_reconciler'. */
   actor?: string;
   /**
@@ -429,6 +446,7 @@ interface PendingGroupRow {
 // unexpected bug) is reported as 'error' so the caller can alert rather than
 // silently treat it as a normal not-yet-superseded group.
 const BENIGN_CLOSURE_REJECTIONS: ReadonlySet<string> = new Set([
+  'Original request fulfillment must be confirmed',
   'Recovery plan does not exist',
   'Expected source sequences must exactly match the pending recovery set',
   'Catch-up sequence must be later than every source sequence',
@@ -508,6 +526,7 @@ export function selectOperatorCatchupCandidates(
           AND closed.recovery_plan_id = links.recovery_plan_id
           AND closed.disposition = 'superseded_by_operator_catchup'
       )
+      AND ${withoutOperatorCatchupResolutionSql(raw, 'links')}
     ORDER BY links.recovery_plan_id, source.conversation_key, links.inbound_seq
   `));
 
@@ -543,7 +562,7 @@ export function selectOperatorCatchupCandidates(
   // Without the chat filter such a proof, whenever it sorts earliest, is
   // re-picked on every pass and the group never closes even though its own
   // catch-up is provable. A group whose sources span several chats cannot close
-  // under any target; it is still attempted and the trigger rejects it closed.
+  // under any target; even with fulfillment confirmation the trigger rejects it.
   const candidate = raw.prepare(`
     SELECT MIN(target_seq) AS catchup_seq
     FROM operator_catchup_delivery_proofs
@@ -553,7 +572,7 @@ export function selectOperatorCatchupCandidates(
   const selected: OperatorCatchupCandidateGroup[] = [];
   let withCandidate = 0;
 
-  // Two budgets. groupLimit caps closure attempts. examinationLimit caps how
+  // Two budgets. groupLimit caps selected delivery candidates. examinationLimit caps how
   // many groups the pass may look at, because a group with no candidate no
   // longer charges groupLimit: without a second cap a large backlog of
   // candidate-less groups would be probed in full. Enumeration order is a
@@ -587,13 +606,11 @@ export function selectOperatorCatchupCandidates(
 }
 
 /**
- * Automatically close every open catch-up recovery whose conversation has
- * demonstrably caught up (a later completed inbound with a unique, echoed
- * delivery proof). Uses a raw, already-open SQLite handle with foreign-key
- * enforcement; each group's closure runs in its own single-writer transaction
- * inside closeOperatorCatchupRecoveryRaw. Never throws for a per-group closure
- * rejection — those are recorded as bounded skips — so one unprovable group
- * cannot stall the rest of the sweep.
+ * Close selected catch-up recoveries only with matching original-fulfillment
+ * confirmation and delivered-reply proof. Unconfirmed groups are skipped before
+ * writer acquisition or schema integrity checks. Each confirmed group's closure
+ * uses closeOperatorCatchupRecoveryRaw's single-writer transaction; per-group
+ * rejection is a bounded skip so an unprovable group cannot stall the sweep.
  */
 export function reconcileOperatorCatchupRecoveries(
   raw: DatabaseSync,
@@ -621,6 +638,19 @@ export function reconcileOperatorCatchupRecoveries(
       });
       continue;
     }
+    const fulfillment = params.confirmedFulfillments?.find((proof) =>
+      proof.planId === group.planId && proof.conversationKey === group.conversationKey
+      && proof.catchupSeq === catchupSeq && sameNumbers(proof.sourceSeqs, group.sourceSeqs));
+    if (!fulfillment?.evidenceRef.trim()) {
+      report.skipped += 1;
+      report.skips.push({
+        planId: group.planId,
+        conversationKey: group.conversationKey,
+        nSourceSeqs: group.sourceSeqs.length,
+        reason: 'closure_rejected',
+      });
+      continue;
+    }
     report.attempted += 1;
     try {
       const receipt = closeOperatorCatchupRecoveryRaw(raw, {
@@ -629,7 +659,8 @@ export function reconcileOperatorCatchupRecoveries(
         expectedSourceSeqs: group.sourceSeqs,
         catchupSeq,
         actor,
-        evidenceRef: `auto://catchup-delivery-proof:seq=${catchupSeq}`,
+        evidenceRef: fulfillment.evidenceRef,
+        originalFulfillmentConfirmed: true,
       });
       report.closed += 1;
       report.linksClosed += receipt.inserted;

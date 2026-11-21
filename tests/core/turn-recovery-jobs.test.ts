@@ -1848,7 +1848,7 @@ describe('atomic linked turn recovery jobs', () => {
       conversationKey,
     )).toBe(false);
 
-    expect(closeOperatorCatchupRecovery(db, {
+    expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: 'recovery-plan-open-counter',
       conversationKey,
       expectedSourceSeqs: [sourceSeq],
@@ -1899,7 +1899,7 @@ describe('atomic linked turn recovery jobs', () => {
 
     expect.soft(durability.getTurnRecoverySupervisorCounts().openRecoveries).toBe(3);
     expect.soft(durability.getHealthStats().openRecoveries).toBe(3);
-    expect(closeOperatorCatchupRecovery(db, {
+    expect(closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
       planId: 'recovery-plan-correlation-a',
       conversationKey: conversationA,
       expectedSourceSeqs: [sourceA],

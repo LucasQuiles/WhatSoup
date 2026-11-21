@@ -12,7 +12,7 @@ describe('migration 41 recovery evidence', () => {
   afterEach(() => db.close());
 
   it('installs the additive plan, disposition, corroboration, and run linkage schema', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(70);
     for (const table of [
       'recovery_plans',
       'inbound_disposition_links',
@@ -295,9 +295,9 @@ describe('migration 41 recovery evidence', () => {
     expect(() => db.raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, actor
+        reason, actor, original_fulfillment_confirmed
       ) VALUES (?, 'plan-41', 'superseded_by_operator_catchup', NULL,
-                'invalid', 'test')
+                'invalid', 'test', 1)
     `).run(sourceSeq)).toThrow(/CHECK/);
     expect(() => db.raw.prepare(`
       UPDATE inbound_events SET message_id = 'rewritten' WHERE seq = ?
@@ -435,9 +435,9 @@ describe('migration 41 recovery evidence', () => {
     db.raw.prepare(`
       INSERT INTO inbound_disposition_links (
         inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
-        reason, evidence_ref, actor
+        reason, evidence_ref, actor, original_fulfillment_confirmed
       ) VALUES (?, ?, 'superseded_by_operator_catchup', ?,
-                'operator catch-up complete', 'test://migration-41-closure', 'test')
+                'operator catch-up complete', 'test://migration-41-closure', 'test', 1)
     `).run(fixture.sourceSeq, fixture.planId, fixture.targetSeq);
   }
 });

@@ -2153,6 +2153,7 @@ describe('Token budget trimming', () => {
 
 function makeDurability() {
   return {
+    conversationKeyForJid: vi.fn((jid: string) => jid),
     createOutboundOp: vi.fn().mockReturnValue(42),
     markSending: vi.fn(),
     markSubmitted: vi.fn(),

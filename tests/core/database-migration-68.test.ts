@@ -13,7 +13,7 @@ describe('migration 68 — secret input metadata journal', () => {
     db = new Database(':memory:');
     db.open();
 
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(70);
     expect(db.raw.prepare('SELECT 1 AS ok FROM schema_migrations WHERE version = 68').get())
       .toEqual({ ok: 1 });
     const columns = (db.raw.prepare("PRAGMA table_info('protected_secret_inputs')").all() as Array<{ name: string }>)
