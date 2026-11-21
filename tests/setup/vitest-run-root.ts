@@ -127,7 +127,8 @@ function sameNode(left: { dev: bigint; ino: bigint }, right: { dev: bigint; ino:
 // 'own': this run's directory with its marker. 'unmarked': this run's directory
 // with no marker entry. 'other': anything else that is present, such as another
 // directory at the path or a marker that is not this run's readable token.
-// Every path returns a state; an unexpected error is 'other'.
+// Every path returns a state; an unexpected error gives 'gone' only when the
+// root itself is gone, else 'other'.
 type RootState = 'own' | 'unmarked' | 'gone' | 'other';
 
 function isGone(root: string): boolean {
