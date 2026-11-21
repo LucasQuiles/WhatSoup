@@ -41,6 +41,9 @@
 - A stored message whose journal call threw is counted as
   `ingest.stored_not_admitted`. The throw proves that dispatch did not go on, not
   that the journal insert failed, so a journal row may still exist for recovery.
+  Only the dispatch path's journal failure is counted (`src/core/ingest.ts:499-511`);
+  journal calls on the paused, passive, admin and access-denied paths can also
+  throw after storage and are not counted.
 - A persistence failure can occur after the message row was written. Its
   observation therefore leaves retention unknown and does not journal or
   replay the message. Recording does not change admission or recovery.

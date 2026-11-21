@@ -61,7 +61,11 @@ export interface InboundObservationHealth {
    * A thrown emission is not here; it is a recorder failure.
    */
   alerts: Record<AlertOutcome, number>;
-  /** Alert or log steps that threw; the observation count still moved. */
+  /**
+   * Alert or log steps that threw (the observation count still moved), and
+   * count steps that threw in observeInboundSafely (no attempt is recorded
+   * for the reason then).
+   */
   recorder_failures: number;
 }
 
