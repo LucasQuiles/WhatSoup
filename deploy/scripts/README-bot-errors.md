@@ -186,7 +186,8 @@ resolve an occurrence:
   fresh `recovery_confirmed` fact from a recovery-witness producer that is
   independent of the opener, the approver and the executor. A fact from the
   opener, or for an occurrence without recorded opener, is stored state-inert
-  with reason `opener_confirmed_recovery`.
+  with reason `opener_confirmed_recovery` when no earlier refusal applies; an
+  opener who is also the executor gets `self_confirmed_recovery` first.
 - A `condition_recovered` signal from a different producer in the same
   producer domain still resolves it, provided the signal is newer, by
   occurrence sequence and observation time, than the last observation. This
@@ -290,14 +291,19 @@ with reason `authority_client_error`. The daily health report adds, per
 producer, a plain line `incident_authority_record: producer=… last_24h
 total=… granted=… refused=… not_ready=… protocol_error=… not_configured=…
 not_asked=… would_hold_or_refuse_in_enforce=… mode=… skipped=…
-oldest_counted=…`. The count enforce would have stopped is refused +
+record_starts=…`. The count enforce would have stopped is refused +
 not_ready + protocol_error + not_configured; `skipped` counts the rows the
 report could not read (not JSON, or an outcome or reason that is not a known
-string), not rows the size bound dropped. `oldest_counted` is the time of the
-oldest row the line counted, as `YYYY-MM-DDTHH:MM:SSZ` in UTC, or `none` when
-it counted no row. Because the dispatcher record is bounded to 1 MiB, a busy
-host may hold fewer than 24 hours of rows: `last_24h` is the window the report
-asks for, and `oldest_counted` shows where the counted rows really start.
+string), not rows the size bound dropped. The line counts a row whose time is
+in the last 24 hours or up to 300 seconds after the report time. `record_starts`
+is the time of the oldest readable row in the record, whatever its age, as
+`YYYY-MM-DDTHH:MM:SSZ` in UTC, or `none` when the record holds no readable
+row. Because the dispatcher record is bounded to 1 MiB and drops its oldest
+lines first, `last_24h` is only the window the report asks for: the line holds
+the whole window only when `record_starts` is at least 24 hours before the
+report time. A later `record_starts` means the window is incomplete, either
+because the record is young or because the bound dropped older rows; the line
+cannot tell which.
 
 **Enrolling a host and switching it to enforce.**
 
@@ -309,12 +315,12 @@ asks for, and `oldest_counted` shows where the counted rows really start.
 2. Restart the BOT ERRORS services and let the host run in observe mode.
 3. Read the health report's `incident_authority_record` lines: switch only
    after a period in which `would_hold_or_refuse_in_enforce` is 0 and
-   `granted` covers the host's traffic. A line with
-   `would_hold_or_refuse_in_enforce=0` counts only when its `oldest_counted`
-   is at the start of the 24-hour window (close to the report time less 24
-   hours), or when the host is known to have started its record after that
-   start, so that no older row exists. A later `oldest_counted` on a busy host
-   means the size bound dropped older rows, so that line covers fewer hours.
+   `granted` covers the host's traffic. Rely on a zero in
+   `would_hold_or_refuse_in_enforce` only when that line's `record_starts` is
+   at least 24 hours before the report time: only then no row of the window
+   can have been dropped or be missing. A later `record_starts` means the
+   window is incomplete (a young record or a bounded one; the line cannot tell
+   which): wait, or lower the traffic, until a line holds a full window.
 4. Close every item in "Before any host is switched to enforce" below.
 5. The owner sets `BOT_ERRORS_INCIDENT_AUTHORITY_MODE=enforce` in that host's
    env file and restarts the services (on macOS, rerun

@@ -9181,7 +9181,8 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
 
     Counts per outcome and how many notices enforce mode would have held or
     refused, so the owner can see when a host is ready for enforce, how many
-    rows it could not read, and the time of the oldest row it counted.
+    rows it could not read, and the time of the oldest readable row of any
+    age, which shows whether the record holds the whole window.
     Returns None when the record does not exist.
     Plain text, not WARN: observe mode holds nothing.
     """
@@ -9198,9 +9199,11 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
     counts = {outcome: 0 for outcome in _INCIDENT_AUTHORITY_OUTCOMES}
     modes: set[str] = set()
     skipped = 0
-    # The dispatcher record is size-bounded, so on a busy host the counted
-    # rows may start later than 24 hours ago; the line names where they start.
-    oldest_counted: float | None = None
+    # The dispatcher record is size-bounded and drops its oldest rows first, so
+    # the window is complete only when the oldest readable row, of any age, is
+    # at least 24 hours old. A counted row is always inside the window and
+    # cannot show that.
+    record_starts: float | None = None
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -9220,26 +9223,26 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
             skipped += 1
             continue
         observed = parse_iso_epoch(record.get("time"))
+        if observed is not None and (record_starts is None or observed < record_starts):
+            record_starts = observed
         if observed is None or not (
             now_epoch - INCIDENT_AUTHORITY_RECORD_WINDOW_SECONDS <= observed <= now_epoch + 300
         ):
             continue
         counts[record["outcome"]] += 1
-        if oldest_counted is None or observed < oldest_counted:
-            oldest_counted = observed
         if record.get("mode") in ("observe", "enforce"):
             modes.add(record["mode"])
     would_stop = sum(counts[outcome] for outcome in _INCIDENT_AUTHORITY_ENFORCE_WOULD_STOP)
     outcome_text = " ".join(f"{outcome}={counts[outcome]}" for outcome in _INCIDENT_AUTHORITY_OUTCOMES)
-    oldest_text = (
+    starts_text = (
         "none"
-        if oldest_counted is None
-        else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(oldest_counted))
+        if record_starts is None
+        else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record_starts))
     )
     return (
         f"incident_authority_record: producer={producer} last_24h total={sum(counts.values())} "
         f"{outcome_text} would_hold_or_refuse_in_enforce={would_stop} "
-        f"mode={','.join(sorted(modes)) or 'none'} skipped={skipped} oldest_counted={oldest_text}"
+        f"mode={','.join(sorted(modes)) or 'none'} skipped={skipped} record_starts={starts_text}"
     )
 
 

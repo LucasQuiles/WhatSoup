@@ -899,37 +899,41 @@ def test_the_health_report_summarises_the_last_day_of_the_record(tmp_path):
     assert summary == (
         "incident_authority_record: producer=dispatcher last_24h total=7 granted=2 refused=1 "
         "not_ready=1 protocol_error=1 not_configured=1 not_asked=1 "
-        "would_hold_or_refuse_in_enforce=4 mode=observe skipped=4 oldest_counted=2025-11-20T00:46:20Z"
+        "would_hold_or_refuse_in_enforce=4 mode=observe skipped=4 record_starts=2025-11-18T23:53:20Z"
     )
     assert not summary.startswith(("WARN", "FAIL"))
     assert health.incident_authority_record_line("dispatcher", tmp_path / "absent.jsonl", now) is None
 
 
-def test_the_health_report_names_the_oldest_row_it_counted(tmp_path):
+def test_the_health_report_names_where_the_record_starts(tmp_path):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path / "health-state")
-    spec = importlib.util.spec_from_file_location("bot_errors_health_oldest", _HEALTH)
+    spec = importlib.util.spec_from_file_location("bot_errors_health_record_start", _HEALTH)
     health = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(health)  # type: ignore[union-attr]
     now = 1_763_600_000
     record = tmp_path / "incident-authority.jsonl"
 
-    def line(age: int) -> str:
+    def line(age: int, outcome: object = "granted") -> str:
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - age))
         return json.dumps(
-            {"time": stamp, "eventClass": "alert", "outcome": "granted", "reason": "x", "mode": "observe"}
+            {"time": stamp, "eventClass": "alert", "outcome": outcome, "reason": "x", "mode": "observe"}
         )
 
-    # The oldest counted row is in the middle of the file; the row older than
-    # a day is not counted, so it does not set the time.
-    record.write_text("\n".join([line(100), line(5_000), line(90_000), line(200)]) + "\n")
+    # The oldest readable row is in the middle of the file and older than the
+    # window: it is not counted, but it sets where the record starts. An older
+    # row the report cannot read does not.
+    record.write_text(
+        "\n".join([line(200_000, ["granted"]), line(100), line(90_000), line(5_000), line(200)]) + "\n"
+    )
     summary = health.incident_authority_record_line("dispatcher", record, now)
     assert summary is not None
-    assert summary.endswith(" skipped=0 oldest_counted=2025-11-19T23:30:00Z")
+    assert " total=3 " in summary
+    assert summary.endswith(" skipped=1 record_starts=2025-11-18T23:53:20Z")
 
-    # No counted row: only an unreadable row and one older than a day.
-    record.write_text("\n".join(["not json", line(90_000)]) + "\n")
+    # No readable row: only rows the report cannot read.
+    record.write_text("\n".join(["not json", line(200_000, 7)]) + "\n")
     assert health.incident_authority_record_line("dispatcher", record, now) == (
         "incident_authority_record: producer=dispatcher last_24h total=0 granted=0 refused=0 "
         "not_ready=0 protocol_error=0 not_configured=0 not_asked=0 "
-        "would_hold_or_refuse_in_enforce=0 mode=none skipped=1 oldest_counted=none"
+        "would_hold_or_refuse_in_enforce=0 mode=none skipped=2 record_starts=none"
     )
