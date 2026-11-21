@@ -22,6 +22,32 @@ credentials — enter the fleet token on the lock screen to start a session:
 - Dev mode (Vite proxy) bypasses the lock screen — the proxy injects auth
   server-side and the page carries no `fleet-auth-mode` meta tag.
 
+## Connection and update outcomes
+
+Realtime readiness requires the server's `connected` hello. An open socket alone
+keeps ordinary polling active. If hello does not arrive within ten seconds, the
+console retires that connection and retries with the existing one-to-thirty-second
+exponential backoff. The hello deadline bounds each socket's wait; it does not
+remove the delay between failed connection attempts.
+Callbacks from retired connections cannot change the current connection or its
+caches. Existing stream-gap reconciliation runs before readiness; legacy hello
+frames remain supported. Line queries retain their slower polling backstop after
+readiness.
+
+`GET /api/version` advertises `updateMode: release_deploy`. The update dialog then
+links to the [release deployment runbook](runbooks/release-deployment.md) without
+issuing an in-place update or restarting instances. Unknown advertised update modes
+also withhold those mutations. Servers that omit the field retain the compatibility
+flow; the existing `update-by-release-deploy-required` refusal switches that flow
+to deployment guidance. A fleet recovery timeout is unconfirmed recovery, not an
+update-complete result. Closing or reopening the dialog invalidates pending callbacks.
+
+An instance restart's HTTP202 response confirms a request, not recovered health.
+Restart batches prevent duplicate pending requests and do not resubmit an already
+accepted item when another item fails. Check instance health after acceptance or an
+unconfirmed result. Mode changes persist configuration before requesting restart;
+both line views refresh after that write, even when restart cannot be confirmed.
+
 ## Pages
 
 The navigation rail groups pages into **Operate**, **Create**, and **System**.

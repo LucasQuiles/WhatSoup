@@ -20,7 +20,7 @@ export function handleGetVersion(
   // payload so operators can verify the closure from the API. This read-only
   // availability check is what remains after the mutating update path was
   // retired (S-03) — it works from a detached immutable release.
-  jsonResponse(res, 200, { ...checker.getState(), consoleAuthMode: 'session', rootTokenInHtml: false });
+  jsonResponse(res, 200, { ...checker.getState(), consoleAuthMode: 'session', rootTokenInHtml: false, updateMode: 'release_deploy' });
 }
 
 /**
