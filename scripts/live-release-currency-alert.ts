@@ -388,8 +388,9 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<LiveR
   const result = await checkLiveReleaseCurrency(toOptions(parsed));
   if (parsed.json) console.log(JSON.stringify(result, null, 2));
   else console.log(`release currency ${result.state}: ${result.releasePath} (${result.reason})`);
-  if (result.state === 'target-differs') process.exitCode = 1;
-  else if (result.state === 'inconclusive') process.exitCode = 2;
+  // target-differs is an advisory finding (emitted and printed above), not a
+  // failed run: a nonzero exit would show the scheduled job red every interval.
+  if (result.state === 'inconclusive') process.exitCode = 2;
   return result;
 }
 

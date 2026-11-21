@@ -269,8 +269,8 @@ export interface IOutboundQueue {
   enqueueText(text: string, role: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
   enqueueStreamingText(text: string, role: OutboundMessageRole, onCommit?: () => void): void;
-  /** Commit buffered streaming text at the outbound-queue delivery boundary. */
-  commitStreamingText(): void;
+  /** Commit buffered streaming text; `true` also sends the answer an active turn defers, with the status role, so it is never answer evidence. */
+  commitStreamingText(includeDeferredAnswers?: boolean): void;
   /** Drop provisional assistant narration when a real tool call follows it in minimal mode. */
   discardPreToolAssistantText(): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
@@ -309,7 +309,7 @@ export interface IOutboundQueue {
    * is for PROVIDER-CRASH finalization only: when the dying turn produced no
    * visible text, its undelivered buffered/deferred narration is delivered as a
    * status-role salvage message (never answer evidence) instead of being
-   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it.
+   * destroyed. Interrupt/reset/fence-lost callers must NOT pass it; restart_self does (#3829).
    */
   abortTurn(options?: { preserveEvidence?: boolean; salvageOwedReply?: boolean }): void;
   /** The chat JID this queue is currently targeting. */
@@ -341,6 +341,8 @@ export interface IOutboundQueue {
   hasPendingWork?(): boolean;
   /** Whether a genuine send or durability failure has permanently poisoned this queue. */
   isPoisoned(): boolean;
+  /** Sends that ended unsubmitted (failed or echo-guard drop); restart_self compares it across its flush. */
+  getSendFailureCount(): number;
   /**
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
@@ -435,6 +437,7 @@ export class OutboundQueue implements IOutboundQueue {
   private readonly shutdownDeadlineSignal: Promise<typeof OUTBOUND_SHUTDOWN_DEADLINE>;
   private resolveShutdownDeadlineSignal: (() => void) | null = null;
   private shutdownDeadlineReached = false;
+  private sendFailureCount = 0;
 
   /** Controls tool update verbosity. 'minimal' suppresses noise, 'friendly' shows all in plain language. */
   private toolUpdateMode: 'full' | 'minimal' | 'friendly' = 'full';
@@ -851,7 +854,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Flush the streaming text buffer into the send queue. */
-  private flushStreamBuffer(includeDeferredAnswers = !this.isDeferringActiveAnswer()): void {
+  private flushStreamBuffer(includeDeferredAnswers = !this.isDeferringActiveAnswer(), heldAnswerAsStatus = false): void {
     if (this.streamTimer) {
       clearTimeout(this.streamTimer);
       this.streamTimer = null;
@@ -876,7 +879,7 @@ export class OutboundQueue implements IOutboundQueue {
         // them as "the agent produced output", which must block a fallback
         // replay and the empty-turn fallback. The policy decision satisfies the
         // reply guarantee (#3613); the turn evidence records the withholding.
-        this.enqueuePreparedText(text, attribution);
+        this.enqueuePreparedText(text, heldAnswerAsStatus && attribution.role === 'answer' ? { ...attribution, role: 'status' } : attribution);
         for (const part of group) {
           withTransportInboundContext(part.authorityContext, () => part.onCommit?.());
         }
@@ -893,8 +896,8 @@ export class OutboundQueue implements IOutboundQueue {
     flushGroup();
   }
 
-  commitStreamingText(): void {
-    this.flushStreamBuffer();
+  commitStreamingText(includeDeferredAnswers?: boolean): void {
+    this.flushStreamBuffer(includeDeferredAnswers, includeDeferredAnswers === true);
   }
 
   discardPreToolAssistantText(): void {
@@ -1499,6 +1502,10 @@ export class OutboundQueue implements IOutboundQueue {
     return this.drainFailure !== undefined;
   }
 
+  getSendFailureCount(): number {
+    return this.sendFailureCount;
+  }
+
   /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
     this.deliveryJid = jid;
@@ -1942,10 +1949,12 @@ export class OutboundQueue implements IOutboundQueue {
     // AE4: Echo guard — suppress cross-session group echo loops.
     // Passes senderToken so intra-session rapid sends (tool status + text) are exempt.
     if (!canSendToGroup(chunk.chatJid, config.echoGuard, this.senderToken)) {
+      this.sendFailureCount += 1;
       this.notifyDelivery(chunk.deliveryObserver, { outcome: 'not_sent' });
-      return; // silently drop
+      return;
     }
     const outcome = await this.sendWithRetry(chunk);
+    if (outcome.outcome !== 'submitted') this.sendFailureCount += 1;
     this.notifyDelivery(chunk.deliveryObserver, outcome);
     this.lastSentAt = Date.now();
     recordGroupOutbound(chunk.chatJid, this.senderToken);

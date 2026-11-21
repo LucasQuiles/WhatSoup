@@ -21,6 +21,7 @@ import { configRoot, instancePaths } from '../../../src/fleet/paths.ts';
 import { escapeXml } from '../../../src/fleet/platform.ts';
 import { parsePlist } from '../../check-service-units.ts';
 import {
+  missingRequiredOutputs,
   parseReleaseSnapshotManifest,
   RELEASE_MANIFEST_FILE,
   type ReleaseSnapshotManifest,
@@ -90,6 +91,11 @@ export interface ActivationContext {
   healthToken: string | null;
   newCommit: string | null;
   oldCommit: string | null;
+  /**
+   * The candidate manifest's `requiredOutputs` as planning checked them; null when the manifest was not readable.
+   * The switch recheck refuses a manifest that no longer lists exactly these, so an edit cannot drop a requirement.
+   */
+  plannedRequiredOutputs: readonly string[] | null;
   /** Loaded BOT ERRORS health consumer bound from launchd and sealed at plan time, when the next release requires it. */
   botErrorsHealthConsumer: PlannedBotErrorsHealthConsumer | null;
   /** Candidate requirement and observed rollback-target capability; compatibility is advisory until rollback. */
@@ -727,6 +733,7 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
     healthToken: null,
     newCommit: null,
     oldCommit: null,
+    plannedRequiredOutputs: null,
     botErrorsHealthConsumer: null,
     refreshRollbackFence: {
       required: null,
@@ -756,6 +763,13 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
     const full = next.commit !== null && FULL_COMMIT.test(next.commit);
     check('release-manifest-commit', full, full ? `commit ${next.commit}` : 'manifest source.commit is not a full 40-hex commit');
     if (full) context.newCommit = next.commit;
+    if (next.manifest !== null) {
+      context.plannedRequiredOutputs = [...next.manifest.requiredOutputs];
+      const missingOutputs = missingRequiredOutputs(args.release, next.manifest);
+      check('release-required-outputs-present', missingOutputs.length === 0, missingOutputs.length === 0
+        ? 'every manifest requiredOutputs path is a regular file inside the new release'
+        : `host-built outputs missing from the new release, or not regular files inside it: ${missingOutputs.join(', ')} (build them in the release first)`);
+    }
     const requirement = next.manifest === null
       ? { required: null, detail: 'candidate release manifest is unavailable after validation' }
       : releaseBotErrorsRequirement(args.release, next.manifest);
@@ -924,6 +938,31 @@ export function recheckCandidateRefreshRollbackFence(context: ActivationContext)
   return { ok, detail: ok ? fence.detail : 'candidate refresh rollback fence changed or became invalid before switch' };
 }
 
+/**
+ * Host-built outputs are rechecked under the activation lock: a host writer can remove or replace them after
+ * planning, or edit the candidate manifest to require fewer of them. The manifest must still name `--release` as
+ * its path and list exactly the outputs the plan checked, and each of those outputs must still be present.
+ */
+export function recheckRequiredOutputs(context: ActivationContext): { ok: boolean; detail: string } {
+  const planned = context.plannedRequiredOutputs;
+  if (planned === null) return { ok: false, detail: 'candidate requiredOutputs were not read at plan time' };
+  const candidate = readManifestCommit(context.args.release);
+  if (candidate.error !== null || candidate.manifest === null || candidate.commit !== context.newCommit) {
+    return { ok: false, detail: `candidate release manifest ${candidate.error ?? 'unavailable'} before switch` };
+  }
+  if (candidate.releasePath !== context.args.release) {
+    return { ok: false, detail: 'candidate manifest release.path changed before switch' };
+  }
+  const live = candidate.manifest.requiredOutputs;
+  if (live.length !== planned.length || live.some((output, index) => output !== planned[index])) {
+    return { ok: false, detail: 'candidate manifest requiredOutputs changed before switch' };
+  }
+  const missing = missingRequiredOutputs(context.args.release, candidate.manifest);
+  return missing.length === 0
+    ? { ok: true, detail: 'every required output is a regular file inside the new release' }
+    : { ok: false, detail: `required outputs missing or not regular files before switch: ${missing.join(', ')}` };
+}
+
 /** Recheck the rollback target immediately before stopping the new instance and before restoring/bootstrapping the old release. */
 export function recheckRollbackRefreshFenceTarget(context: ActivationContext): { ok: boolean; detail: string } {
   const required = context.refreshRollbackFence.required;
@@ -974,6 +1013,7 @@ export function describeActions(context: ActivationContext): Array<Record<string
       targetCapabilityAtPlan: context.refreshRollbackFence.targetCapability,
       targetCompatibleAtPlan: context.refreshRollbackFence.targetCompatibleAtPlan,
     },
+    { step: 'recheck-required-outputs-before-switch', release: args.release, rule: 'regular files, no symlinked path component' },
     { step: 'recheck-live-identity-before-switch', link: context.wrapperLink, expect: wrapperTargetFor(args.expectCurrent), plists: 'plan-time digests' },
     { step: 'switch-symlink', link: context.wrapperLink, target: wrapperTargetFor(args.release), atomic: true },
     { step: 'install-plists', labels, dir: context.launchAgentsDir, atomic: true },
