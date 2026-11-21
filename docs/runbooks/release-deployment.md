@@ -1520,8 +1520,7 @@ database automatically; it detects the case and stops:
 - It exits `4` with outcome `rollback-blocked-migrated`. `receipt.json` records
   `schemaMigration.before`, `after` (or `afterError`) and `blockedAt`. stderr
   prints both levels, the backup path, and the restore commands with this
-  host's paths filled in. For the wrapper, use the guarded block below, not
-  the printed `ln -sfn` line.
+  host's paths filled in.
 
 **Data loss:** restoring the backup loses every message received after the
 backup was taken. The moved-aside live database is then the only copy of them;
@@ -1537,66 +1536,15 @@ aside=<db>.pre-restore-$(date -u +%Y%m%dT%H%M%SZ); mkdir -m 700 "$aside"
 mv <db> <db>-wal <db>-shm "$aside"/                       # -wal/-shm may be absent
 # 3. Restore the pre-activation backup.
 cp <backup>/bot.db <db> && chmod 600 <db>
+# 4. Repoint the wrapper symlink and the plists to the old release.
+ln -sfn "$(cat <backup>/symlink.before)" ~/.local/bin/whatsoup
+cp <backup>/<label>.plist ~/Library/LaunchAgents/<label>.plist   # every label
+# 5. Start every label, then verify from the executing process as above.
+launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/<label>.plist
 ```
-
-Then repoint the wrapper to the old release, restore the plists and start every
-label, as one block. It is one subshell that stops at the first failed check,
-with or without `set -e`, and prints `stop: …`. It follows the same rule as the
-relink under "Helper links after an activation":
-
-- the activation lock is absent, because this writes the wrapper outside it;
-- `<backup>/symlink.before` was read, and the target it names is absolute,
-  normalized and an existing regular file. It is not compared with the current
-  wrapper, which still names the new release;
-- the temporary link does not exist in any form;
-- it renames a new link over the wrapper with `mv -fh` only after `ln -s`
-  succeeds, and never runs `rm` then `ln`. If the rename fails, it removes the
-  temporary link only while it still points at the target, and stops;
-- it reads the wrapper back. The plists are copied and the labels bootstrapped
-  only after the wrapper names the old release.
-
-```bash
-# 4. Repoint the wrapper, then 5. restore the plists and start every label.
-(
-  fail() { echo "stop: $*" >&2; exit 1; }
-  W="$HOME/.local/bin/whatsoup"
-  T="$HOME/.local/bin/.whatsoup.relink"
-  LOCK="$HOME/.local/state/whatsoup/release-activation.lock"
-  if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then fail "$LOCK exists; confirm no activation or reconcile runs (see above)"; fi
-  old="$(cat <backup>/symlink.before)" || fail "could not read <backup>/symlink.before"
-  case "$old" in
-    */ | *//* | */./* | */. | */../* | */..) fail "the old target is not normalized: $old" ;;
-    /*) ;;
-    *) fail "the old target is not absolute: $old" ;;
-  esac
-  [ -f "$old" ] || fail "the old target is not an existing regular file: $old"
-  if [ -e "$T" ] || [ -L "$T" ]; then fail "$T already exists; inspect it"; fi
-  ln -s "$old" "$T" || fail "could not create $T"
-  if ! mv -fh "$T" "$W"; then
-    if [ "$(readlink "$T")" = "$old" ]; then rm "$T"; fi
-    fail "could not rename $T over $W; the wrapper is unchanged"
-  fi
-  [ "$(readlink "$W")" = "$old" ] || fail "the wrapper does not name $old"
-  for label in com.whatsoup.<instance> <each aux label>; do
-    cp "<backup>/$label.plist" "$HOME/Library/LaunchAgents/$label.plist" || fail "could not restore $label.plist"
-  done
-  for label in com.whatsoup.<instance> <each aux label>; do
-    launchctl bootstrap gui/"$(id -u)" "$HOME/Library/LaunchAgents/$label.plist" || fail "could not bootstrap $label"
-  done
-  echo restored
-)
-```
-
-After `restored`, verify from the executing process as above. If the block stops
-because the temporary link exists, inspect it with `readlink`. If it is a link
-you made in an earlier attempt, remove it with `rm` and run the block again;
-otherwise find out what made it first.
 
 Never leave a `-wal` or `-shm` file from the migrated database beside the
 restored `bot.db`.
-
-The restore commands that `release:activate` prints still show `ln -sfn` for
-the wrapper; use the block above instead.
 
 #### Rollback blocked by refresh-fence compatibility (exit `5`)
 
