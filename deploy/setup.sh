@@ -136,6 +136,7 @@ require_readable_bot_errors_health_profile() {
 # checks the manifest before it: a manifest inside a work tree counts as a
 # release, which only refuses more.
 RELEASE_MANIFEST_FILE=".whatsoup-release-manifest.json"
+SWITCH_RELEASE_TREE_FLAG="--switch-release-tree"
 
 # resolve_path PATH: print PATH with every symlink resolved, both in the link
 # chain at its end and in its directories. Status 1 when a directory on the way
@@ -191,8 +192,10 @@ is_checkout() {
 # both trees are positively identified as checkouts: an older release without a
 # manifest, or a wrapper that cannot be resolved, must not pass for "no release
 # involved". No wrapper at all is a first install, with nothing to switch.
-# release:activate is macOS only, so on Linux the refusal also names the
-# deliberate hand switch.
+# release:activate is macOS only. On Linux, switch_release_tree=1
+# (--switch-release-tree, which the parser admits only on Linux and only for a
+# default run) lets a wrapper that resolves move to this tree: the old and the
+# new target are printed once, before the preflight, as the rollback record.
 refuse_release_bound_change() {
   local action="$1" link="$BIN_DIR/whatsoup" current="" current_tree="" this_tree named reason
   [ -L "$link" ] || [ -e "$link" ] || return 0
@@ -204,6 +207,18 @@ refuse_release_bound_change() {
   fi
   if [ -z "$current_tree" ]; then
     reason="the wrapper does not resolve to an existing deploy/whatsoup, so the tree the bot runs is unknown; remove ~/.local/bin/whatsoup first if this is a fresh install"
+  elif [ "${switch_release_tree:-0}" -eq 1 ]; then
+    if [ "${release_tree_switch_announced:-0}" -ne 1 ]; then
+      named="$(readlink "$link" 2>/dev/null || true)"
+      echo "  Switching this host's tree ($SWITCH_RELEASE_TREE_FLAG):"
+      echo "    Old wrapper target: ${named:-$current} (resolves to $current)"
+      echo "    New wrapper target: $REPO_ROOT/deploy/whatsoup"
+      echo "    To roll back, run the old tree's setup the same way:"
+      echo "      bash $current_tree/deploy/setup.sh $SWITCH_RELEASE_TREE_FLAG"
+      echo ""
+      release_tree_switch_announced=1
+    fi
+    return 0
   elif [ "$current_tree" = "$this_tree" ]; then
     # Same tree. Unless it is a checkout, the run must also write the exact path
     # the wrapper names: release:activate compares it as a string, and a link
@@ -222,21 +237,18 @@ refuse_release_bound_change() {
     echo "  ✗ Refusing to $action: $reason."
     echo "    Bot wrapper: $link -> ${current:-unresolvable}"
     echo "    This tree:   $this_tree"
-    echo "    Only release:activate moves a release host to another tree. It checks"
-    echo "    preconditions, backs up, verifies and rolls back:"
-    echo "      npm --silent run release:activate -- --instance <instance> \\"
-    echo "        --release <new-release> --expect-current <current-release> \\"
-    echo "        --aux-label com.whatsoup.harness-maintenance=setup-timer \\"
-    echo "        --aux-label com.whatsoup.reply-guarantee=setup-timer \\"
-    echo "        --backup-dir <dir> --plan"
-    echo "    Pass one --aux-label per installed timer plist; see"
-    echo "    docs/runbooks/release-deployment.md (\"Activating a release\")."
-    if [ "$PLATFORM" != "Darwin" ]; then
-      echo "    On Linux, release:activate refuses: it is macOS only. To move this host"
-      echo "    to another tree on purpose, stop its units, repoint $link by hand"
-      echo "    to the other tree's deploy/whatsoup with a new link renamed over the old"
-      echo "    one (ln -s to a temporary name, then mv -T), never rm then ln, and then"
-      echo "    run setup from that tree through the path the link names."
+    if [ "$PLATFORM" = "Darwin" ]; then
+      echo "    Only release:activate moves a release host to another tree. It checks"
+      echo "    preconditions, backs up, verifies and rolls back:"
+      echo "      npm --silent run release:activate -- --instance <instance> \\"
+      echo "        --release <new-release> --expect-current <current-release> \\"
+      echo "        --aux-label com.whatsoup.harness-maintenance=setup-timer \\"
+      echo "        --aux-label com.whatsoup.reply-guarantee=setup-timer \\"
+      echo "        --backup-dir <dir> --plan"
+      echo "    Pass one --aux-label for each timer plist the host has installed; see"
+      echo "    docs/runbooks/release-deployment.md (\"Activating a release\")."
+    else
+      echo "    On Linux, where release:activate refuses, re-run with $SWITCH_RELEASE_TREE_FLAG to switch this host to this tree on purpose (docs/runbooks/release-deployment.md, \"Switching a Linux host to another tree\")."
     fi
     echo "    From any tree, --npmrc-only (step 5) still runs. --skip-wrappers skips"
     echo "    step 3, but on macOS step 4 still needs the active release. From the"
@@ -467,6 +479,7 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   cat <<'USAGE'
 Usage: deploy/setup.sh [--profile <runtime|quality|release>] [--install-host-dependencies] [--yes]
                        [--skip-wrappers] [--wrappers-only] [--timers-only] [--npmrc-only]
+                       [--switch-release-tree]
        deploy/setup.sh [--check | --remove-timers | --reconcile [--check]]
 
   --profile PROFILE  Validate the runtime, quality, or release capability profile.
@@ -491,6 +504,13 @@ Usage: deploy/setup.sh [--profile <runtime|quality|release>] [--install-host-dep
   Move a release host to another release with release:activate (macOS;
   docs/runbooks/release-deployment.md), then run --wrappers-only from the
   active release to move the helper links.
+  --switch-release-tree
+                     Linux only, default run only: switch a host whose wrapper
+                     resolves to another tree to this tree on purpose. Prints
+                     the old and new wrapper targets and the rollback command
+                     before the preflight, installs dependencies (step 2)
+                     before the links move, and reads the wrapper back after
+                     step 3. A wrapper that does not resolve is still refused.
   --check         Compare checked-in systemd units with installed user units.
   --remove-timers  macOS only: remove the launchd maintenance timer plists from
                     ~/Library/LaunchAgents. Prints the bootout commands to unload
@@ -515,6 +535,7 @@ skip_wrappers=0
 only_wrappers=0
 only_timers=0
 only_npmrc=0
+switch_release_tree=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --profile)
@@ -546,6 +567,10 @@ while [ "$#" -gt 0 ]; do
       only_npmrc=1
       shift
       ;;
+    --switch-release-tree)
+      switch_release_tree=1
+      shift
+      ;;
     *)
       echo "Unknown setup option: $1" >&2
       exit 2
@@ -563,6 +588,21 @@ fi
 if [ "$only_wrappers" -eq 1 ] && [ "$skip_wrappers" -eq 1 ]; then
   echo "--wrappers-only and --skip-wrappers cannot be combined" >&2
   exit 2
+fi
+if [ "$switch_release_tree" -eq 1 ]; then
+  # A tree switch runs every step: dependencies before the links move, then the
+  # units, so no partial run can leave the links and the units on two trees.
+  for selection_option in --wrappers-only:"$only_wrappers" --timers-only:"$only_timers" \
+    --npmrc-only:"$only_npmrc" --skip-wrappers:"$skip_wrappers"; do
+    if [ "${selection_option##*:}" -eq 1 ]; then
+      echo "$SWITCH_RELEASE_TREE_FLAG cannot be combined with ${selection_option%:*}: a tree switch runs every step" >&2
+      exit 2
+    fi
+  done
+  if [ "$PLATFORM" = "Darwin" ]; then
+    echo "$SWITCH_RELEASE_TREE_FLAG is Linux only. On macOS, move a release host with release:activate, which checks preconditions, backs up, verifies and rolls back (docs/runbooks/release-deployment.md, \"Activating a release\")." >&2
+    exit 2
+  fi
 fi
 # The Linux release-drift unit labels its BOT ERRORS alerts with this value, so
 # it is checked here, before setup changes anything. The wrapper passes it after
@@ -741,6 +781,14 @@ if [ "$run_wrappers" -eq 1 ]; then
   install_wrapper_link "whatsoup-heal-notify" "$REPO_ROOT/deploy/scripts/heal-notify.sh"
   # Keeps its .sh name: deploy/whatsoup-release-drift.service executes it by that name.
   install_wrapper_link "whatsoup-release-drift-linux.sh" "$REPO_ROOT/deploy/scripts/whatsoup-release-drift-linux.sh"
+  if [ "$switch_release_tree" -eq 1 ]; then
+    switched_target="$(readlink "$BIN_DIR/whatsoup" 2>/dev/null || true)"
+    if [ "$switched_target" != "$REPO_ROOT/deploy/whatsoup" ]; then
+      echo "  ✗ after step 3 $BIN_DIR/whatsoup names ${switched_target:-nothing}, not $REPO_ROOT/deploy/whatsoup: the switch did not complete; roll back with the command printed above" >&2
+      exit 1
+    fi
+    echo "  ✓ the bot wrapper now names $REPO_ROOT/deploy/whatsoup"
+  fi
 
   # Ensure ~/.local/bin is on PATH
   if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then

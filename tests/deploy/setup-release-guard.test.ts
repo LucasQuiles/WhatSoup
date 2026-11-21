@@ -50,7 +50,9 @@ const TIMERS = 'render the launchd timer plists';
 const FRESH_INSTALL_HINT = 'remove ~/.local/bin/whatsoup first if this is a fresh install';
 const SAME_TREE_OTHER_PATH = 'run setup through the path the wrapper names';
 const NOT_BOTH_CHECKOUTS = 'the two are not both git checkouts';
-const LINUX_NOTE = 'On Linux, release:activate refuses: it is macOS only.';
+const SWITCH_FLAG = '--switch-release-tree';
+const LINUX_NOTE = `On Linux, where release:activate refuses, re-run with ${SWITCH_FLAG}`;
+const ONLY_OPTIONS = ['--wrappers-only', '--timers-only', '--npmrc-only', '--skip-wrappers'];
 const GUARD_START = '# --- release guard helpers start ---';
 const GUARD_END = '# --- release guard helpers end ---';
 
@@ -77,7 +79,19 @@ function writeExecutable(file: string, body: string): void {
  */
 type TreeKind = 'checkout' | 'release' | 'unmarked-export';
 
-function makeTree(dir: string, kind: TreeKind): string {
+/**
+ * The files Linux step 4 copies from deploy/ (units, timers, env templates),
+ * for a tree a full default run must get through.
+ */
+function copyDeployUnits(dir: string): void {
+  for (const name of fs.readdirSync(path.join(repoRoot, 'deploy'))) {
+    if (/\.(service|timer)$|\.env\.example$|^npmrc\.hardened$/.test(name)) {
+      fs.copyFileSync(path.join(repoRoot, 'deploy', name), path.join(dir, 'deploy', name));
+    }
+  }
+}
+
+function makeTree(dir: string, kind: TreeKind, opts: { units?: boolean } = {}): string {
   fs.mkdirSync(path.join(dir, 'deploy', 'lib'), { recursive: true });
   fs.copyFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), path.join(dir, 'deploy', 'setup.sh'));
   fs.copyFileSync(
@@ -94,6 +108,7 @@ function makeTree(dir: string, kind: TreeKind): string {
   }
   if (kind === 'release') fs.writeFileSync(path.join(dir, RELEASE_MANIFEST_FILE), '{}\n');
   if (kind === 'checkout') gitFixture(dir, ['init', '-q']);
+  if (opts.units) copyDeployUnits(dir);
   return dir;
 }
 
@@ -162,6 +177,8 @@ function writeShims(dir: string): void {
     '#!/usr/bin/env bash',
     'if [[ "${1:-}" == "--version" ]]; then printf "11.12.1\\n"; exit 0; fi',
     'printf "npm:%s\\n" "${1:-}" >> "$WHATSOUP_SETUP_EVENTS"',
+    // Which tree the bot wrapper names while step 2 installs dependencies.
+    'if [[ "${1:-}" == "ci" ]]; then printf "wrapper-at-ci:%s\\n" "$(readlink "$HOME/.local/bin/whatsoup" 2>/dev/null)" >> "$WHATSOUP_SETUP_EVENTS"; fi',
     'exit 0',
     '',
   ].join('\n'));
@@ -209,6 +226,8 @@ interface Run {
 interface RunOptions {
   platform?: 'Linux' | 'Darwin';
   env?: NodeJS.ProcessEnv;
+  /** Function-level only: the value setup.sh's parser gives switch_release_tree. */
+  switchTree?: boolean;
 }
 
 function readEvents(file: string): string[] {
@@ -229,6 +248,7 @@ function runGuard(host: Host, repo: string, opts: RunOptions = {}): Run & { pass
     `BIN_DIR=${JSON.stringify(host.bin)}`,
     `REPO_ROOT=${JSON.stringify(repo)}`,
     `PLATFORM=${JSON.stringify(opts.platform ?? 'Linux')}`,
+    `switch_release_tree=${opts.switchTree ? 1 : 0}`,
     setupSource.slice(start, end),
     'refuse_release_bound_change "repoint the wrappers in $BIN_DIR"',
     'echo guard-passed',
@@ -441,20 +461,60 @@ describe('deploy/setup.sh release guard helpers: which wrapper switch passes', (
     });
   });
 
-  it('says on Linux, and only there, that release:activate refuses and how to switch deliberately', () => {
+  it('names the switch flag on Linux, and the activation command only on macOS', () => {
     const host = makeHost();
     const release = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
     const checkout = makeTree(path.join(host.base, 'checkout'), 'checkout');
     linkWrapper(host, wrapperOf(release));
     const linux = expectGuardRefusal(host, checkout, { platform: 'Linux' });
     expect(linux.stderr).toContain(LINUX_NOTE);
-    expect(linux.stderr).toContain('mv -T');
-    expect(expectGuardRefusal(host, checkout, { platform: 'Darwin' }).stderr).not.toContain(LINUX_NOTE);
+    expect(linux.stderr).not.toContain('--aux-label');
+    expect(linux.stderr).not.toContain('by hand to the other tree');
+    const darwin = expectGuardRefusal(host, checkout, { platform: 'Darwin' });
+    expect(darwin.stderr).not.toContain(SWITCH_FLAG);
+    expect(darwin.stderr).toContain('--aux-label com.whatsoup.harness-maintenance=setup-timer');
+    expect(darwin.stderr).toContain('--aux-label com.whatsoup.reply-guarantee=setup-timer');
+  });
+});
+
+describe(`deploy/setup.sh release guard helpers with ${SWITCH_FLAG} (Linux)`, () => {
+  /** Pass with the flag, and print the old and the new wrapper target. */
+  function expectSwitch(host: Host, from: string, to: string): void {
+    const run = runGuard(host, to, { switchTree: true });
+    expect(run.passed, `${run.stdout}\n${run.stderr}`).toBe(true);
+    expect(run.stdout).toContain(`Old wrapper target: ${wrapperOf(from)}`);
+    expect(run.stdout).toContain(`New wrapper target: ${wrapperOf(to)}`);
+    expect(run.stdout).toContain(`bash ${path.join(from, 'deploy', 'setup.sh')} ${SWITCH_FLAG}`);
+  }
+
+  it('switches a checkout to a release, a release to the next, and back', () => {
+    const host = makeHost();
+    const checkout = makeTree(path.join(host.base, 'checkout'), 'checkout');
+    const r1 = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const r2 = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    linkWrapper(host, wrapperOf(checkout));
+    expectSwitch(host, checkout, r1);
+    fs.unlinkSync(path.join(host.bin, 'whatsoup'));
+    linkWrapper(host, wrapperOf(r1));
+    expectSwitch(host, r1, r2);
+    fs.unlinkSync(path.join(host.bin, 'whatsoup'));
+    linkWrapper(host, wrapperOf(r2));
+    expectSwitch(host, r2, r1);
+  });
+
+  it('still refuses a wrapper that does not resolve: the old tree is unknown', () => {
+    const host = makeHost();
+    const release = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    linkWrapper(host, wrapperOf(path.join(host.base, 'gone')));
+    const run = runGuard(host, release, { switchTree: true });
+    expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(2);
+    expect(run.stderr).toContain(FRESH_INSTALL_HINT);
+    expect(run.stdout).not.toContain('Old wrapper target');
   });
 });
 
 describe('deploy/setup.sh release guard: each refusal runs no step and changes nothing', () => {
-  it('refuses a default run from a checkout when the wrapper runs a release (Linux), and names the full activation command', () => {
+  it('refuses a default run from a checkout when the wrapper runs a release (Linux), and names the switch flag', () => {
     const host = makeHost();
     const release = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
     const checkout = makeTree(path.join(host.base, 'checkout'), 'checkout');
@@ -462,18 +522,18 @@ describe('deploy/setup.sh release guard: each refusal runs no step and changes n
 
     const run = expectRefusal(host, checkout, [], WRAPPERS);
     expect(run.stderr).toContain('--npmrc-only');
-    expect(run.stderr).toContain('--aux-label com.whatsoup.harness-maintenance=setup-timer');
-    expect(run.stderr).toContain('--aux-label com.whatsoup.reply-guarantee=setup-timer');
     expect(run.stderr).toContain(LINUX_NOTE);
   });
 
-  it('refuses --wrappers-only from a checkout when the wrapper runs a release (macOS)', () => {
+  it('refuses --wrappers-only from a checkout when the wrapper runs a release (macOS), and names the full activation command', () => {
     const host = makeHost();
     const release = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
     const checkout = makeTree(path.join(host.base, 'checkout'), 'checkout');
     linkWrapper(host, wrapperOf(release));
 
-    expectRefusal(host, checkout, ['--wrappers-only'], WRAPPERS, { platform: 'Darwin' });
+    const run = expectRefusal(host, checkout, ['--wrappers-only'], WRAPPERS, { platform: 'Darwin' });
+    expect(run.stderr).toContain('--aux-label com.whatsoup.harness-maintenance=setup-timer');
+    expect(run.stderr).toContain('--aux-label com.whatsoup.reply-guarantee=setup-timer');
   });
 
   it('refuses --skip-wrappers from another tree on macOS: step 4 still renders the timers', () => {
@@ -505,6 +565,71 @@ describe('deploy/setup.sh release guard: each refusal runs no step and changes n
     expect(run.stderr).toContain('--wrappers-only and --skip-wrappers cannot be combined');
     expect(run.events).toEqual([]);
     expect(snapshot(host.base)).toEqual(before);
+  });
+});
+
+describe(`deploy/setup.sh ${SWITCH_FLAG}: a deliberate Linux tree switch`, () => {
+  it('moves a Linux host from release N to N+1: dependencies first, then every link, then the units', () => {
+    const host = makeHost();
+    const current = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const next = makeTree(path.join(host.base, 'releases', 'r2'), 'release', { units: true });
+    linkWrapper(host, wrapperOf(current));
+    for (const name of HELPERS) fs.symlinkSync(path.join(current, LINKS[name]), path.join(host.bin, name));
+
+    const run = runSetup(host, next, [SWITCH_FLAG]);
+    expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+    const announced = run.stdout.indexOf(`Old wrapper target: ${wrapperOf(current)}`);
+    expect(announced).toBeGreaterThan(-1);
+    expect(announced).toBeLessThan(run.stdout.indexOf('[1/7]'));
+    expect(run.stdout).toContain(`New wrapper target: ${wrapperOf(next)}`);
+    expect(run.events.slice(0, 5)).toEqual([...PREFLIGHT_EVENTS, 'npm:ci', `wrapper-at-ci:${wrapperOf(current)}`]);
+    expectLinksInto(host, next, Object.keys(LINKS));
+    expect(fs.existsSync(path.join(host.home, '.config', 'systemd', 'user', 'whatsoup@.service'))).toBe(true);
+    expect(run.stdout).toContain('Setup complete. Next steps:');
+  });
+
+  it('is refused on macOS, where release:activate moves a release host', () => {
+    const host = makeHost();
+    const current = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const next = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    linkWrapper(host, wrapperOf(current));
+    const before = snapshot(host.base);
+
+    const run = runSetup(host, next, [SWITCH_FLAG], { platform: 'Darwin' });
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain(`${SWITCH_FLAG} is Linux only`);
+    expect(run.stderr).toContain('release:activate');
+    expect(run.events).toEqual([]);
+    expect(snapshot(host.base)).toEqual(before);
+  });
+
+  it.each(ONLY_OPTIONS)('is refused with %s: a tree switch runs every step', (option) => {
+    const host = makeHost();
+    const current = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const next = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    linkWrapper(host, wrapperOf(current));
+    const before = snapshot(host.base);
+
+    const run = runSetup(host, next, [SWITCH_FLAG, option]);
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain(`${SWITCH_FLAG} cannot be combined with ${option}`);
+    expect(run.events).toEqual([]);
+    expect(snapshot(host.base)).toEqual(before);
+  });
+
+  it('fails when the wrapper does not name this tree after step 3', () => {
+    const host = makeHost();
+    const current = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
+    const next = makeTree(path.join(host.base, 'releases', 'r2'), 'release');
+    linkWrapper(host, wrapperOf(current));
+    // A rename that reports success but moves nothing.
+    writeExecutable(path.join(host.shims, 'mv'), '#!/bin/sh\nexit 0\n');
+
+    const run = runSetup(host, next, [SWITCH_FLAG]);
+    expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(1);
+    expect(run.stderr).toContain(`not ${wrapperOf(next)}`);
+    expect(fs.readlinkSync(path.join(host.bin, 'whatsoup'))).toBe(wrapperOf(current));
+    expect(run.stdout).not.toContain('[4/7]');
   });
 });
 

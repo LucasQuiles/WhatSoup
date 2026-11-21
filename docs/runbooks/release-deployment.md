@@ -568,13 +568,64 @@ active release. The preflight and the step 1 checks always run. Step 3 replaces
 each link by renaming a new link over it, so a link is never missing while it
 changes.
 
-**Linux.** `release:activate` refuses on Linux, so no command moves a Linux
-release host to another tree, and the refusal says so. To move one on purpose,
-stop its units, repoint `~/.local/bin/whatsoup` by hand to the other tree's
-`deploy/whatsoup` with a new link renamed over the old one (`ln -s` to a
-temporary name, then GNU `mv -T`), never `rm` then `ln`, then run setup from
-that tree through the path the link names, and start the units again. Nothing
-checks, backs up or rolls back that switch.
+#### Switching a Linux host to another tree
+
+`release:activate` and `release:activate-host` refuse off macOS. On Linux,
+`deploy/setup.sh --switch-release-tree` moves a host from a checkout to a
+release, from release N to N+1, or back. It is a default run from the target
+tree with three additions: before the preflight it prints the old and the new
+wrapper target and the rollback command; it still refuses a wrapper that does
+not resolve to an existing `deploy/whatsoup`, because then the old tree is
+unknown; and it reads the wrapper back after step 3 and exits `1` unless it
+names this tree. Step 2 installs dependencies before step 3 moves the eight
+links, and step 4 then installs that tree's units. The flag is refused on
+macOS and with `--wrappers-only`, `--timers-only`, `--npmrc-only` or
+`--skip-wrappers`: a switch runs every step. It checks no database
+compatibility, takes no backup and does not roll back by itself.
+
+A release exported before this change has no guard and no flag: its
+`setup.sh` rejects `--switch-release-tree` as an unknown option, and a plain
+`bash <tree>/deploy/setup.sh` from it switches the host without either.
+
+1. Export and build the target tree first (the host step under
+   [Dry-Run Planning](#dry-run-planning)), and record what runs now:
+   `readlink ~/.local/bin/whatsoup` and `systemctl --user list-units 'whatsoup*'`.
+2. Stop the timers, then the services whose commands run through
+   `~/.local/bin` (`deploy/whatsoup@.service`, `deploy/whatsoup-fleet.service`,
+   `deploy/harness-maintenance.service`, `deploy/whatsoup-reply-guarantee.service`,
+   `deploy/whatsoup-release-drift.service`), so no job starts through a link
+   while the links move:
+
+   ```bash
+   systemctl --user stop harness-maintenance.timer whatsoup-reply-guarantee.timer whatsoup-release-drift.timer
+   systemctl --user stop whatsoup@<instance>.service whatsoup-fleet.service
+   ```
+
+   The BOT ERRORS units and `whatsoup-heal-notify@.service` name their scripts
+   by other paths; no switch moves them.
+3. Run the switch from the target tree, through the path the wrapper should
+   name, and keep the printed rollback command:
+
+   ```bash
+   bash /abs/path/to/<target-tree>/deploy/setup.sh --switch-release-tree
+   ```
+
+4. Start the services and timers you stopped, then verify: `readlink
+   ~/.local/bin/whatsoup` names `<target-tree>/deploy/whatsoup`; the running
+   process's command line names `<target-tree>/src/bootstrap.ts`
+   (`tr '\0' ' ' < /proc/"$(systemctl --user show -p MainPID --value whatsoup@<instance>)"/cmdline`);
+   and the authenticated health check in [docs/runbook.md](../runbook.md)
+   reports the target's commit in `instance.commit` and a connected line.
+5. Rollback: stop the same units, run the printed command, which is the same
+   command from the old tree, start the units and verify the same way. If the
+   old tree's `setup.sh` predates this change, run it without the flag.
+
+Removing `~/.local/bin/whatsoup` and running setup passes the guard as a first
+install. That is the deliberate bypass for a host whose wrapper does not
+resolve; it prints no old target and makes no rollback record. It skips the guard's
+check of the old tree.
+
+#### Helper links after a macOS activation
 
 **Helper links after an activation.** The fleet console's launchd job starts
 `~/.local/bin/whatsoup-fleet`. `release:activate` moves only
