@@ -52,7 +52,7 @@ import {
   handleConfigUpdate,
   handleAuth,
 } from '../../../src/fleet/routes/ops.ts';
-import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
+import type { OpsAuthDeps } from '../../../src/fleet/routes/ops-auth.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { REQUIRED_DENY } from '../../../src/core/settings-template.ts';
 import { spawn } from 'node:child_process';
@@ -78,7 +78,7 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   } as DiscoveredInstance;
 }
 
-function depsFor(instance: DiscoveredInstance | null = null): OpsDeps {
+function depsFor(instance: DiscoveredInstance | null = null): OpsAuthDeps {
   return makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance ?? undefined) } });
 }
 
@@ -243,7 +243,7 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
     return fs.mkdtempSync(path.join(base, 'ops-branches2-'));
   }
 
-  function agentInstance(cwd: string): { instance: DiscoveredInstance; deps: OpsDeps } {
+  function agentInstance(cwd: string): { instance: DiscoveredInstance; deps: OpsAuthDeps } {
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-branches2-cfg-'));
     configFile = path.join(configDir, 'config.json');
     fs.writeFileSync(configFile, JSON.stringify({
@@ -325,7 +325,7 @@ describe('handleConfigUpdate: agent path validation branch arms', () => {
 // handleConfigUpdate: transport immutability + per-transport admin IDs (S9)
 // ---------------------------------------------------------------------------
 describe('handleConfigUpdate: transport immutability + per-transport admin IDs', () => {
-  function transportInstance(transport: string): { instance: DiscoveredInstance; deps: OpsDeps; configFile: string } {
+  function transportInstance(transport: string): { instance: DiscoveredInstance; deps: OpsAuthDeps; configFile: string } {
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-s9-cfg-'));
     const configFile = path.join(configDir, 'config.json');
     const base: Record<string, unknown> = {

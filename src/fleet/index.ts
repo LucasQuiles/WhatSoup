@@ -25,6 +25,7 @@ import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './rout
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth, handleMarkRead } from './routes/ops.ts';
 import { handlePairingPreflight, handlePairingApply, handlePairingStatus } from './routes/ops-auth.ts';
+import { createAuthSessionRegistry, type AuthSessionRegistry } from './routes/auth-session-registry.ts';
 import { handleGetFeed } from './routes/feed.ts';
 import { handleGetMetrics } from './routes/metrics.ts';
 import { handleGetFleetMetrics } from './routes/fleet-metrics.ts';
@@ -110,6 +111,8 @@ export interface RouteDeps {
   serviceManager: ServiceManager;
   log: typeof log;
   updateChecker: UpdateChecker;
+  /** #2239: this server's auth session state, shared by every auth route it serves. */
+  authSessions: AuthSessionRegistry;
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +504,10 @@ export function createFleetServer(deps: FleetDeps) {
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };
   const serviceManager = createServiceManager();
-  const routeDeps: RouteDeps = { discovery, healthPoller, dbReader, realtime, serviceManager, log, updateChecker };
+  const routeDeps: RouteDeps = {
+    discovery, healthPoller, dbReader, realtime, serviceManager, log, updateChecker,
+    authSessions: createAuthSessionRegistry(),
+  };
 
   // ---- Auth helpers (rotation-aware) -----------------------------------
   function verifyToken(candidate: string | null | undefined): boolean {

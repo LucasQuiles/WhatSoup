@@ -179,6 +179,8 @@ async function importMainWithMocks(options: {
   startupNotificationStabilitySeconds?: number;
   startupNotifications?: boolean;
   toolUpdateMode?: 'full' | 'minimal';
+  /** The configured mode; omitted mirrors toolUpdateMode, null models an unset mode. */
+  configuredToolUpdateMode?: 'full' | 'minimal' | null;
   startupJournalStatus?: 'available' | 'journal_unreadable';
 } = {}) {
   vi.resetModules();
@@ -314,6 +316,9 @@ async function importMainWithMocks(options: {
     // debounce window explicitly.
     startupNotificationStabilitySeconds: options.startupNotificationStabilitySeconds ?? 0,
     toolUpdateMode: options.toolUpdateMode ?? 'full',
+    configuredToolUpdateMode: options.configuredToolUpdateMode === undefined
+      ? options.toolUpdateMode ?? null
+      : options.configuredToolUpdateMode,
     protectedDelivery: null,
   };
 
@@ -1547,6 +1552,21 @@ describe('main.ts — uncovered helpers and signal paths', () => {
     it('sends the default back-online notice when no pending message exists', async () => {
       const h = await importMainWithMocks({
         instanceConfig: sharedAgentInstanceConfig(),
+        pendingStartupEvent: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(h.sendTracked).toHaveBeenCalledWith(...backOnlineCall(h));
+    });
+
+    it('sends the default back-online notice when the tool update mode is unset', async () => {
+      // An unset mode runs as minimal for end users, but the admin notice
+      // follows the configured mode, as it did before the default changed.
+      const h = await importMainWithMocks({
+        instanceConfig: sharedAgentInstanceConfig(),
+        toolUpdateMode: 'minimal',
+        configuredToolUpdateMode: null,
         pendingStartupEvent: null,
       });
 

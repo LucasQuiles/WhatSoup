@@ -74,11 +74,20 @@ FILES=(
   "deploy/scripts/lib/bot_errors_roster.py"
   "deploy/scripts/lib/controller_log.py"
   "deploy/scripts/lib/controller_state.py"
+  # bot_errors_submission.py has no runtime caller yet. It is shipped because
+  # the runtime manifest pins it, and the health check's manifest comparison
+  # fails on any pinned path missing from the root.
+  "deploy/scripts/lib/bot_errors_submission.py"
   # Closure members. Everything above is imported BY something; everything here
   # is imported by something above, and a root that omits it makes the importer
   # crash on load while do_verify still prints VERIFY_OK. Kept managed by
   # tests/scripts/deployer-import-closure.test.ts, which derives the required
   # set from the parsed import graph -- never from this array.
+  # bot_errors_reporting.py: bot-errors-dispatcher.py imports it inside its
+  # non-emitting --format-human-report preview, so a normal cycle never loads
+  # it. The closure walk still counts that import, as it parses every import
+  # statement in the file.
+  "deploy/scripts/lib/bot_errors_reporting.py"
   # classify_health.py: bot-errors-health-check.py and
   # bot-errors-heartbeat-watchdog.py import recovery_debt_issue from it at
   # module scope to validate the /health recovery_debt contract (#3224).

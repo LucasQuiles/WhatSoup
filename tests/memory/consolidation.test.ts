@@ -42,6 +42,30 @@ function oneRecordCluster(): MemoryCluster {
   };
 }
 
+function clusterOfSize(size: number): MemoryCluster {
+  return {
+    topic: 'test',
+    records: Array.from({ length: size }, (_, index) => ({
+      id: `source-${index + 1}`,
+      text: 'synthetic memory',
+      claim: 'synthetic memory',
+      createdAt: '2026-04-01',
+      confidence: 0.5,
+      evidence: 'synthetic evidence',
+    })),
+  };
+}
+
+// One promotion per source, so no other output rule can reject the response.
+function distinctPromotions(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    claim: `claim ${index}`,
+    promotionReason: 'valid reason',
+    confidence: 0.8,
+    sourceRecordIds: [`source-${index + 1}`],
+  }));
+}
+
 describe('clusterMemories', () => {
   it('groups records with overlapping keywords', () => {
     const records = [
@@ -278,15 +302,6 @@ describe('consolidateCluster', () => {
       }],
       discarded: [],
     }],
-    ['too many promoted items', {
-      durableKnowledge: Array.from({ length: 33 }, (_, index) => ({
-        claim: `claim ${index}`,
-        promotionReason: 'valid reason',
-        confidence: 0.8,
-        sourceRecordIds: ['source-1'],
-      })),
-      discarded: [],
-    }],
   ])('rejects %s with a bounded output_invalid result', async (_name, content) => {
     const result = await consolidateCluster(
       providerReturning(content) as any,
@@ -299,6 +314,78 @@ describe('consolidateCluster', () => {
       durableKnowledge: [],
       discarded: [],
     });
+  });
+
+  it('rejects 33 promoted items even when each cites its own source', async () => {
+    const result = await consolidateCluster(
+      providerReturning({ durableKnowledge: distinctPromotions(33), discarded: [] }) as any,
+      clusterOfSize(33),
+    );
+    expect(result).toMatchObject({
+      status: 'output_invalid',
+      failureCode: 'invalid_request',
+      retryable: false,
+      durableKnowledge: [],
+      discarded: [],
+    });
+  });
+
+  it('accepts exactly 32 promoted items that each cite their own source', async () => {
+    const result = await consolidateCluster(
+      providerReturning({ durableKnowledge: distinctPromotions(32), discarded: [] }) as any,
+      clusterOfSize(32),
+    );
+    expect(result).toMatchObject({ status: 'completed_promoted', failureCode: 'none' });
+    expect(result.durableKnowledge).toHaveLength(32);
+  });
+
+  // Two promotions on one source set would share one remote record, so the
+  // later one is dropped with a content-free warning; the cluster still counts.
+  it('drops a later promotion that reuses a source set and keeps the first', async () => {
+    const result = await consolidateCluster(
+      providerReturning({
+        durableKnowledge: [
+          { claim: 'first claim', promotionReason: 'valid reason', confidence: 0.8, sourceRecordIds: ['source-1', 'source-2'] },
+          { claim: 'second claim', promotionReason: 'valid reason', confidence: 0.8, sourceRecordIds: ['source-2', 'source-1'] },
+          { claim: 'third claim', promotionReason: 'valid reason', confidence: 0.8, sourceRecordIds: ['source-2'] },
+        ],
+        discarded: [],
+      }) as any,
+      clusterOfSize(2),
+    );
+    expect(result).toMatchObject({ status: 'completed_promoted', failureCode: 'none' });
+    expect(result.durableKnowledge.map((item) => item.claim)).toEqual(['first claim', 'third claim']);
+    expect(mockConsolidationLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ droppedPromotions: 1, droppedDiscards: 0 }),
+      'consolidation output items dropped',
+    );
+  });
+
+  // Discards are not persisted, so dropping the conflicting discard entry
+  // keeps the promotion the model made from that source.
+  it('drops a discard entry for a source that a promotion cites and keeps the promotion', async () => {
+    const result = await consolidateCluster(
+      providerReturning({
+        durableKnowledge: [
+          { claim: 'valid claim', promotionReason: 'valid reason', confidence: 0.8, sourceRecordIds: ['source-1'] },
+        ],
+        discarded: [
+          { recordId: 'source-1', reason: 'valid reason' },
+          { recordId: 'source-2', reason: 'transient observation' },
+        ],
+      }) as any,
+      clusterOfSize(2),
+    );
+    expect(result).toMatchObject({
+      status: 'completed_promoted',
+      failureCode: 'none',
+      durableKnowledge: [{ claim: 'valid claim', sourceRecordIds: ['source-1'] }],
+    });
+    expect(result.discarded).toEqual([{ recordId: 'source-2', reason: 'transient observation' }]);
+    expect(mockConsolidationLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ droppedPromotions: 0, droppedDiscards: 1 }),
+      'consolidation output items dropped',
+    );
   });
 
   it('classifies an all-discarded decision separately through its counters', async () => {

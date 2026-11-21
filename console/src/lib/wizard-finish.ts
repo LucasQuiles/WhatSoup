@@ -10,5 +10,8 @@ export function buildFinishPatch(
   const patch = { ...formData };
   delete patch.apiKey;
   delete patch.openaiKey;
+  // The wizard's default choice leaves toolUpdateMode unset (ConfigStep clears the
+  // field); an explicit pick, Minimal included, is stored as the operator chose it.
+  if (patch.toolUpdateMode === undefined) delete patch.toolUpdateMode;
   return { patch, credentials };
 }

@@ -1,5 +1,4 @@
 import { systemClock } from '../lib/clock.ts';
-import { shortHash } from '../lib/short-hash.ts';
 import {
   classifyMemoryOperationFailure,
   type MemoryEvidenceCoverage,
@@ -12,6 +11,7 @@ import type {
 } from '../runtimes/chat/providers/pinecone.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
 import { clusterMemories, consolidateCluster } from './consolidation.ts';
+import { consolidationLineage, type ConsolidationLineage } from './consolidation-lineage.ts';
 import type { ClusterExecutionOutcome } from './types.ts';
 import {
   CONSOLIDATION_RUN_SCHEMA_VERSION,
@@ -337,6 +337,35 @@ export async function runConsolidation(
         continue;
       }
 
+      // Every promotion's lineage is derived before the first write (#2569).
+      // Identity is the canonical source set, never claim wording, and a
+      // source id outside this cluster fails the cluster closed with nothing
+      // written. consolidateCluster has already validated the output; this is
+      // the write site's own guard, so a dry run reports only what a live run
+      // would actually write.
+      const clusterRecordIds = new Set(cluster.records.map((record) => record.id));
+      const promotions: Array<{
+        durable: (typeof outcome.durableKnowledge)[number];
+        lineage: ConsolidationLineage;
+      }> = [];
+      for (const durable of outcome.durableKnowledge) {
+        const lineage = consolidationLineage(group, durable.sourceRecordIds, clusterRecordIds);
+        if (lineage === null) break;
+        promotions.push({ durable, lineage });
+      }
+      if (promotions.length !== outcome.durableKnowledge.length) {
+        stage = 'validate';
+        failureStage = stage;
+        failureCode = 'output_invalid';
+        retryable = false;
+        counters.failed += 1;
+        log.warn({
+          failureCode,
+          recordCount: cluster.records.length,
+        }, 'Consolidation lineage rejected before write');
+        continue;
+      }
+
       if (options.dryRun) {
         counters.wouldPromote += outcome.durableKnowledge.length;
         counters.clustersCompleted += 1;
@@ -348,7 +377,7 @@ export async function runConsolidation(
       }
 
       let clusterWriteFailed = false;
-      for (const durable of outcome.durableKnowledge) {
+      for (const { durable, lineage } of promotions) {
         if (isCancelled()) {
           failureCode = 'cancelled';
           retryable = true;
@@ -371,7 +400,7 @@ export async function runConsolidation(
         counters.writeAttempted += 1;
         try {
           await pinecone.upsert([{
-            id: `durable:${shortHash(scopeKey(group.chatJid, group.senderJid) + `\0${durable.claim}`, 16)}`,
+            id: lineage.recordId,
             text: durable.claim,
             chatJid: group.chatJid,
             senderJid: group.senderJid,
@@ -384,10 +413,12 @@ export async function runConsolidation(
             sourceMessagePks: '',
             promotionReason: durable.promotionReason,
             claim: durable.claim,
-            evidence: durable.sourceRecordIds.join(', '),
             warrant: durable.promotionReason,
             confidenceQualifier: CONSOLIDATED_QUALIFIER,
             contradicts: '',
+            lineageId: lineage.lineageId,
+            lineagePolicyVersion: lineage.policyVersion,
+            sourceRecordIds: lineage.sourceRecordIds,
           }], {
             operation: 'memory_write',
             traceId: options.traceId,

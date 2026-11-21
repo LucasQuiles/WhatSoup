@@ -10,7 +10,9 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR,
 push to `main`, and `v*` tag, with two explicit required-context jobs:
 
 - `quality (24.x)` is the full enforcement authority. It owns all static,
-  Python, guard, coverage, console-design, and browser checks listed below.
+  Python, guard, coverage, console-design, and browser checks listed below,
+  except the test integrity baseline check: server-side, only the trusted
+  `private-test-integrity.yml` workflow runs that one (see its row).
 - `quality (25.x)` is the compatibility lane. It performs clean root and
   console installs, the complete non-coverage Vitest suite, and the console
   production build. It intentionally does not duplicate version-invariant
@@ -39,7 +41,7 @@ path, and exact savings vary with runner scheduling and step duration.
 | Work index coverage | `npm run guard:work-index` | docs/work-index.json completeness |
 | AskUser poll protocol guard | `npm run guard:agent-decision-polls` | Verifies the WhatsApp poll decision protocol remains wired across prompt guidance, MCP schema descriptions, sandbox diagnostics, docs, and release gates. |
 | Safeguard diagnostics | `npm run guard:safeguard-diagnostics` | Deterministic readout of guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers. |
-| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. The Node 24 job installs the private `LucasQuiles/test-integrity` plugin over SSH using the read-only `TEST_INTEGRITY_DEPLOY_KEY`, fetches the exact `TEST_INTEGRITY_COMMIT`, detaches at that object, and verifies `HEAD` byte-for-byte. Pin updates are reviewed repository changes; CI never pushes or publishes plugin state. |
+| **Test integrity baseline check** | `npm run guard:test-integrity` | Runs the baseline check for tautologies, weak assertions, raw sleeps, and assertion-free tests when the plugin is installed; skips missing-plugin cases only outside CI and when `WHATSOUP_REQUIRE_TEST_INTEGRITY` is not set. The local push and release gates run it (`verify:push:branch`, `verify:release`). Server-side it runs only in the trusted `.github/workflows/private-test-integrity.yml` workflow, which starts after Quality completes for a same-repository pull request, a push to `main` or a tag, and the daily `main` run; it checks out the private plugin at its pinned commit with the read-only `TEST_INTEGRITY_DEPLOY_KEY` and scans the change. Only a same-repository pull-request run creates the required `test-integrity (private)` check. A push to `main`, a tag push and the daily run write a receipt artifact and enforce the result in that workflow after Quality has completed, so for those runs a scanner finding can sit beside a green Quality result. Quality also runs for `merge_group`, which the trusted workflow skips; the merge queue is unavailable on this repository (see Branch Protection). No Quality job holds the deploy key, installs the plugin or runs this guard. `guard:safeguard-diagnostics` and `tests/scripts/quality-test-integrity-key-isolation.test.ts` refuse four literal names in any Quality job: `TEST_INTEGRITY_DEPLOY_KEY`, the private plugin repository, the plugin path `.claude/plugins/test-integrity` and `guard:test-integrity`. They match those exact strings only, so an indirect secret reference such as `toJSON(secrets)` or `secrets: inherit` is not caught. Fork pull requests get no `test-integrity (private)` check, so they stay unmergeable. Pin updates are reviewed repository changes; CI never pushes or publishes plugin state. |
 | Repo-hygiene tests | `npm test -- tests/scripts/repo-hygiene-guard.test.ts` | tests that the hygiene-guard itself works |
 | Full test suite + coverage | `npm run coverage:check -- --pool=forks` | Node 24 runs the entire Vitest suite under V8 coverage and enforces thresholds. Node 25 separately runs `npm test -- --pool=forks` without duplicating coverage. |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
@@ -64,23 +66,27 @@ The 20-minute watchdog can leave an inconclusive or missing check; a failed read
 after a remote write is an observability gap, not proof that no check was created.
 Fork and merge-queue inputs remain unsupported by this workflow.
 
-Keep the existing Quality scanner step and required checks during qualification.
+Quality no longer runs the scanner: no Quality job holds the deploy key, installs
+the private plugin or runs `guard:test-integrity`, so `test-integrity (private)` is
+the only server-side test-integrity check. Classic branch protection requires it,
+and since 2026-11-19 the ruleset does too, so admins cannot merge past it either
+(see Branch Protection).
 Quality runs full validation daily at 06:23 UTC. It compares tags and scheduled
 runs against `HEAD^` for baseline growth;
 a new tag's all-zero `before` value cannot identify a previous revision. PRs,
 merge groups and main pushes retain their event-provided base revisions.
 The guard's JSON receipt and reproduction command name the resolved commit OIDs,
 including when the input base is a relative revision such as `HEAD^`.
-Only after hosted canaries prove current-head publication, stale-head refusal,
-credential confinement, cleanup and failure handling should the private check be
-required. Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
+Qualify the tag receipt with the existing `scripts/private-integrity-release.ts`
 `select` and `verify` commands before the testing pipeline connects that consumer
 as its release gate. Quality tags run the full existing suite during this staged
 qualification; the existing tag guard workflow remains active. This is temporary
 overlap owned by the testing pipeline cutover and ends when its receipt-based tag
-gate is verified. Remove the repository-scoped scanner secret only after the trusted check
-is operational and Quality no longer consumes that secret. Local adapter tests or
-a parsed workflow contract do not establish those hosted guarantees.
+gate is verified. Quality no longer consumes the repository-scoped scanner secret.
+The remaining owner step comes after this change is on `main`: delete that
+repository-scoped `TEST_INTEGRITY_DEPLOY_KEY` secret and rotate the read-only deploy
+key kept in the `private-scanner-trusted` environment. Local adapter tests or a
+parsed workflow contract do not establish the hosted guarantees described above.
 
 Public native capture fixtures run separately from the pure adapter tests:
 `npm test -- --pool=forks tests/scripts/private-test-integrity-native.test.ts`.
@@ -593,12 +599,14 @@ Main thread should `grep` to spot-check whenever a reviewer claims a previously-
 **Ruleset "Lock"** (id `16319133`, enforcement `active`, `bypass_actors=[]` so it binds admins), scoped to `~DEFAULT_BRANCH`, four rules:
 - `deletion` — branch deletion blocked
 - `non_fast_forward` — force-pushes blocked
-- `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date)
+- `required_status_checks` — `quality (24.x)` and `quality (25.x)` must pass (strict=false; branch need not be up to date); since 2026-11-19 also `test-integrity (private)`, bound to GitHub Actions
 - `pull_request` — a PR is required, **with 0 required approvals**
 
 **Classic branch protection** (same branch) additionally requires the **`CodeQL`** check, with `strict=true` (branch must be up to date), and — since the R-02 remediation — **`required_pull_request_reviews.required_approving_review_count = 1`** with `dismiss_stale_reviews=true` (an approval does not survive later commits). Its `enforce_admins=false`, so an admin can bypass the classic surface (including CodeQL *and* the approval requirement); the ruleset still binds admins to the quality checks, the PR requirement, and the non-fast-forward/deletion blocks.
 
-**Net effect** — a non-admin contributor must pass `quality (24.x)` + `quality (25.x)` + `CodeQL`, have an up-to-date branch, **and obtain one approving review**; `CodeQL` and the approval are admin-bypassable. **`CodeQL` has no in-repo workflow** — it is GitHub *default code-scanning setup* (state=configured; languages actions/javascript/javascript-typescript/python/typescript; weekly + PR), so it is invisible to an in-repo-only search.
+**Net effect** — a non-admin contributor must pass every classic required check (the five listed in the 2026-11-19 update below), have an up-to-date branch, **and obtain one approving review**; the classic-only checks (`CodeQL`, `gitleaks`) and the approval are admin-bypassable. **`CodeQL` has no in-repo workflow** — it is GitHub *default code-scanning setup* (state=configured; languages actions/javascript/javascript-typescript/python/typescript; weekly + PR), so it is invisible to an in-repo-only search.
+
+**Update 2026-11-19.** The ruleset's `required_status_checks` rule now also requires `test-integrity (private)`, bound to the GitHub Actions app, because the Quality job no longer runs the test-integrity scan. The ruleset's other rules and its empty bypass list are unchanged, so admins cannot merge past that check either. Classic branch protection is unchanged: it requires five checks (`quality (24.x)`, `quality (25.x)`, `CodeQL`, `test-integrity (private)` and `gitleaks`) with `strict=true` and `enforce_admins=false`. A non-admin therefore needs all five checks; an admin still needs the three ruleset checks.
 
 ⚠️ **Admin self-merge remains possible — deliberately.** R-02 closed the self-merge gap for *non-admins* by setting 1 required approval on the classic surface. It does **not** bind admins: classic `enforce_admins=false`, and the ruleset's `pull_request` rule (which does bind admins) still requires **0** approvals. So a repo admin can still merge their own PR. This is an accepted residual — raising the ruleset's approval count would block every solo merge on a single-maintainer repo. To close it fully, set the approval count on ruleset `16319133` instead.
 

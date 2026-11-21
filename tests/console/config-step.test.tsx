@@ -433,6 +433,66 @@ describe('ConfigStep — real React handler wiring', () => {
     })
   })
 
+  describe('tool update verbosity', () => {
+    it('shows the default as its own choice when the form has no configured mode', () => {
+      renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+
+      const select = screen.getByLabelText('Tool update verbosity') as HTMLSelectElement
+      expect(select.value).toBe('')
+      expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'full', 'minimal'])
+      expect(select.options[select.selectedIndex]?.textContent).toMatch(/default/i)
+    })
+
+    it('describes the default and minimal choices in the helper text', () => {
+      renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+
+      const select = screen.getByLabelText('Tool update verbosity')
+      const helper = document.getElementById(select.getAttribute('aria-describedby') ?? '')
+      expect(helper?.textContent).toMatch(/default/i)
+      expect(helper?.textContent).toMatch(/minimal/i)
+    })
+
+    it('writes minimal when the operator selects it', () => {
+      const { onChange } = renderConfigStep({ initialData: { type: 'passive', name: 'watcher' } })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+      onChange.mockClear()
+
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'minimal' } })
+
+      expect(onChange).toHaveBeenCalledWith({ toolUpdateMode: 'minimal' })
+    })
+
+    it('clears the mode when the operator returns to the default', () => {
+      const { onChange } = renderConfigStep({
+        initialData: { type: 'passive', name: 'watcher', toolUpdateMode: 'full' },
+      })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+      onChange.mockClear()
+
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: '' } })
+
+      const patch = onChange.mock.calls
+        .map(([arg]) => arg as Record<string, unknown>)
+        .find((arg) => Object.hasOwn(arg, 'toolUpdateMode'))
+      // toStrictEqual keeps the explicit undefined key that clears the saved mode; toEqual would accept {}.
+      expect(patch).toStrictEqual({ toolUpdateMode: undefined })
+    })
+
+    it('writes full updates only when the operator selects them', () => {
+      const { onChange } = renderConfigStep({
+        initialData: { type: 'passive', name: 'watcher', toolUpdateMode: 'minimal' },
+      })
+      fireEvent.click(screen.getByRole('tab', { name: /limits/i }))
+      onChange.mockClear()
+
+      fireEvent.change(screen.getByLabelText('Tool update verbosity'), { target: { value: 'full' } })
+
+      expect(onChange).toHaveBeenCalledWith({ toolUpdateMode: 'full' })
+    })
+  })
+
   describe('TagInput accessibility wiring', () => {
     it('labels the allowlist contacts input and describes it with helper text', () => {
       renderConfigStep({

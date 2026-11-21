@@ -20,6 +20,7 @@ import {
   handleAuth,
 } from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
+import type { OpsAuthDeps } from '../../../src/fleet/routes/ops-auth.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { repoRoot } from '../../../src/fleet/paths.ts';
 
@@ -125,8 +126,8 @@ function fakeChildProcess({ emitCloseOnExit = true }: { emitCloseOnExit?: boolea
   return child;
 }
 
-function depsFor(overrides: Partial<OpsDeps> = {}): OpsDeps {
-  return makeDeps(overrides) as unknown as OpsDeps;
+function depsFor(overrides: Partial<OpsDeps> = {}): OpsAuthDeps {
+  return makeDeps(overrides) as unknown as OpsAuthDeps;
 }
 
 // ---------------------------------------------------------------------------
@@ -3996,8 +3997,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
   });
 
   // --- handleAuth: in-flight guard returns 409 (ops.ts:1256-1258) ---
-  // authInFlight is a module-level singleton. We trigger an in-flight auth session
-  // by awaiting one whose child never exits, then immediately call again.
+  // authInFlight lives in the deps' per-server auth registry. We trigger an in-flight
+  // auth session by awaiting one whose child never exits, then call again on the same deps.
   it('handleAuth returns 409 when an auth session is already in flight (lines 1256-1258)', async () => {
     const inst = fakeInstance({ name: 'inflight-line' });
     const child = fakeChildProcess();
@@ -4019,7 +4020,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     expect(res2._status).toBe(409);
     expect(JSON.parse(res2._body).error).toMatch(/auth already in progress/);
 
-    // Tear down the first child so the singleton is clean for later tests.
+    // Tear down the first child so its session ends cleanly.
     child.emit('exit', 0);
   });
 
@@ -4043,7 +4044,7 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
     // Complete the first session so authInFlight clears; activeAuthProcesses still holds it
     // until the close callback runs (endOnce). Emitting exit triggers endOnce, which deletes
     // the child from activeAuthProcesses AND clears authInFlight. To exercise the
-    // activeAuthProcesses kill branch in isolation, we re-add the child to the singleton
+    // activeAuthProcesses kill branch in isolation, we re-add the child to the registry
     // by spawning a fresh session while the first is still registered.
     // Trigger exit so authInFlight clears but activeAuthProcesses is cleaned by endOnce too —
     // therefore to hit line 1264 we instead register a child directly via a second call

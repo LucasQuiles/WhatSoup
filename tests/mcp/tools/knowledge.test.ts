@@ -960,6 +960,97 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
     });
   });
 
+  it('returns both documents when two documents carry the same text', async () => {
+    searchRecordsMock.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'doc-a', _score: 0.9, fields: { filepath: 'a.md', text: 'Shared paragraph' } },
+          { _id: 'doc-b', _score: 0.8, fields: { filepath: 'b.md', text: 'Shared paragraph' } },
+        ],
+      },
+    });
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'shared paragraph' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toMatchObject({
+      results_count: 2,
+      results: [
+        { id: 'doc-a', score: 0.9, entity_type: 'unknown' },
+        { id: 'doc-b', score: 0.8, entity_type: 'unknown' },
+      ],
+      formatted: '[a.md]\nShared paragraph\n\n[b.md]\nShared paragraph',
+    });
+  });
+
+  it('returns a consolidated fact once above a minimum score that only its legacy twin met', async () => {
+    searchRecordsMock
+      .mockResolvedValueOnce({
+        result: {
+          hits: [
+            { _id: 'durable:0123456789abcdef', _score: 0.9, fields: { text: 'user-a prefers green tea' } },
+            { _id: 'durable:l1:0123456789abcdef0123456789abcdef', _score: 0.7, fields: { text: 'user-a prefers green tea' } },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({ result: { hits: [] } });
+    const profile = configStub.memory.pinecone.knowledgeProfiles['index-a']! as
+      typeof configStub.memory.pinecone.knowledgeProfiles['index-a'] & { minScore?: number };
+    profile.minScore = 0.8;
+
+    try {
+      const registry = registryWithKnowledgeTool(['index-a']);
+      const result = await registry.call(
+        'knowledge_search',
+        { index: 'index-a', query: 'green tea' },
+        { tier: 'global' },
+      );
+
+      expect(parseRegistryText(result)).toMatchObject({
+        results_count: 1,
+        results: [
+          { id: 'durable:l1:0123456789abcdef0123456789abcdef', score: 0.9, entity_type: 'unknown' },
+        ],
+      });
+    } finally {
+      delete profile.minScore;
+    }
+  });
+
+  it('keeps only the source-set-id record when a legacy-id record carries the same text', async () => {
+    // One consolidated fact stored under its legacy claim-hash id and again
+    // under its source-set id. The source-set record survives with the
+    // pair's better rank and higher score.
+    searchRecordsMock.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'durable:0123456789abcdef', _score: 0.9, fields: { text: 'user-a prefers green tea' } },
+          { _id: 'rec-other', _score: 0.8, fields: { text: 'user-a lives near the coast' } },
+          { _id: 'durable:l1:0123456789abcdef0123456789abcdef', _score: 0.7, fields: { text: ' user-a  prefers green tea' } },
+        ],
+      },
+    });
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'green tea' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toMatchObject({
+      results_count: 2,
+      results: [
+        { id: 'durable:l1:0123456789abcdef0123456789abcdef', score: 0.9, entity_type: 'unknown' },
+        { id: 'rec-other', score: 0.8, entity_type: 'unknown' },
+      ],
+    });
+  });
+
   it('searches vector indexes by embedding once and querying every namespace', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

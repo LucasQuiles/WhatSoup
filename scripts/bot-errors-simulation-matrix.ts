@@ -79,7 +79,7 @@ export const BOT_ERRORS_SIMULATION_MATRIX: BotErrorsSimulationRequirement[] = [
       {
         file: 'tests/runtimes/agent/session.test.ts',
         anchors: [
-          'clears stale thread ID from DB after resume failure',
+          'keeps the stored thread id on the row after a resume failure until the fresh thread init replaces it',
           'spawn-per-turn non-zero close invokes crash handling and notifies the user',
         ],
       },

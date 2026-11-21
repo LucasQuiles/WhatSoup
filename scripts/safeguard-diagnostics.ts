@@ -446,7 +446,16 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     anchors: [],
     validate: qualityCiLanePartitionFailures,
     remediation:
-      'Restore the exact quality (24.x) authority job, quality (25.x) compatibility job, pinned Test Integrity checkout, and measured disk-budget step.',
+      'Restore the exact quality (24.x) authority job, quality (25.x) compatibility job, and measured disk-budget step; keep the test-integrity deploy key, private plugin and guard out of quality.yml.',
+  },
+  {
+    id: 'private-test-integrity-gate',
+    category: 'guard-chain',
+    file: '.github/workflows/private-test-integrity.yml',
+    anchors: [],
+    validate: privateTestIntegrityGateFailures,
+    remediation:
+      'Restore the trusted private test-integrity workflow exactly: only completed workflow_run events of Quality, the reviewed same-repository job condition, and one checkout of the private repository at the pinned commit with persist-credentials: false.',
   },
   {
     id: 'quality-ci-console-design-chain',
@@ -484,7 +493,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     anchors: [],
     validate: qualityCiPlaywrightTimeoutFailures,
     remediation:
-      'Restore the 60-minute quality job cap and 5-minute Playwright system-dependency step cap so hosted-runner stalls fail closed.',
+      'Restore the 100-minute quality job cap and 5-minute Playwright system-dependency step cap so hosted-runner stalls fail closed.',
   },
   {
     id: 'tag-release-console-design-chain',
@@ -804,6 +813,35 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
+// The private test-integrity check runs only in the trusted private-test-integrity workflow. The
+// Quality workflow runs pull-request code, so none of its jobs may hold the deploy key, fetch or
+// install the private plugin, or run the test-integrity guard.
+const TEST_INTEGRITY_PIN = 'ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c';
+const PRIVATE_TEST_INTEGRITY_REPOSITORY = 'LucasQuiles/test-integrity';
+const QUALITY_FORBIDDEN_TEST_INTEGRITY_REFERENCES = [
+  'TEST_INTEGRITY_DEPLOY_KEY',
+  PRIVATE_TEST_INTEGRITY_REPOSITORY,
+  '.claude/plugins/test-integrity',
+  'guard:test-integrity',
+];
+// Compared whole, with whitespace runs collapsed, so neither an appended `|| true` nor a negated
+// comparison passes as the same-repository gate (tests/scripts/private-test-integrity.test.ts pins
+// the same text).
+const PRIVATE_SCANNER_CONDITION = [
+  "github.repository == 'LucasQuiles/WhatSoup' &&",
+  "github.event.workflow_run.status == 'completed' &&",
+  'github.event.workflow_run.head_repository.full_name == github.repository && (',
+  "github.event.workflow_run.event == 'pull_request' ||",
+  "(github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))) ||",
+  "(github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main') )",
+].join(' ');
+
+function isExactList(value: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(value)
+    && value.length === expected.length
+    && value.every((entry, index) => entry === expected[index]);
+}
+
 function containsMappingKey(value: unknown, key: string, seen = new WeakSet<object>()): boolean {
   if (value === null || typeof value !== 'object') return false;
   if (seen.has(value)) return false;
@@ -888,11 +926,7 @@ function qualityCiSemanticShadowFailures(text: string): string[] {
   }
   const semantic = semanticSteps[0]!;
   const semanticIndex = stepRecords.indexOf(semantic);
-  const integrityIndex = stepRecords.findIndex((step) => step.name === 'Install test-integrity plugin');
   const suiteIndex = stepRecords.findIndex((step) => step.name === 'Test suite + coverage thresholds');
-  if (integrityIndex < 0 || semanticIndex > integrityIndex) {
-    failures.push('Semantic quality (shadow) must run before Install test-integrity plugin');
-  }
   if (suiteIndex < 0 || semanticIndex > suiteIndex) {
     failures.push('Semantic quality (shadow) must run before Test suite + coverage thresholds');
   }
@@ -1108,29 +1142,51 @@ function qualityCiLanePartitionFailures(text: string): string[] {
     failures.push('quality workflow must not retain masked unconditional disk cleanup');
   }
 
-  const integritySteps = authority.filter((step) => step.name === 'Install test-integrity plugin');
-  const integrity = integritySteps[0];
-  if (integritySteps.length !== 1 || !integrity) {
-    failures.push('quality (24.x) must install Test Integrity exactly once');
-  } else {
-    const env = asRecord(integrity.env);
-    const pin = env?.TEST_INTEGRITY_COMMIT;
-    if (pin !== 'ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c') {
-      failures.push('Test Integrity commit pin must match the reviewed 40-hex object');
-    }
-    const run = typeof integrity.run === 'string' ? integrity.run : '';
-    for (const required of [
-      'mkdir -p "$plugin_dir" "$HOME/.ssh"',
-      'fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"',
-      'switch --detach FETCH_HEAD',
-      'observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"',
-      'if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then',
-    ]) {
-      if (!run.includes(required)) failures.push(`Test Integrity install is missing ${required}`);
-    }
-    if (/\bgit\b[^\n]*\b(?:push|clone)\b/.test(run)) {
-      failures.push('Test Integrity install must not use floating clone or any push command');
-    }
+  // Parsed keys and values, not comments: a comment may name what it explains.
+  const workflowValues = JSON.stringify(root);
+  for (const reference of QUALITY_FORBIDDEN_TEST_INTEGRITY_REFERENCES) {
+    if (workflowValues.includes(reference)) failures.push(`quality workflow must not reference ${reference}`);
+  }
+  return failures;
+}
+
+// The trusted workflow that runs the private plugin after Quality completes. It posts the required
+// test-integrity (private) check for same-repository pull requests and records a receipt for other
+// runs: same-repository runs only, pinned scanner commit, no persisted checkout credentials.
+function privateTestIntegrityGateFailures(text: string): string[] {
+  const { root, failures: parseFailures } = parseWorkflow(text, 'private test-integrity workflow');
+  if (!root) return parseFailures;
+  const failures: string[] = [];
+  const triggers = asRecord(root.on);
+  const workflowRun = asRecord(triggers?.workflow_run);
+  if (!triggers || Object.keys(triggers).some((trigger) => trigger !== 'workflow_run')) {
+    failures.push('private test-integrity workflow must declare no trigger other than workflow_run');
+  }
+  if (!isExactList(workflowRun?.workflows, ['Quality'])) {
+    failures.push('private test-integrity workflow must start on workflow_run of Quality');
+  }
+  if (!isExactList(workflowRun?.types, ['completed'])) {
+    failures.push('private test-integrity workflow must start only on completed Quality runs');
+  }
+  if (Object.keys(workflowRun ?? {}).some((key) => key !== 'workflows' && key !== 'types')) {
+    failures.push('private test-integrity workflow_run must declare only workflows and types');
+  }
+  const scanner = asRecord(asRecord(root.jobs)?.['private-scanner']);
+  const condition = typeof scanner?.if === 'string' ? scanner.if.replace(/\s+/g, ' ').trim() : '';
+  if (condition !== PRIVATE_SCANNER_CONDITION) {
+    failures.push('private-scanner must run only for same-repository Quality runs');
+  }
+  const checkouts = (Array.isArray(scanner?.steps) ? scanner.steps.map(asRecord) : [])
+    .filter((step) => typeof step?.uses === 'string' && step.uses.startsWith('actions/checkout@'));
+  const checkout = asRecord(checkouts[0]?.with);
+  if (checkout?.repository !== PRIVATE_TEST_INTEGRITY_REPOSITORY) {
+    failures.push('private-scanner must check out the private test-integrity repository');
+  }
+  if (checkouts.length !== 1 || checkout?.ref !== TEST_INTEGRITY_PIN) {
+    failures.push('Test Integrity commit pin must match the reviewed 40-hex object');
+  }
+  if (checkout?.['persist-credentials'] !== false) {
+    failures.push('private-scanner checkout must set persist-credentials: false');
   }
   return failures;
 }
@@ -1145,8 +1201,8 @@ function qualityCiPlaywrightTimeoutFailures(text: string): string[] {
   const failures: string[] = [];
   if (hasOwn(root, 'defaults')) failures.push('quality workflow must not declare defaults');
   if (hasOwn(root, 'env')) failures.push('quality workflow must not declare env');
-  if (quality['timeout-minutes'] !== 60) {
-    failures.push('quality job timeout must be exactly 60 minutes');
+  if (quality['timeout-minutes'] !== 100) {
+    failures.push('quality job timeout must be exactly 100 minutes');
   }
   if (hasOwn(quality, 'continue-on-error') && quality['continue-on-error'] !== false) {
     failures.push('quality job continue-on-error must be absent or false');

@@ -135,7 +135,6 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
     rateLimitPerHour: 60,
     maxTokens: 4096,
     tokenBudget: 50000,
-    toolUpdateMode: 'full',
   })
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [creating, setCreating] = useState(false)
@@ -171,7 +170,6 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
         rateLimitPerHour: 60,
         maxTokens: 4096,
         tokenBudget: 50000,
-        toolUpdateMode: 'full',
       })
       setErrors({})
       setCreating(false)

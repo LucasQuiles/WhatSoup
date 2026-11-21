@@ -1412,7 +1412,7 @@ describe('noise suppression via handleGetFeed', () => {
     ]);
   });
 
-  it('dedupes repeated non-message events within the same minute', () => {
+  it('dedupes exact duplicate non-message events (same time, instance, and text)', () => {
     const lines = [
       makeLine({ msg: 'session start', sessionId: 'same' }),
       makeLine({ msg: 'session start', sessionId: 'same' }),
@@ -1435,6 +1435,62 @@ describe('noise suppression via handleGetFeed', () => {
       text: 'xi: session start',
       detail: { type: 'session', sessionId: 'same' },
     });
+  });
+
+  // #2525 acceptance 1: equal text in the same minute is not the same occurrence.
+  it('keeps two equal-text non-message events 39 seconds apart in the same minute', () => {
+    const first = 1700000000000; // 22:13:20Z
+    const second = first + 39_000; // 22:13:59Z, same minute
+    const lines = [
+      makeLine({ msg: 'session start', sessionId: 'same', time: first }),
+      makeLine({ msg: 'session start', sessionId: 'same', time: second }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'xi', type: 'agent', logDir });
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => new Map([['xi', inst]])) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
+
+    const sessionEvents = (JSON.parse(res._body) as any[]).filter((event) => event.detail?.type === 'session');
+    expect(sessionEvents.map((event) => event.time)).toEqual([
+      new Date(second).toISOString(),
+      new Date(first).toISOString(),
+    ]);
+    expect(sessionEvents.every((event) => event.text === 'xi: session start')).toBe(true);
+  });
+
+  it('keeps equal-time events with identical text from two instances apart', () => {
+    // Feed text starts with the instance name, so only a name that runs into
+    // the other line's message gives two instances the same text: 'xi' logging
+    // 'yo: session start' and 'xi: yo' logging 'session start' both render
+    // 'xi: yo: session start'. Same time, no component: only the instance in
+    // the dedupe key keeps them apart.
+    const otherLogDir = path.join(tmpDir, 'logs-other');
+    fs.mkdirSync(otherLogDir, { recursive: true });
+    const time = 1700000000000;
+    fs.writeFileSync(logFile, makeLine({ msg: 'yo: session start', sessionId: 'same', time }) + '\n');
+    fs.writeFileSync(path.join(otherLogDir, 'app.log'), makeLine({ msg: 'session start', sessionId: 'same', time }) + '\n');
+
+    const instances = new Map([
+      ['xi', fakeInstance({ name: 'xi', type: 'agent', logDir })],
+      ['xi: yo', fakeInstance({ name: 'xi: yo', type: 'agent', logDir: otherLogDir })],
+    ]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq({ url: '/api/feed?limit=10' }), res, deps);
+
+    const sessionEvents = (JSON.parse(res._body) as any[]).filter((event) => event.detail?.type === 'session');
+    expect(sessionEvents.map((event) => event.text)).toEqual(['xi: yo: session start', 'xi: yo: session start']);
+    expect(sessionEvents.map((event) => event.instance).sort()).toEqual(['xi', 'xi: yo']);
   });
 
   it('preserves equal-time distinct events through final sorting', () => {

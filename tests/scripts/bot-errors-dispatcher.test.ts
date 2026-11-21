@@ -2629,7 +2629,9 @@ describe('Queue-entry leaf-trust (#2484)', () => {
 // guard is removed (the inline Python prints NO_RAISE instead of RAISED).
 describe('#3054 post-adoption cycle-presence guard', () => {
   it('raises IncidentCycleRequiredError when a guarded helper is called post-adoption without the cycle', () => {
-    const root = mkdtempSync(join(tmpdir(), 'ws3054-guard-'));
+    // Held in tmpRoot so the file's afterEach removes it.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'ws3054-guard-'));
+    const root = tmpRoot;
     // Adopt the state dir via the session save path (creates .initialized).
     seedOpenIncident(root, 'HOST-A|Loops|llm_total_failure');
     const marker = join(root, 'incident-state.json.initialized');
@@ -2668,7 +2670,8 @@ describe('#3054 post-adoption cycle-presence guard', () => {
   it('stays inert pre-adoption (bare legacy/compat path) and when the cycle is provided', () => {
     // Pre-adoption (no .initialized): collapse_ready_storms(paths) with
     // incident=None is the legitimate legacy path — must NOT raise.
-    const bareRoot = mkdtempSync(join(tmpdir(), 'ws3054-bare-'));
+    tmpRoot = mkdtempSync(join(tmpdir(), 'ws3054-bare-'));
+    const bareRoot = tmpRoot;
     mkdirSync(join(bareRoot, 'outbox'), { recursive: true, mode: 0o700 });
     mkdirSync(join(bareRoot, 'quarantine'), { recursive: true, mode: 0o700 });
     expect(existsSync(join(bareRoot, 'incident-state.json.initialized'))).toBe(false);

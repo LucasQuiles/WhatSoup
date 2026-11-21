@@ -17,7 +17,10 @@
 //
 // Repo-hygiene reserved IDs only.
 
-import { describe, it, expect, beforeEach, afterEach, vi, onTestFinished } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi, onTestFinished } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -227,11 +230,11 @@ const { mockConfig } = vi.hoisted(() => ({
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 2_000,
-    stateRoot: '/tmp/whatsoup-test-state-secondhalf',
+    stateRoot: '', // set to a per-run folder in beforeAll
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    mediaDir: '/tmp/whatsoup-test-media-runtime-secondhalf-branches/tmp',
+    mediaDir: '', // set to a per-run folder in beforeAll
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
     elevenlabs: { defaultVoiceId: 'v', defaultModel: 'm', stability: 0.5, similarityBoost: 0.75 },
@@ -462,6 +465,18 @@ function currentCrashIdentity(runtime: AgentRuntime, mapKey: string): {
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
+
+// One folder per run: a fixed /tmp state root is shared with earlier and
+// parallel runs, and one made by another user is unreadable.
+let runRoot = '';
+beforeAll(() => {
+  runRoot = mkdtempSync(join(tmpdir(), 'ws-half-'));
+  mockConfig.stateRoot = join(runRoot, 'state');
+  mockConfig.mediaDir = join(runRoot, 'media', 'tmp');
+});
+afterAll(() => {
+  rmSync(runRoot, { recursive: true, force: true });
+});
 
 describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', () => {
   beforeEach(() => {

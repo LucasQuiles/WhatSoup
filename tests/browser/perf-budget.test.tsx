@@ -17,7 +17,7 @@
  * browser module mocker runs factories inside the page).
  */
 
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
 import { page } from 'vitest/browser';
 import React, { Profiler } from 'react';
@@ -28,7 +28,7 @@ import type { ToastContextValue } from '../../console/src/hooks/toast-context';
 import type { LineInstance } from '../../console/src/types';
 import '../../console/src/index.css';
 
-const ENFORCE = false; // flip with PERF_LANE_ENFORCE once §1 numbers are owner-approved
+const ENFORCE = import.meta.env.PERF_LANE_ENFORCE === '1';
 
 function makeLine(i: number): LineInstance {
   return {
@@ -83,7 +83,11 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
 vi.mock('../../console/src/hooks/use-metrics', () => ({
   useFleetMetrics: vi.fn(() => ({ data: null, isLoading: false, refetch: vi.fn() })),
   useMetrics: vi.fn(() => ({ data: null, isLoading: false, refetch: vi.fn() })),
-  getMetricsQueryOptions: vi.fn(),
+  getMetricsQueryOptions: vi.fn((name: string, range: string) => ({
+    queryKey: ['metrics', name, range],
+    queryFn: async () => null,
+    enabled: false,
+  })),
   getFleetMetricsQueryOptions: vi.fn(),
 }));
 
@@ -117,6 +121,20 @@ function makeQC() {
 }
 
 describe('Perf budget legs (b-12 deferred, provisional §1 numbers)', () => {
+  beforeEach(() => {
+    linesMock.mockReturnValue({ data: LINES_200 });
+    vi.spyOn(console, 'error');
+  });
+
+  afterEach(() => {
+    try {
+      cleanup();
+      expect(console.error).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   beforeAll(async () => {
     await page.viewport(1440, 900);
   });
@@ -150,7 +168,7 @@ describe('Perf budget legs (b-12 deferred, provisional §1 numbers)', () => {
     if (ENFORCE) expect(mountMs).toBeLessThan(50);
   });
 
-  it('event storm: 10 rapid single-line updates stay under the frame budget', async () => {
+  it('event storm measures 10 rapid single-line updates', async () => {
     const frameCosts: number[] = [];
     const onRender = (
       _id: string,
@@ -193,6 +211,5 @@ describe('Perf budget legs (b-12 deferred, provisional §1 numbers)', () => {
     console.log(`[perf-budget] storm worst frame cost: ${worst.toFixed(1)}ms over ${frameCosts.length} update renders (provisional budget <16ms)`);
     expect(frameCosts.length).toBeGreaterThan(0);
     if (ENFORCE) expect(worst).toBeLessThan(16);
-    cleanup();
   });
 });
