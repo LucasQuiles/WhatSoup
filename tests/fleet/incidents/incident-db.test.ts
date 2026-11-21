@@ -1,15 +1,19 @@
+import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -213,16 +217,75 @@ describe('openIncidentDb', () => {
     expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
   });
 
-  it('keeps a valid existing copy instead of replacing it', () => {
+  // An older copy lacks the rows written since; restoring it would lose them.
+  it('fails closed on a valid existing copy whose content differs and leaves it untouched', () => {
     const previous = writePreviousVersionDatabase();
     const copyPath = `${dbPath()}.schema-v${previous}.bak`;
     const raw = new DatabaseSync(dbPath());
     raw.prepare('VACUUM INTO ?').run(copyPath);
     raw.prepare(`UPDATE meta SET value = 'changed' WHERE key = 'canary'`).run();
     raw.close();
+    const bytes = readFileSync(copyPath);
+    const inode = lstatSync(copyPath).ino;
+
+    expect(() => openIncidentDb(dbPath())).toThrow(/schema-v\d+\.bak.*move it aside/);
+    expect(readFileSync(copyPath).equals(bytes)).toBe(true);
+    expect(lstatSync(copyPath).ino).toBe(inode);
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
+  });
+
+  it('keeps an existing copy equal in content and migrates', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    const raw = new DatabaseSync(dbPath());
+    raw.prepare('VACUUM INTO ?').run(copyPath);
+    raw.close();
+    const bytes = readFileSync(copyPath);
+    const inode = lstatSync(copyPath).ino;
 
     openIncidentDb(dbPath()).close();
-    expect(readMeta(copyPath, 'canary')).toBe('kept');
+    expect(readFileSync(copyPath).equals(bytes)).toBe(true);
+    expect(lstatSync(copyPath).ino).toBe(inode);
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(INCIDENT_SCHEMA_VERSION));
+  });
+
+  // A hard link is the live file itself: the migration would advance it too.
+  it('fails closed on an existing entry that is a hard link to the live database', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    linkSync(dbPath(), copyPath);
+
+    expect(() => openIncidentDb(dbPath())).toThrow(/schema-v\d+\.bak.*move it aside/);
+    expect(lstatSync(copyPath).ino).toBe(lstatSync(dbPath()).ino);
+    expect(readMeta(dbPath(), 'schema_version')).toBe(String(previous));
+  });
+
+  it('removes leftover temporary copies of a process that is gone and keeps the rest', () => {
+    const previous = writePreviousVersionDatabase();
+    const copyPath = `${dbPath()}.schema-v${previous}.bak`;
+    // A child that has exited and been reaped: its pid names no live process.
+    const gonePid = spawnSync(process.execPath, ['-e', '']).pid;
+    expect(gonePid).toBeGreaterThan(0);
+    const gone = `${copyPath}.tmp-${gonePid}-${randomUUID()}`;
+    const own = `${copyPath}.tmp-${process.pid}-${randomUUID()}`;
+    const otherShape = `${copyPath}.tmp-${gonePid}-not-a-uuid`;
+    const linked = `${copyPath}.tmp-${gonePid}-${randomUUID()}`;
+    const target = join(dir, 'link-target');
+    writeFileSync(gone, 'leftover');
+    writeFileSync(`${gone}-journal`, 'leftover journal');
+    writeFileSync(own, 'in progress');
+    writeFileSync(otherShape, 'not a leftover');
+    writeFileSync(target, 'kept');
+    symlinkSync(target, linked);
+
+    openIncidentDb(dbPath()).close();
+    const names = readdirSync(join(dir, 'fleet'));
+    expect(names).not.toContain(basename(gone));
+    expect(names).not.toContain(`${basename(gone)}-journal`);
+    expect(names).toContain(basename(own));
+    expect(names).toContain(basename(otherShape));
+    expect(names).toContain(basename(linked));
+    expect(readFileSync(target, 'utf8')).toBe('kept');
     expect(readMeta(dbPath(), 'schema_version')).toBe(String(INCIDENT_SCHEMA_VERSION));
   });
 

@@ -1,8 +1,21 @@
-import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, linkSync, lstatSync, rmSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { forceEnsurePrivateDirectorySync } from '../../lib/private-fs.ts';
+import { forceEnsurePrivateDirectorySync, fsyncDirectoryRequired } from '../../lib/private-fs.ts';
+import { defaultIsProcessAlive } from '../../lib/process-lock.ts';
 import { SQLITE_BUSY_TIMEOUT_PRAGMA } from '../../lib/sqlite-constants.ts';
 import { xdgDir } from '../paths.ts';
 import { INCIDENT_SCHEMA_VERSION, MIGRATIONS } from './schema.ts';
@@ -85,6 +98,100 @@ function isValidPreMigrationCopy(copyPath: string, version: number): boolean {
   }
 }
 
+// The digest covers every sqlite_master entry (type, name, table and SQL, not
+// the page numbers a copy renumbers) and every row of every table it lists,
+// sqlite_sequence included. Each value is SQLite's own quote() text and rows
+// are sorted by that text, so the digest depends on content alone, never on
+// row order or page layout. Indexes are covered through their definitions.
+function contentDigest(db: DatabaseSync): string {
+  const hash = createHash('sha256');
+  const entries = db
+    .prepare('SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name')
+    .all() as Array<{ type: string; name: string; tbl_name: string; sql: string | null }>;
+  const quoteName = (name: string) => `"${name.replaceAll('"', '""')}"`;
+  for (const entry of entries) {
+    hash.update(`${JSON.stringify([entry.type, entry.name, entry.tbl_name, entry.sql])}\n`);
+    if (entry.type !== 'table') continue;
+    const columns = db.prepare('SELECT name FROM pragma_table_info(?)').all(entry.name) as Array<{ name: string }>;
+    const values = columns.map((column) => `quote(${quoteName(column.name)})`).join(', ');
+    const order = columns.map((_column, index) => String(index + 1)).join(', ');
+    for (const row of db.prepare(`SELECT ${values} FROM ${quoteName(entry.name)} ORDER BY ${order}`).iterate()) {
+      hash.update(`${JSON.stringify(Object.values(row as Record<string, unknown>))}\n`);
+    }
+  }
+  return hash.digest('hex');
+}
+
+// An existing entry may predate rows written since it was made (an earlier
+// release ran on a restored database, say), so it is kept only when it is a
+// single-link regular file that is not the live database and holds exactly
+// the live content now.
+function isCurrentPreMigrationCopy(
+  db: DatabaseSync,
+  dbPath: string,
+  copyPath: string,
+  version: number,
+): boolean {
+  try {
+    const entry = lstatSync(copyPath);
+    const live = statSync(dbPath);
+    if (!entry.isFile() || entry.nlink !== 1) return false;
+    if (entry.dev === live.dev && entry.ino === live.ino) return false;
+  } catch {
+    // intentional: an entry that cannot be examined is not a usable copy, and the caller fails closed
+    return false;
+  }
+  if (!isValidPreMigrationCopy(copyPath, version)) return false;
+  let copy: DatabaseSync | undefined;
+  try {
+    copy = new DatabaseSync(copyPath, { readOnly: true });
+    return contentDigest(copy) === contentDigest(db);
+  } catch {
+    // intentional: a copy that cannot be read in full is not a usable copy, and the caller fails closed
+    return false;
+  } finally {
+    copy?.close();
+  }
+}
+
+// A crash between the copy and its link leaves `<copy>.tmp-<pid>-<uuid>`, and
+// maybe its `-journal`. Remove the regular files of exactly that shape whose
+// process is gone; a running process may still be writing its own.
+const LEFTOVER_COPY_SUFFIX =
+  /^\.tmp-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-journal)?$/;
+
+function removeLeftoverCopies(copyPath: string): void {
+  const directory = dirname(copyPath);
+  const prefix = basename(copyPath);
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch {
+    // intentional: an unreadable directory leaves nothing to remove; the open goes on
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const match = name.slice(prefix.length).match(LEFTOVER_COPY_SUFFIX);
+    if (!match || defaultIsProcessAlive(Number(match[1]))) continue;
+    const path = join(directory, name);
+    try {
+      if (lstatSync(path).isFile()) unlinkSync(path);
+    } catch {
+      // intentional: a leftover that cannot be removed now is tried again on the next open
+    }
+  }
+}
+
+function flushFile(path: string): void {
+  const fd = openSync(path, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // A WAL-mode source can yield a WAL-mode copy; settle it into one
 // self-contained file so the read-only check and a later restore need no
 // sidecar files (same approach as scripts/lib/sqlite-consistent-backup.ts).
@@ -99,10 +206,12 @@ function settleCopy(path: string): void {
 
 // An earlier release refuses a database above its own schema version, so a
 // migration first leaves a copy that release can open. The copy is written
-// under a temporary name, verified, and then linked into place, which never
-// replaces anything already at the destination. An existing destination is
-// kept only if it passes the same verification; otherwise the open fails
-// closed and names the file to inspect.
+// under a temporary name, verified, flushed and then linked into place, which
+// never replaces anything already at the destination; the directory is
+// flushed before the migration, so a migration that survives a power loss
+// leaves its copy too. An existing destination is kept only if it is a
+// current copy (isCurrentPreMigrationCopy); otherwise the open fails closed
+// and names the file to move aside, and the entry is never changed.
 function keepPreMigrationCopy(
   db: DatabaseSync,
   dbPath: string,
@@ -111,10 +220,11 @@ function keepPreMigrationCopy(
 ): void {
   if (fromVersion >= INCIDENT_SCHEMA_VERSION) return;
   const copyPath = `${dbPath}.schema-v${fromVersion}.bak`;
+  removeLeftoverCopies(copyPath);
   if (pathEntryExists(copyPath)) {
-    if (isValidPreMigrationCopy(copyPath, fromVersion)) return;
+    if (isCurrentPreMigrationCopy(db, dbPath, copyPath, fromVersion)) return;
     throw new IncidentStoreCorruptError(
-      `pre-migration copy ${copyPath} is not a valid schema v${fromVersion} database; inspect or move it`,
+      `pre-migration copy ${copyPath} is not a current copy of this schema v${fromVersion} database; move it aside`,
     );
   }
   const tmpPath = `${copyPath}.tmp-${process.pid}-${randomUUID()}`;
@@ -126,7 +236,12 @@ function keepPreMigrationCopy(
     if (!isValidPreMigrationCopy(tmpPath, fromVersion)) {
       throw new Error('pre-migration copy failed verification');
     }
+    flushFile(tmpPath);
     linkSync(tmpPath, copyPath);
+    // Drop the temporary name before the directory flush, so the flush makes
+    // that removal durable too and the copy keeps one link.
+    rmSync(tmpPath, { force: true });
+    fsyncDirectoryRequired(dirname(copyPath));
   } catch {
     throw new IncidentStoreCorruptError(`pre-migration copy failed: ${copyPath}`);
   } finally {
