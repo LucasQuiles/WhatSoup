@@ -135,7 +135,10 @@ the Q loop, `lib/owner_route.py`, `install-bot-errors-launchd.sh`, and every
 `.service` and `.plist` file under `src/` and `deploy/`. It rejects the
 test-only dry seams in the `.service` and `.plist` files and in the installer.
 For the producer credentials it rejects the shared setting name
-`BOT_ERRORS_INCIDENT_AUTHORITY_CREDENTIAL_FILE` in any file it reads, and it
+`BOT_ERRORS_INCIDENT_AUTHORITY_CREDENTIAL_FILE` in the operational files it
+reads (the Python, shell, `.service` and `.plist` files above); the
+TypeScript files in its inventory are not scanned for that name or any other
+rule here, and `src/fleet/index.ts` is read only to count the phase route. It
 requires `BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE` on exactly one line
 of the dispatcher and `BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE` on exactly
 one line of the Q loop. It checks setting names only: it does not check that
@@ -394,10 +397,13 @@ schema version), flushed to disk and only then linked into place; the folder
 is flushed before the migration runs, and a failed flush stops the open with
 the database not migrated. An entry already at that name is kept only when it
 is a regular file with one link, is not the live database file, passes the
-same check and holds exactly the live database's content (a digest over the
-schema and every row of every table of both). Otherwise the open fails, names
-the file and says to move it aside; the entry itself is never replaced,
-renamed or removed. Each open of a database not yet migrated also removes the
+same check and holds exactly the live database's content: a digest over the
+schema entries and every row of every table, each value as its storage class
+and its exact bytes, each database read in one read transaction. The kept
+entry and the folder are then flushed again before the migration, and a
+failed flush stops the open with the database not migrated. Otherwise the open
+fails, names the file and says to move it aside; the entry itself is never
+replaced, renamed or removed. Each open of a database not yet migrated also removes the
 temporary copies (`incidents.db.schema-v<N>.bak.tmp-<pid>-<id>` and their
 `-journal` files) whose process is no longer running.
 
@@ -409,8 +415,13 @@ meantime. Signals, phase facts and admission counters recorded after the
 migration are not in the copy; keep the moved-aside database for
 investigation.
 
-A database that this release created (there was no file, or an empty one) is
-at schema version 3 from the start and has no copy. To roll that host back,
+A database that this release created (there was no file, or an empty one)
+gets no copy: its first open applies the migrations from the start, each in
+its own transaction, and reaches schema version 3. If that first open is
+interrupted after an earlier migration committed, the file is left at a lower
+version, and the next open treats it as an existing database: it writes a
+copy at that version (`incidents.db.schema-v1.bak` or `-v2.bak`) and then
+migrates. To roll back a database that reached version 3 with no copy,
 stop the fleet server and move `incidents.db` and its `-wal` and `-shm` files
 aside; the earlier release then starts with an empty incident store. That
 release has none of the stored data: no signal, incident or transition, no
@@ -420,8 +431,10 @@ moved-aside database.
 
 A power loss before the migration leaves the database at its old version,
 with at most a temporary file and the copy. The next open removes the
-temporary file once its process id names no running process, then keeps the
-copy if it matches or writes it again. If that id names a running process
+temporary file once its process id names no running process. It then writes
+the copy again only if none is at the copy name; a copy already there is kept
+and flushed again if it matches, and otherwise the open fails closed and names
+it, to be moved aside. If that id names a running process
 again after the restart, the temporary file stays; if the copy was already
 linked, it then has two links and the open fails closed until that process
 has ended. On macOS a flush (`fsync`) does not empty the drive's own write
