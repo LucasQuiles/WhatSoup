@@ -3806,14 +3806,15 @@ That remainder is a planning allowance, not a measured or enforced timeout, so t
 is arithmetic over an estimate, not measured headroom. Individual failure
 bounds remain enforced; an exhausted download bound fails the job.
 
-Once the receipt step has verified the build, the job uploads these files as
+On a push to `main`, once the receipt step has verified the build, the job uploads these files as
 `container-build-evidence-${{ github.sha }}` with a 14-day retention period, even if a later step
-fails. A run whose revision or receipt check failed uploads nothing.
-Retrieve the artifact from the corresponding Quality workflow run before it expires
+fails. A run whose revision or receipt check failed uploads nothing. Pull requests, merge groups,
+tags and scheduled runs build and verify the image but upload no archive, because it contains `src/`.
+Retrieve the artifact from the Quality run of the `main` push for that commit before it expires
 when release verification or an investigation requires the original evidence.
 The workflow artifact is not a durable evidence archive.
 
-Pull requests produce unsigned evidence only. After a trusted `main` build succeeds, the
+Only `main` pushes are attested. After a trusted `main` build succeeds, the
 attestation job rechecks that evidence, exports the verified runnable-manifest digest, and signs
 provenance and SBOM attestations with that digest as the subject. It never attests the OCI tar
 archive as though it were the container image. A local Docker or compatible container engine is

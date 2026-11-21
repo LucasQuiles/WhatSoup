@@ -273,8 +273,9 @@ jobs:
 
       # Upload only what the receipt verified for this commit; a failed revision
       # or receipt check must not publish an archive under github.sha.
+      # The archive contains src/; only the main-push attestation job downloads it.
       - name: Upload container build evidence
-        if: ${{ always() && steps.verify-container-receipt.outcome == 'success' }}
+        if: ${{ always() && steps.verify-container-receipt.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: container-build-evidence-${{ github.sha }}
