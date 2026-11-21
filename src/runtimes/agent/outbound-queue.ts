@@ -333,7 +333,7 @@ export interface IOutboundQueue {
   beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void;
   /** Flush all sends and consume an immutable durability evidence snapshot for the turn. */
   flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence>;
-  /** Mark the last outbound op created by this queue as terminal. */
+  /** Mark the last outbound op created by this queue as terminal (defense-in-depth echo fallback). */
   markLastTerminal(options?: { dedupeText?: boolean; skipDurabilityMark?: boolean }): void;
   /** Propagate durability engine after late initialization. */
   setDurability(engine: DurabilityEngine): void;
@@ -494,7 +494,6 @@ export class OutboundQueue implements IOutboundQueue {
     return this.senderToken;
   }
 
-  /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
   setToolUpdateMode(mode: 'full' | 'minimal' | 'friendly' | 'unset'): void {
     this.toolUpdateMode = mode;
   }
@@ -632,7 +631,6 @@ export class OutboundQueue implements IOutboundQueue {
       && left.sourceInboundSeq === right.sourceInboundSeq;
   }
 
-  /** Return the id of the most recently created outbound op, or undefined if none. */
   getLastOpId(): number | undefined {
     return this.lastOpId;
   }
@@ -641,7 +639,6 @@ export class OutboundQueue implements IOutboundQueue {
     this.lastOpId = undefined;
   }
 
-  /** Mark the last outbound op created by this queue as terminal (defense-in-depth echo fallback). */
   markLastTerminal(options: { dedupeText?: boolean; skipDurabilityMark?: boolean } = {}): void {
     if (this.lastOpId !== undefined && this.durability && options.skipDurabilityMark !== true) {
       this.durability.markTerminal(this.lastOpId);
@@ -1078,8 +1075,7 @@ export class OutboundQueue implements IOutboundQueue {
    * 3-second idle gap between tool calls, or after 30 seconds maximum —
    * whichever comes first. This prevents silent gaps during long tool chains.
    *
-   * Minimal mode suppresses updates. An unset mode batches them as full mode does, so the
-   * batch flush keeps its effects on assistant text, but sends them only to a configured redirect.
+   * Minimal mode suppresses updates; an unset mode batches as full but sends only to a configured redirect.
    * The typing indicator remains active while work is in progress.
    */
   enqueueToolUpdate(update: ToolUpdate): void {
@@ -1249,8 +1245,7 @@ export class OutboundQueue implements IOutboundQueue {
     // PR-E: hard per-turn status-narration cap. The floor + text window above
     // already decided this placeholder WOULD emit; enforce the per-turn count
     // now so a single turn can't flood the chat with narration. Past the cap,
-    // keep the liveness signal and drop the placeholder — content is never gated.
-    // No mode set: every step runs as in full mode; only the send and the cap notice are withheld (#3830).
+    // keep the liveness signal and drop the placeholder — content is never gated. Unset: send and cap notice withheld (#3830).
     const withholdStatus = this.toolUpdateMode === 'unset';
     if (this.statusBudgetExhausted(attribution, !withholdStatus)) {
       return;
@@ -1294,7 +1289,6 @@ export class OutboundQueue implements IOutboundQueue {
     }
   }
 
-  /** Start the composing indicator immediately without queuing any content. */
   indicateTyping(): void {
     if (this.rejectPostClosureEnqueue()) return;
     this.startTyping();
@@ -1510,7 +1504,6 @@ export class OutboundQueue implements IOutboundQueue {
     return this.sendFailureCount;
   }
 
-  /** Retarget subsequent sends without changing durable conversation attribution. */
   updateDeliveryJid(jid: string): void {
     this.deliveryJid = jid;
   }
@@ -1854,8 +1847,7 @@ export class OutboundQueue implements IOutboundQueue {
         }));
         continue;
       }
-      // An unset mode keeps the batch's budget, text flush and visible-output effects (the
-      // full-mode path) and withholds only the tool status message, cap notice included (#3830).
+      // Unset mode keeps the full-mode budget and text flush; only the status and cap notice are withheld (#3830).
       const withholdStatus = this.toolUpdateMode === 'unset';
       if (this.statusBudgetExhausted(batch.attribution, !withholdStatus)) continue;
       this.flushStreamBuffer();
