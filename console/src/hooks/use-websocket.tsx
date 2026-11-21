@@ -45,6 +45,7 @@ export function useRealtime(): RealtimeState {
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
+const HELLO_TIMEOUT_MS = 10_000;
 
 export function RealtimeProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -52,6 +53,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectDelay = useRef(RECONNECT_BASE_MS);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const helloTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Last verified stream position (#2519). Survives reconnects so the next
   // hello can prove whether anything was missed while the socket was down.
   const streamCursor = useRef<StreamCursor>({ generation: null, sequence: null, durableSequence: null });
@@ -61,7 +63,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     async function connect() {
       // Ticket minting needs the production session flow (fleet-auth-mode
       // meta); in dev there is nothing to mint against, so bail out early.
-      if (!isProductionConsole()) return;
+      if (cancelled || !isProductionConsole()) return;
       const url = await getFleetWebSocketUrl(window.location, () => api.getWsTicket());
       if (cancelled) return;
       if (!url) {
@@ -75,10 +77,29 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
-      ws.onopen = () => {
-        setConnected(true);
-        reconnectDelay.current = RECONNECT_BASE_MS;
+      const isCurrent = () => !cancelled && wsRef.current === ws;
+      const disconnect = () => {
+        if (!isCurrent()) return;
+        if (helloTimer.current) clearTimeout(helloTimer.current);
+        helloTimer.current = null;
+        setConnected(false);
+        wsRef.current = null;
+
+        queryClient.invalidateQueries({ queryKey: ['lines'] });
+        queryClient.invalidateQueries({ queryKey: ['feed'] });
+        queryClient.invalidateQueries({ queryKey: ['typing'] });
+
+        const delay = reconnectDelay.current;
+        reconnectDelay.current = Math.min(delay * 2, RECONNECT_MAX_MS);
+        reconnectTimer.current = setTimeout(connect, delay);
       };
+
+      // An open transport cannot replace polling until the server proves readiness.
+      helloTimer.current = setTimeout(() => {
+        if (!isCurrent()) return;
+        disconnect();
+        ws.close();
+      }, HELLO_TIMEOUT_MS);
 
       const reconcileRealtimeCaches = () => {
         // A detected gap means displayed data cannot be assumed current:
@@ -102,6 +123,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       };
 
       ws.onmessage = (msg) => {
+        if (!isCurrent()) return;
         const event: WsEvent | null = parseWsEvent(msg.data);
         if (!event) return;
         wsMeter.record('instance' in event && typeof event.instance === 'string' ? event.instance : 'fleet');
@@ -117,6 +139,10 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
             sequence: typeof event.sequence === 'number' ? event.sequence : null,
             durableSequence: typeof event.durableSequence === 'number' ? event.durableSequence : null,
           };
+          if (helloTimer.current) clearTimeout(helloTimer.current);
+          helloTimer.current = null;
+          reconnectDelay.current = RECONNECT_BASE_MS;
+          setConnected(true);
           return;
         }
 
@@ -143,22 +169,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         }
       };
 
-      ws.onclose = () => {
-        setConnected(false);
-        wsRef.current = null;
-
-        // Invalidate stale caches on disconnect
-        queryClient.invalidateQueries({ queryKey: ['lines'] });
-        queryClient.invalidateQueries({ queryKey: ['feed'] });
-        queryClient.invalidateQueries({ queryKey: ['typing'] });
-
-        // Reconnect with exponential backoff
-        const delay = reconnectDelay.current;
-        reconnectDelay.current = Math.min(delay * 2, RECONNECT_MAX_MS);
-        reconnectTimer.current = setTimeout(connect, delay);
-      };
+      ws.onclose = disconnect;
 
       ws.onerror = () => {
+        if (!isCurrent()) return;
+        disconnect();
         ws.close();
       };
     }
@@ -168,9 +183,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (helloTimer.current) clearTimeout(helloTimer.current);
       if (wsRef.current) {
         wsRef.current.onclose = null; // prevent reconnect on cleanup
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
   }, [queryClient]);

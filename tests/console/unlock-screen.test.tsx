@@ -57,6 +57,67 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('UnlockScreen — render', () => {
+  it('distinguishes an unavailable session check and offers a retry', () => {
+    const retry = vi.fn();
+    render(<UnlockScreen onUnlocked={() => {}} notice="session_unavailable" onRetry={retry} />);
+    expect(screen.getByRole('alert').textContent).toContain('Session status could not be checked');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry session check' }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it('makes uncertain revocation visible with an explicit retry', () => {
+    const retry = vi.fn();
+    render(<UnlockScreen onUnlocked={() => {}} notice="revocation_unconfirmed" onRetry={retry} />);
+    expect(screen.getByRole('alert').textContent).toContain('Server session revocation could not be confirmed');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry lock' }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it('offers browser-storage recovery without claiming that server revocation failed', () => {
+    const retry = vi.fn();
+    render(<UnlockScreen onUnlocked={() => {}} notice="lock_storage_unavailable" onRetry={retry} />);
+    expect(screen.getByRole('alert').textContent).toContain('could not clear the stored lock request');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry browser storage' }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it('explains the reload limit when the browser could not preserve a failed lock request', () => {
+    render(<UnlockScreen onUnlocked={() => {}} notice="revocation_unconfirmed" lockPersistenceError />);
+    expect(screen.getByRole('alert').textContent).toContain('Reload may reopen the session');
+  });
+
+  it('explains the reload limit while revocation is still pending', () => {
+    render(<UnlockScreen onUnlocked={() => {}} notice="revocation_pending" lockPersistenceError />);
+    expect(screen.getByRole('status').textContent).toContain('Reload may reopen the session');
+  });
+
+  it('prevents a new unlock while revocation is pending', () => {
+    render(<UnlockScreen onUnlocked={() => {}} notice="revocation_pending" />);
+    expect(screen.getByRole('status').textContent).toContain('Revoking server session');
+    const input = screen.getByLabelText('fleet token') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'token' } });
+    fireEvent.submit(input.closest('form')!);
+    expect(input.disabled).toBe(true);
+    expect(mockUnlockConsole).not.toHaveBeenCalled();
+  });
+
+  it('guards submission while a retry handler is pending before new props arrive', async () => {
+    let finishRetry!: () => void;
+    const retry = vi.fn(() => new Promise<void>(resolve => { finishRetry = resolve; }));
+    const unlocked = vi.fn();
+    mockUnlockConsole.mockResolvedValueOnce({ expiresIn: 3600 });
+    render(<UnlockScreen onUnlocked={unlocked} notice="revocation_unconfirmed" onRetry={retry} />);
+    const input = screen.getByLabelText('fleet token') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'token' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry lock' }));
+    fireEvent.submit(input.closest('form')!);
+    expect(mockUnlockConsole).not.toHaveBeenCalled();
+    await act(async () => { finishRetry(); });
+    fireEvent.submit(input.closest('form')!);
+    await waitFor(() => expect(unlocked).toHaveBeenCalledOnce());
+    expect(mockUnlockConsole).toHaveBeenCalledExactlyOnceWith('token');
+  });
+
   it('renders the "Console locked" heading', () => {
     render(<UnlockScreen onUnlocked={() => {}} />)
 

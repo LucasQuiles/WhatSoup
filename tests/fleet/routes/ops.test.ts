@@ -684,7 +684,7 @@ describe('handleDeleteLine', () => {
     await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_stop_failed', mutation_state: 'unknown', retryable: false });
     expect(svc.disable).not.toHaveBeenCalled();
     expect(deps.discovery.scan).not.toHaveBeenCalled();
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -707,7 +707,7 @@ describe('handleDeleteLine', () => {
     await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/disable failed/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_disable_failed', mutation_state: 'unknown', retryable: false });
     expect(deps.discovery.scan).not.toHaveBeenCalled();
     expect(deps.realtime.publish).not.toHaveBeenCalled();
     expect(fs.existsSync(dirs.configDir)).toBe(true);
@@ -779,7 +779,7 @@ describe('handleDeleteLine', () => {
     await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body).error).toMatch(/stop failed/);
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_stop_failed', mutation_state: 'unknown', retryable: false });
     expect(svc.disable).not.toHaveBeenCalled();
     expect(deps.discovery.scan).not.toHaveBeenCalled();
     expect(deps.realtime.publish).not.toHaveBeenCalled();
@@ -1283,7 +1283,8 @@ describe('handleCreateLine', () => {
     expect(disabledBody.schema).toBe('fleet-error-v1');
     expect(disabledBody.code).toBe('internal_error');
     expect(disabledBody.operation).toBe('instance_create');
-    expect(disabledBody.mutation_state).toBe('not_started');
+    expect(disabledBody.mutation_state).toBe('rolled_back');
+    expect(disabledBody.rollback_state).toBe('succeeded');
     expect(svc.enable).toHaveBeenCalledWith(name);
     expect(svc.disable).toHaveBeenCalledWith(name);
     expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', name))).toBe(false);
@@ -1321,7 +1322,7 @@ describe('handleCreateLine', () => {
     expect(res._status).toBe(500);
     const rollbackBody = JSON.parse(res._body);
     expect(rollbackBody.schema).toBe('fleet-error-v1');
-    expect(rollbackBody.code).toBe('internal_error');
+    expect(rollbackBody.code).toBe('rollback_failed');
     expect(rollbackBody.operation).toBe('instance_create');
     expect(rollbackBody.stage).toBe('rollback');
     expect(rollbackBody.mutation_state).toBe('rollback_failed');
@@ -3445,7 +3446,8 @@ describe('ops.ts uncovered-branch coverage (wave 2)', () => {
       const res = mockRes();
       await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
       expect(res._status).toBe(500);
-      expect(JSON.parse(res._body).error).toMatch(/stop failed: a string failure/);
+      expect(res._body).not.toContain('a string failure');
+      expect(JSON.parse(res._body)).toMatchObject({ code: 'service_stop_failed', mutation_state: 'unknown', retryable: false });
     } finally {
       if (origConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = origConfig;
       if (origData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = origData;

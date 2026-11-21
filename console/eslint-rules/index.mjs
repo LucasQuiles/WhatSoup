@@ -164,6 +164,12 @@ function checkTextLiterals(context, checkStringValue) {
   }
 }
 
+// Exact `href` targets on the project's own repository that keep its canonical
+// identifier. Add a target here when the console links to a new page of it.
+const REPOSITORY_LINK_TARGETS = new Set([
+  'https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/release-deployment.md',
+])
+
 // ---------------------------------------------------------------------------
 // soup/no-brand-regression
 // Lint-plan section 3: shadow entry state, P4 target.
@@ -218,6 +224,9 @@ const noBrandRegression = {
 
       // (b) Literal in JSX attribute position
       'JSXAttribute > Literal'(node) {
+        // Repository link targets preserve the source identifier, not UI branding.
+        // Only the exact targets listed are exempt; a longer or different path is checked.
+        if (node.parent.name.name === 'href' && REPOSITORY_LINK_TARGETS.has(node.value)) return
         checkStringValue(node, node.value, 'jsxAttr')
       },
 

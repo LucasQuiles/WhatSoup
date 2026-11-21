@@ -13,14 +13,58 @@ credentials — enter the fleet token on the lock screen to start a session:
 - Authenticated HTTP and SSE requests use short-lived audience tickets minted
   against that session; WebSocket connections use a separate `/api/ws-ticket`.
   A fleet-server restart relocks the console.
-- To log out, click **Lock** in the navigation rail's utility area — it revokes the
-  session server-side (`DELETE /api/console-session`), clears the cookie, and
-  returns to the lock screen. (`DELETE /api/console-session` can also be called
-  directly.)
+- **Lock** closes local access immediately, then requests server revocation with
+  `DELETE /api/console-session`. Only a successful response confirms revocation
+  and cookie clearing. Failure leaves the screen locked with **Retry lock** and
+  an explicit unconfirmed outcome; pending duplicate requests are coalesced.
+  The lock screen serializes token unlock and retry handlers so an older unlock
+  response cannot overtake a newer revocation request.
+  A non-secret session-storage marker preserves an unfinished lock across reload
+  in the same tab. It is cleared by confirmed revocation or explicit token unlock.
+  If storage cannot be read, the console stays closed. If it cannot save the marker,
+  the screen explains, including while revocation is pending, that reload may
+  reopen the session until revocation succeeds.
+  If the marker cannot be cleared after a confirmed session change, local access
+  stays closed with **Retry browser storage**. Recovery clears the marker, then
+  checks the current server session without repeating the mutation.
+  This local marker does not revoke credentials or replace server authorization.
+- An unavailable session check stays closed with **Retry session check**; it is
+  distinguished from the server confirming that the session is absent or expired.
+  Retired probes and revocation responses cannot overwrite a newer local action.
+  These ordering guarantees hold within one mounted console tab: other tabs and a
+  reload before revocation settles share the session cookie but not this ordering.
 - The fleet token lives in `~/.config/whatsoup/fleet-tokens.json` on the
   fleet host.
 - Dev mode (Vite proxy) bypasses the lock screen — the proxy injects auth
   server-side and the page carries no `fleet-auth-mode` meta tag.
+
+## Connection and update outcomes
+
+Realtime readiness requires the server's `connected` hello. An open socket alone
+keeps ordinary polling active. If hello does not arrive within ten seconds, the
+console retires that connection and retries with the existing one-to-thirty-second
+exponential backoff. The hello deadline bounds each socket's wait; it does not
+remove the delay between failed connection attempts.
+Callbacks from retired connections cannot change the current connection or its
+caches. Existing stream-gap reconciliation runs before readiness; legacy hello
+frames remain supported. Line queries retain their slower polling backstop after
+readiness.
+
+`GET /api/version` advertises `updateMode: release_deploy`. The update dialog then
+links to the [release deployment runbook](runbooks/release-deployment.md) without
+issuing an in-place update or restarting instances. Unknown advertised update modes
+also withhold those mutations. Servers that omit the field retain the compatibility
+flow; the existing `update-by-release-deploy-required` refusal switches that flow
+to deployment guidance. A fleet recovery timeout is unconfirmed recovery, not an
+update-complete result. Closing or reopening the dialog invalidates pending callbacks.
+
+An instance restart's HTTP 202 response confirms a request, not recovered health.
+Restart batches prevent duplicate pending requests and do not resubmit an already
+accepted item when another item fails. Check instance health after acceptance or an
+unconfirmed result. The mode switch dialog sends a change of the line's `type`, which
+the server refuses for an existing line (`type is immutable`): the dialog reports the
+failure and neither saves the configuration nor restarts the line. Its saved and
+restart-requested messages apply only where the server accepts the change.
 
 ## Pages
 
@@ -65,6 +109,53 @@ Fleet health monitoring with instance management actions.
 ![Operations](screenshots/ops.png)
 
 The left panel shows every instance with its status, phone number, message count, and session info. Unhealthy instances display restart and delete buttons inline.
+
+Deletion succeeds only after the stop and disable calls returned, or reported the
+service as already absent, and the config, data and state directories are removed.
+A success does not prove that the instance process has exited: some service
+managers return from a stop after a timeout without observing the exit. The three
+projected delete failures (HTTP 500) carry `instance`, `mutation_state: unknown`,
+`retryable: false` and a correlation id that the server log line also carries:
+`service_stop_failed` (nothing was removed), `service_disable_failed` (the stop
+returned; the files are kept) and `instance_cleanup_failed` (some directories may
+remain). The preflight refusal (HTTP 409) has only `error` and `instance`, and an
+invalid name (HTTP 400) has only `error`; the console then shows only the HTTP
+status. The line detail page shows the recovery message and stays open. Inspect the
+remaining directories and the correlated server log, correct the failure, then
+explicitly retry deletion. A failure can leave only part of the instance; it does
+not mean that deletion had no effect.
+
+Validation failures and a failure to create the instance's config directory answer
+before anything needs rolling back. A later failure of creation rolls back: its
+filesystem rollback removes the instance's config, data and state directories,
+restores each workspace file it overwrote (`.claude/CLAUDE.md`,
+`.claude/settings.json`) with its bytes and mode, and removes the workspace files it
+added. Once the enable call was made, creation also attempts disable, because a
+rejected enable can have changed service state before losing its response. The
+response has one of four outcomes:
+
+- `rolled_back` with `rollback_state: succeeded`: the disable (when one was needed)
+  returned and the filesystem rollback finished. The response carries a correlation
+  id, but no server log line does. This does not prove that an earlier service state
+  was restored, and a `.claude` directory or permission change that creation made in
+  the workspace stays.
+- `rollback_failed` with `mutation_state: unknown`: the enable call was rejected and
+  the disable failed too. The files were restored and the directories removed;
+  inspect the service state before creating the line again.
+- `rollback_failed` with `mutation_state: rollback_failed` after an enable that
+  succeeded and a disable that failed: no filesystem rollback runs, because the
+  service may run with this configuration. The directories and the workspace files
+  stay as creation wrote them, as in earlier releases.
+- `rollback_failed` with `mutation_state: rollback_failed` after an incomplete
+  filesystem rollback: files or directories may remain.
+
+The last three outcomes have a server log line with the response's correlation id;
+the log line also tells the two `rollback_failed` / `rollback_failed` outcomes
+apart. Removing the directories clears the refusal that an existing config
+directory causes, but the name can still be refused until discovery has scanned
+again, because the server may have listed the instance while enable was pending.
+The automated test covers the directory condition only. The API does not
+automatically retry an uncertain service operation.
 
 ![Unhealthy Instance Management](screenshots/ops-unhealthy.png)
 
@@ -152,7 +243,7 @@ Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) 
 
 **Scheduled** — Queue of scheduled messages for this instance. The header bar shows the total count and a "New Scheduled Message" button that opens the composer modal. Each row exposes Cancel, Edit, and Duplicate actions; pending and processing messages sort to the top by send time, with sent / failed / cancelled rows below in reverse chronological order. The list polls every 30 s. Empty, loading, and error states each render an `EmptyState` panel. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by `GET/POST/DELETE /api/lines/:name/scheduled` (list, create, cancel-all) and `GET/PUT/DELETE /api/lines/:name/scheduled/:id` (fetch, update, cancel one) — see the [Fleet API table](../README.md#fleet-api).
 
-**Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. The list polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the [Fleet API table](../README.md#fleet-api).
+**Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. Successful detail mutations refresh both the detail and the group list immediately; the dialog heading uses the current detail. The list also polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the [Fleet API table](../README.md#fleet-api).
 
 ### Add Line Wizard
 

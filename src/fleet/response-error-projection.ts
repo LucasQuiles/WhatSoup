@@ -39,11 +39,13 @@ export type FleetErrorCode =
   | 'service_action_failed'
   | 'service_start_failed'
   | 'service_stop_failed'
+  | 'service_disable_failed'
   | 'restart_failed'
   | 'rollback_failed'
   | 'config_read_failed'
   | 'config_write_failed'
   | 'instance_creation_failed'
+  | 'instance_cleanup_failed'
   | 'auth_failed'
   | 'auth_timeout'
   | 'validation_failed'
@@ -128,12 +130,14 @@ const SAFE_MESSAGES: Record<FleetErrorCode, string> = {
   service_action_failed: 'A service operation failed.',
   service_start_failed: 'The service could not be started.',
   service_stop_failed: 'The service could not be stopped.',
+  service_disable_failed: 'The service could not be disabled.',
   restart_failed: 'The restart operation failed.',
   rollback_failed:
     'A rollback operation failed; the instance may be in an inconsistent state.',
   config_read_failed: 'Configuration could not be read.',
   config_write_failed: 'Configuration could not be written.',
   instance_creation_failed: 'Instance creation failed.',
+  instance_cleanup_failed: 'Instance cleanup is incomplete. Inspect remaining state before retrying.',
   auth_failed: 'Authentication failed.',
   auth_timeout: 'Authentication timed out. Please retry.',
   validation_failed: 'The request failed validation.',
@@ -317,8 +321,12 @@ export function mutationError(
     mutationState: MutationState;
     rollbackState?: RollbackState;
   },
+  codeOverride?: FleetErrorCode,
 ): FleetErrorResponse {
-  return projectError(err, ctx);
+  const response = projectError(err, ctx);
+  return codeOverride === undefined ? response : {
+    ...response, code: codeOverride, message: SAFE_MESSAGES[codeOverride], retryable: false,
+  };
 }
 
 /**
