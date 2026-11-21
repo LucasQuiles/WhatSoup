@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Open the local fleet dashboard in a dedicated Chrome profile and unlock it
-# through the login keychain. The root token never enters the URL, argv, disk,
-# or clipboard.
+# through the console unlock wrapper, which takes the root token from the default
+# keychain search list of security or lets its helper read the private fleet-token file. The token
+# never enters the URL, argv, or the clipboard.
 set -euo pipefail
 
 FLEET="${FLEET:-http://127.0.0.1:9099}"

@@ -9,6 +9,7 @@ subprocess e2e that exercises the real `if __name__ == "__main__"` entrypoint.
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -689,8 +690,9 @@ def test_main_redaction_notice_present_and_metadata_only():
     assert "metadata-only" in report["redaction"], report["redaction"]
     # No surface row should leak a raw scalar config value: emitted keys are a fixed
     # metadata vocabulary. Assert none of the parsed values are raw secrets.
+    # The word boundary keeps a job name such as "desk-agent" from reading as a key.
     blob = json.dumps(report)
-    assert "sk-" not in blob or "<redacted" in blob, "raw secret-shaped value present"
+    assert not re.search(r"\bsk-[A-Za-z0-9]", blob) or "<redacted" in blob, "raw secret-shaped value present"
 
 
 # ---------------------------------------------------------------------------
