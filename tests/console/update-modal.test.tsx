@@ -193,6 +193,32 @@ describe('UpdateModal — closed state', () => {
 // ---------------------------------------------------------------------------
 
 describe('UpdateModal — confirm phase', () => {
+  it('treats a retired-update refusal from an older version endpoint as deployment guidance', async () => {
+    const refusal = 'event: error\ndata: {"step":"update","code":"update-by-release-deploy-required","message":"In-place update is retired."}\n\n'
+    const fetch = vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([refusal]) }))
+    vi.stubGlobal('fetch', fetch)
+    render(<UpdateModal {...defaultProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Release deployment guide' })).toBeDefined())
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+    expect(screen.queryByText('Update Complete')).toBeNull()
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(mockApiGetVersion).not.toHaveBeenCalled()
+    expect(mockApiRestart).not.toHaveBeenCalled()
+  })
+
+  it.each(['release_deploy', 'future_unknown_mode'])('offers deployment guidance without a mutation for %s', (updateMode) => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    render(<UpdateModal {...defaultProps()} updateMode={updateMode} />)
+    expect(screen.getByText('Deploy a new release to update this instance.')).toBeDefined()
+    expect(screen.getByRole('link', { name: 'Release deployment guide' }).getAttribute('href')).toBe('https://github.com/LucasQuiles/WhatSoup/blob/main/docs/runbooks/release-deployment.md')
+    expect(screen.queryByRole('button', { name: 'Update' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
+    expect(mockApiRestart).not.toHaveBeenCalled()
+  })
+
   it('renders the dialog with aria-modal and aria-labelledby', () => {
     render(<UpdateModal {...defaultProps()} />)
     const dialog = screen.getByRole('dialog')
@@ -665,9 +691,9 @@ describe('UpdateModal — restart-instances phase', () => {
     return controls
   }
 
-  it('shows "Update Complete" title when in restart-instances phase', async () => {
+  it('shows fleet availability without claiming the update completed', async () => {
     await renderAndAdvanceToRestartInstances()
-    const title = screen.getByText('Update Complete')
+    const title = screen.getByText('Fleet available')
     // Resolution assertion: title element id matches the dialog's aria-labelledby
     const dialog = screen.getByRole('dialog')
     const labelledById = dialog.getAttribute('aria-labelledby')!
@@ -773,15 +799,68 @@ describe('UpdateModal — restart-instances phase', () => {
     expect(mockInvalidateQueries).toHaveBeenCalled()
   })
 
-  it('falls back to restart-instance controls when fleet restart polling times out', async () => {
+  it('reports unconfirmed fleet recovery instead of offering instance restarts after timeout', async () => {
     const controls = await renderAndWaitForFleetRestart()
 
     await act(async () => {
       controls.runFleetTimeout()
     })
 
-    await waitFor(() => expect(screen.getByText('Restart instances with update?')).toBeDefined())
+    await waitFor(() => expect(screen.getByText('Fleet recovery could not be confirmed. Check fleet health before retrying the update.')).toBeDefined())
+    expect(screen.queryByText('Restart instances with update?')).toBeNull()
+    expect(screen.queryByText('Update Complete')).toBeNull()
     expect(mockInvalidateQueries).toHaveBeenCalled()
+  })
+
+  it('ignores a late successful poll after the modal is closed', async () => {
+    const controls = await renderAndWaitForFleetRestart()
+    let finish!: (value: { sha: string }) => void
+    mockApiGetVersion.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    let polling!: Promise<void>
+    act(() => { polling = controls.runPoll() })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await act(async () => { finish({ sha: 'newsha999' }); await polling })
+    expect(screen.queryByText('Restart instances with update?')).toBeNull()
+    expect(mockInvalidateQueries).not.toHaveBeenCalled()
+  })
+
+  it('submits each selected restart only once while its response is pending', async () => {
+    let finish!: (value: { status: string; instance: string }) => void
+    mockApiRestart.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    await renderAndAdvanceToRestartInstances()
+    const button = screen.getByRole('button', { name: /Restart Selected/i })
+    fireEvent.click(button)
+    fireEvent.click(button)
+    expect(mockApiRestart).toHaveBeenCalledTimes(1)
+    await act(async () => { finish({ status: 'restart_requested', instance: 'primary-line' }) })
+  })
+
+  it('does not resubmit an accepted instance when retrying an unconfirmed batch item', async () => {
+    mockApiRestart
+      .mockResolvedValueOnce({ status: 'restart_requested', instance: 'primary-line' })
+      .mockRejectedValueOnce(new Error('response lost'))
+      .mockResolvedValueOnce({ status: 'restart_requested', instance: 'sandbox-agent' })
+    await renderAndAdvanceToRestartInstances({ lines: DEFAULT_LINES.map(line => ({ ...line, status: 'online' as const })) })
+    fireEvent.click(screen.getByRole('button', { name: /Restart Selected/i }))
+    await waitFor(() => expect(screen.getByText('Unconfirmed; check instance health')).toBeDefined())
+    expect(screen.getByText('Restart requested')).toBeDefined()
+    fireEvent.click(screen.getByRole('button', { name: /Restart Selected/i }))
+    await waitFor(() => expect(screen.getByText('Restart requests accepted. Check instance health to confirm recovery.')).toBeDefined())
+    expect(mockApiRestart.mock.calls.map(call => call[0])).toEqual(['primary-line', 'sandbox-agent', 'sandbox-agent'])
+  })
+
+  it('stops issuing batch requests after close and ignores the pending response', async () => {
+    let finish!: (value: { status: string; instance: string }) => void
+    mockApiRestart.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const onClose = vi.fn()
+    const controls = await renderAndAdvanceToRestartInstances({ onClose, lines: DEFAULT_LINES.map(line => ({ ...line, status: 'online' as const })) })
+    fireEvent.click(screen.getByRole('button', { name: /Restart Selected/i }))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await act(async () => { finish({ status: 'restart_requested', instance: 'primary-line' }) })
+    controls.runAutoClose()
+    expect(mockApiRestart).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText('Restart requests accepted. Check instance health to confirm recovery.')).toBeNull()
   })
 
   it('keeps the modal open and marks the instance errored when restart fails', async () => {
@@ -792,19 +871,20 @@ describe('UpdateModal — restart-instances phase', () => {
     fireEvent.click(screen.getByRole('button', { name: /Restart Selected/i }))
 
     await waitFor(() => expect(mockApiRestart).toHaveBeenCalledWith('primary-line'))
-    expect(screen.queryByText('All instances restarted')).toBeNull()
+    expect(screen.queryByText('Restart requests accepted. Check instance health to confirm recovery.')).toBeNull()
     expect(screen.getByRole('button', { name: /Restart Selected/i })).toBeDefined()
     expect(onClose).not.toHaveBeenCalled()
   })
 
-  it('shows completion and closes after the successful restart grace period', async () => {
-    mockApiRestart.mockResolvedValueOnce({ status: 'ok', instance: 'primary-line' })
+  it('reports request acceptance without claiming recovery and closes after the grace period', async () => {
+    mockApiRestart.mockResolvedValueOnce({ status: 'restart_requested', instance: 'primary-line' })
     const onClose = vi.fn()
     const controls = await renderAndAdvanceToRestartInstances({ onClose })
 
     fireEvent.click(screen.getByRole('button', { name: /Restart Selected/i }))
 
-    await waitFor(() => expect(screen.getByText('All instances restarted')).toBeDefined())
+    await waitFor(() => expect(screen.getByText('Restart requests accepted. Check instance health to confirm recovery.')).toBeDefined())
+    expect(screen.queryByText('All instances restarted')).toBeNull()
     expect(onClose).not.toHaveBeenCalled()
 
     await act(async () => {

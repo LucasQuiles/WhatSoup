@@ -26,6 +26,7 @@ const _origNavClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard'
 // ---- Mocks ----
 
 const getGroupDetailMock = vi.fn()
+const getGroupsMock = vi.fn()
 const getGroupInviteLinkMock = vi.fn()
 const leaveGroupMock = vi.fn()
 const revokeGroupInviteMock = vi.fn()
@@ -39,6 +40,7 @@ const updateGroupSubjectMock = vi.fn()
 
 vi.mock('../../console/src/lib/api.js', () => ({
   api: {
+    getGroups: (...args: unknown[]) => getGroupsMock(...args),
     getGroupDetail: (...args: unknown[]) => getGroupDetailMock(...args),
     getGroupInviteLink: (...args: unknown[]) => getGroupInviteLinkMock(...args),
     leaveGroup: (...args: unknown[]) => leaveGroupMock(...args),
@@ -88,6 +90,7 @@ vi.mock('../../console/src/components/shared/ContactSearchPicker.js', () => ({
 
 // Import after mocks so the component picks up the mocked API and child component.
 import { GroupDetailModal } from '../../console/src/components/line-detail/GroupDetailModal.js'
+import { GroupsTab } from '../../console/src/components/line-detail/GroupsTab.js'
 
 // ---- Helpers ----
 
@@ -235,6 +238,7 @@ afterEach(() => {
     delete (navigator as unknown as Record<string, unknown>).clipboard;
   }
   getGroupDetailMock.mockReset()
+  getGroupsMock.mockReset()
   getGroupInviteLinkMock.mockReset()
   leaveGroupMock.mockReset()
   revokeGroupInviteMock.mockReset()
@@ -380,6 +384,50 @@ describe('GroupDetailModal info actions', () => {
       expect(updateGroupDescriptionMock).toHaveBeenCalledWith(lineName, groupId, undefined)
     })
     expect(toast.success).toHaveBeenCalledWith('Description updated')
+  })
+
+  it('refreshes the selected group header and list after a rename without waiting for polling', async () => {
+    let current = makeDetail()
+    getGroupsMock.mockImplementation(async () => ({ groups: [current] }))
+    getGroupDetailMock.mockImplementation(async () => current)
+    updateGroupSubjectMock.mockImplementationOnce(async (_line, _id, subject: string) => {
+      current = { ...current, subject }
+      return { success: true }
+    })
+    const client = makeClient()
+    render(<Wrap client={client} toast={makeToast()}><GroupsTab lineName={lineName} myJid={currentUserJid} /></Wrap>)
+    fireEvent.click(await screen.findByText('Team Atlas'))
+    await waitForDetail()
+
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Renamed team' } })
+    fireEvent.blur(screen.getByLabelText('Subject'))
+
+    await screen.findByRole('dialog', { name: 'Renamed team' })
+    await waitFor(() => expect(client.getQueryData(['groups', lineName])).toEqual({ groups: [current] }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
+    expect(screen.getByText('Renamed team')).toBeDefined()
+    expect(screen.queryByText('Team Atlas')).toBeNull()
+    expect(getGroupsMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves the displayed group and list when the rename is rejected', async () => {
+    const current = makeDetail()
+    getGroupsMock.mockResolvedValue({ groups: [current] })
+    updateGroupSubjectMock.mockRejectedValueOnce(new Error('permission denied'))
+    const client = makeClient()
+    const toast = makeToast()
+    render(<Wrap client={client} toast={toast}><GroupsTab lineName={lineName} myJid={currentUserJid} /></Wrap>)
+    fireEvent.click(await screen.findByText('Team Atlas'))
+    await waitForDetail()
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Rejected team' } })
+    fireEvent.blur(screen.getByLabelText('Subject'))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed: permission denied'))
+    expect(screen.getByRole('dialog', { name: 'Team Atlas' })).toBeDefined()
+    expect((screen.getByLabelText('Subject') as HTMLInputElement).value).toBe('Team Atlas')
+    expect(client.getQueryData(['groups', lineName])).toEqual({ groups: [current] })
+    expect(getGroupsMock).toHaveBeenCalledTimes(1)
+    expect(toast.success).not.toHaveBeenCalled()
   })
 
   it('labels the editable subject and description fields with form-control token classes', async () => {
