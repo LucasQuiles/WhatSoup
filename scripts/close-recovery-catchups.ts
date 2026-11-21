@@ -1,25 +1,14 @@
 /**
- * Batch operator closure of caught-up `recovery_pending_operator_catchup`
- * groups (npm `close-recovery-catchups`).
+ * Inspect operator catch-up delivery candidates without attesting original
+ * fulfillment. Selection uses `selectOperatorCatchupCandidates`; both dry run
+ * and confirm use the single-group proof checks, which reject a candidate
+ * without request-specific fulfillment evidence. This CLI has no flag that
+ * supplies that evidence, so unconfirmed groups stay pending.
  *
- * Selection is the automatic reconciler's rule, taken verbatim from
- * `selectOperatorCatchupCandidates`: for each open (plan, conversation) group,
- * the earliest same-chat `operator_catchup_delivery_proofs` target later than
- * every source sequence. Every group is then proven by
- * `inspectOperatorCatchupRecovery` (dry run) or closed by
- * `closeOperatorCatchupRecoveryRaw` (confirm) — the same primitive the
- * single-group `close-recovery-catchup` command uses — so this command adds no
- * proof rule of its own. It differs from the reconciler only in recording the
- * operator's `--actor` and `--evidence-ref` instead of the reconciler's.
- *
- * Dry run is the default and makes no database change (the per-database
- * redaction salt sidecar is created on first use, as with the single-group
- * command). `--confirm` requires `--backup-dir` and takes a consistent,
- * quick_check-verified backup before the first write, then re-enumerates.
- *
- * Output is one JSON document. Raw plan IDs, conversation keys, chat JIDs,
- * sequences, actor and evidence reference never appear; groups are identified
- * by the same keyed fingerprints the single-group command prints.
+ * Dry run makes no database-row changes; first use creates the redaction salt.
+ * `--confirm --backup-dir` creates a quick_check-verified backup but does not
+ * bypass fulfillment checks. Exit 0 means no busy/error, not a closed recovery.
+ * Output is redacted JSON with the single-group command's keyed fingerprints.
  */
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -100,9 +89,9 @@ const USAGE = [
   'Usage: close-recovery-catchups --db PATH --actor ID --evidence-ref REF',
   '  [--group-limit N] [--confirm --backup-dir DIR]',
   '',
-  'Selects every open operator catch-up recovery group with the reconciler rule and',
-  'proves each one read-only. --confirm backs the database up to DIR (quick_check',
-  'verified) and then closes each proven group with the recorded actor and evidence.',
+  'Inspects delivery candidates; unconfirmed original requests remain pending.',
+  '--confirm takes a quick_check-verified backup in DIR but does not attest fulfillment.',
+  'Exit 0 means no busy/error; it does not mean any recovery was closed.',
 ].join('\n');
 
 const VALUE_FLAGS = ['--db', '--actor', '--evidence-ref', '--group-limit', '--backup-dir'] as const;

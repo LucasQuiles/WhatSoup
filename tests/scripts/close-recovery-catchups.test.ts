@@ -192,7 +192,7 @@ describe('close-recovery-catchups argument parsing', () => {
 });
 
 describe('close-recovery-catchups against a real schema database', () => {
-  it('dry run proves every candidate group and changes no disposition rows', async () => {
+  it('dry run leaves later-delivery candidates pending without per-request fulfillment proof', async () => {
     const fixture = installFixture();
     const before = linkCounts(fixture.dbPath);
 
@@ -205,8 +205,8 @@ describe('close-recovery-catchups against a real schema database', () => {
       groups: Array<Record<string, unknown>>;
     };
     expect(report.dryRun).toBe(true);
-    expect(report.summary).toMatchObject({ examined: 3, ready: 2, closed: 0, skipped: 1, errors: 0 });
-    expect(report.groups.map((group) => group.status)).toEqual(['ready', 'ready', 'skipped']);
+    expect(report.summary).toMatchObject({ examined: 3, ready: 0, closed: 0, skipped: 3, errors: 0 });
+    expect(report.groups.map((group) => group.status)).toEqual(['skipped', 'skipped', 'skipped']);
     expect(report.groups[2]).toMatchObject({ reason: 'no_catchup_candidate', catchupSeqFingerprint: null });
     expect(linkCounts(fixture.dbPath)).toEqual(before);
   });
@@ -233,7 +233,7 @@ describe('close-recovery-catchups against a real schema database', () => {
     expect(result.stdout).not.toContain(EVIDENCE);
   });
 
-  it('confirm backs up first, closes the proven groups with the operator actor and evidence, and leaves the rest pending', async () => {
+  it('confirm preserves the backup and refuses blanket closure without original fulfillment', async () => {
     const fixture = installFixture();
     const backupDir = path.join(fixture.root, 'backups');
 
@@ -247,10 +247,10 @@ describe('close-recovery-catchups against a real schema database', () => {
       groups: Array<Record<string, unknown>>;
     };
     expect(report.dryRun).toBe(false);
-    expect(report.summary).toMatchObject({ closed: 2, skipped: 1, linksClosed: 4, errors: 0 });
-    expect(report.groups.map((group) => group.status)).toEqual(['closed', 'closed', 'skipped']);
-    expect(linkCounts(fixture.dbPath)).toEqual({ pending: 6, closed: 4 });
-    expect(closureActors(fixture.dbPath)).toEqual(Array(4).fill({ actor: ACTOR, evidence_ref: EVIDENCE }));
+    expect(report.summary).toMatchObject({ closed: 0, skipped: 3, linksClosed: 0, errors: 0 });
+    expect(report.groups.map((group) => group.status)).toEqual(['skipped', 'skipped', 'skipped']);
+    expect(linkCounts(fixture.dbPath)).toEqual({ pending: 6, closed: 0 });
+    expect(closureActors(fixture.dbPath)).toEqual([]);
 
     // Backup-before-mutate: the backup exists, is private, verified, and holds
     // the ORIGINAL state (no closures), so it was taken before the first write.
@@ -260,7 +260,7 @@ describe('close-recovery-catchups against a real schema database', () => {
     expect(linkCounts(report.backup.path)).toEqual({ pending: 6, closed: 0 });
   });
 
-  it('is idempotent: a second confirm finds nothing left to close and changes nothing', async () => {
+  it('keeps original requests pending across repeated blanket confirmations', async () => {
     const fixture = installFixture();
     const backupDir = path.join(fixture.root, 'backups');
     await runBatchClosure({ ...parseBatchClosureArgs([...baseArgs(fixture.dbPath), '--confirm', '--backup-dir', backupDir]) },
@@ -272,7 +272,7 @@ describe('close-recovery-catchups against a real schema database', () => {
       () => new Date('2026-01-01T00:01:00Z'),
     );
 
-    expect(second.summary).toMatchObject({ examined: 1, closed: 0, skipped: 1, linksClosed: 0 });
+    expect(second.summary).toMatchObject({ examined: 3, closed: 0, skipped: 3, linksClosed: 0 });
     expect(linkCounts(fixture.dbPath)).toEqual(afterFirst);
     expect(readdirSync(backupDir)).toHaveLength(2);
   });
@@ -296,7 +296,7 @@ describe('close-recovery-catchups against a real schema database', () => {
   it('respects the group limit the same way the reconciler does', async () => {
     const fixture = installFixture();
     const report = await runBatchClosure(parseBatchClosureArgs([...baseArgs(fixture.dbPath), '--group-limit', '1']));
-    expect(report.summary).toMatchObject({ examined: 1, ready: 1 });
+    expect(report.summary).toMatchObject({ examined: 1, ready: 0, skipped: 1 });
   });
 
   it('does not create a backup directory on a dry run', async () => {

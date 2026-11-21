@@ -55,7 +55,7 @@ describe('migration 60 — execution reservations + creation_reason honesty rebu
   });
 
   it('registers as the current schema migration', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(70);
   });
 
   it('reservation UNIQUE turns a duplicate (obligation, claim epoch, attempt) into a constraint failure', () => {

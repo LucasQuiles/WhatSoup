@@ -56,7 +56,7 @@ function insertObligation(over: Partial<Record<string, unknown>> = {}): number {
 
 describe('migration 58 — registration and idempotency', () => {
   it('is applied by Database.open() and matches CURRENT_SCHEMA_MIGRATION', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(70);
     const applied = db.raw
       .prepare('SELECT MAX(version) AS v FROM schema_migrations')
       .get() as { v: number };

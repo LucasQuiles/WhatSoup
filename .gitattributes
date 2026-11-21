@@ -1,2 +1,6 @@
 * text=auto eol=lf
 *.sh text eol=lf
+# Retired token backup job templates: tracked until they can be deleted, never in a release
+# (scripts/release-snapshot-plan.ts RELEASE_EXPORT_IGNORED_PATHS must list the same paths).
+deploy/templates/com.whatsoup.ms365-token-backup.plist export-ignore
+deploy/templates/ms365-token-backup.sh export-ignore

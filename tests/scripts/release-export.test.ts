@@ -212,6 +212,44 @@ describe('exportRelease', () => {
     expect(manifest.files.some((file) => file.path === 'tokens.env' || file.path === 'state.db')).toBe(false);
   });
 
+  // The retired token backup job's two templates stay tracked until they can be deleted
+  // (docs/releases/2026-11-20-token-backup-job-retired.md); the repository's own .gitattributes keeps them out of
+  // every release, and the export must still succeed.
+  it('never ships the retired job templates that .gitattributes marks export-ignore', () => {
+    const fixture = makeGitFixture();
+    const templates = ['deploy/templates/com.whatsoup.ms365-token-backup.plist', 'deploy/templates/ms365-token-backup.sh'];
+    // The lines themselves (they also keep the files out of GitHub source archives), not only the planner's list.
+    const attributes = readFileSync(path.join(REPO_ROOT, '.gitattributes'), 'utf8').split('\n').map((line) => line.trim().split(/\s+/));
+    expect(templates.filter((template) => !attributes.some(([file, ...attrs]) => file === template && attrs.includes('export-ignore')))).toEqual([]);
+    writeFileSync(path.join(fixture.sourceRoot, '.gitattributes'), readFileSync(path.join(REPO_ROOT, '.gitattributes')));
+    for (const template of templates) {
+      mkdirSync(path.dirname(path.join(fixture.sourceRoot, template)), { recursive: true });
+      writeFileSync(path.join(fixture.sourceRoot, template), 'retired template fixture\n', 'utf8');
+    }
+    recommitFixture(fixture, 'retired templates');
+    const report = exportOk(fixture);
+    const manifest = parseReleaseSnapshotManifest(
+      JSON.parse(readFileSync(path.join(report.releasePath, RELEASE_MANIFEST_FILE), 'utf8')),
+    );
+    for (const template of templates) {
+      expect(existsSync(path.join(report.releasePath, template))).toBe(false);
+      expect(manifest.files.some((file) => file.path === template)).toBe(false);
+    }
+    expect(existsSync(path.join(report.releasePath, 'src/main.ts'))).toBe(true);
+  });
+
+  // An explicit required output cannot bring a retired template back into a release manifest: the planner refuses
+  // it, so export publishes nothing, as W20's exporter refused it alone (then as a missing output).
+  it.each(['deploy/templates/com.whatsoup.ms365-token-backup.plist', 'deploy/templates/ms365-token-backup.sh'])(
+    'refuses the retired template %s as a required output and publishes no release',
+    (template) => {
+      const fixture = makeGitFixture();
+      expect(() => exportOk(fixture, { requiredOutputs: [template] }))
+        .toThrow(`required output ${template} is retired from releases`);
+      expect(existsSync(path.join(fixture.releaseRoot, `WhatSoup-release-${fixture.commit.slice(0, 12)}`))).toBe(false);
+    },
+  );
+
   it('refuses to clobber an existing release without replace', () => {
     const fixture = makeGitFixture();
     exportOk(fixture);

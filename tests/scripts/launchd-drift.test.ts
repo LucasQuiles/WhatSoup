@@ -104,9 +104,10 @@ const REPLY_TEMPLATE = HARNESS_TEMPLATE
   .replace('harness-maintenance', 'reply-guarantee')
   .replace('harness.sh', 'reply-guarantee-drain.sh');
 
-const MS365_TEMPLATE = HARNESS_TEMPLATE
-  .replace('harness-maintenance', 'ms365-token-backup')
-  .replace('__WHATSOUP_REPO_ROOT__/deploy/scripts/harness.sh', '__HOME__/.local/bin/ms365-token-backup');
+// Retired from the standard: deploy/managed-components.json no longer lists it; its templates stay tracked until they
+// can be deleted and are excluded from release exports. A host that still has its plist or script is told to remove
+// them; the job is never checked as a template or as an instance.
+const RETIRED_STEM = 'ms365-token-backup';
 
 // The collector surface carries a schedule the guard cross-checks against the wrapper's default slot minute.
 const J1_COLLECTOR_TEMPLATE = [
@@ -162,7 +163,6 @@ function makeFixture(): { repo: string; launchd: string; bin: string; home: stri
   // repo templates
   writeFileSync(join(repo, 'deploy/com.whatsoup.harness-maintenance.plist'), HARNESS_TEMPLATE);
   writeFileSync(join(repo, 'deploy/com.whatsoup.reply-guarantee.plist'), REPLY_TEMPLATE);
-  writeFileSync(join(repo, 'deploy/templates/com.whatsoup.ms365-token-backup.plist'), MS365_TEMPLATE);
   writeFileSync(join(repo, 'deploy/templates/com.whatsoup.bot-errors-j1-collector.plist'), J1_COLLECTOR_TEMPLATE);
   writeFileSync(join(repo, 'deploy/templates/bot-errors-j1-collector.sh'), J1_WRAPPER_TEMPLATE);
   writeFileSync(join(repo, 'deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist'), WATCHDOG_TEMPLATE);
@@ -437,14 +437,6 @@ describe('static template surfaces (substitute-then-compare)', () => {
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('missing installed: reply-guarantee');
-  });
-
-  it('skips ms365-token-backup when not installed', () => {
-    const f = makeFixture();
-    installAllOk(f);
-    const result = run(f);
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('skip: ms365-token-backup');
   });
 
   it('skips bot-errors-j1-collector when not installed', () => {
@@ -802,15 +794,82 @@ describe('verified installed scripts', () => {
     expect(result.stdout).not.toContain('all managed launchd surfaces match');
   });
 
-  it('fails when the installed ms365 script has surviving placeholders', () => {
+});
+
+describe('retired surfaces', () => {
+  it('reports an installed retired plist as retired, counts it, and never checks it as an instance', () => {
     const f = makeFixture();
     installAllOk(f);
-    writeFileSync(join(f.launchd, 'com.whatsoup.ms365-token-backup.plist'), subst(MS365_TEMPLATE, f.repo, f.home));
-    writeFileSync(join(f.bin, 'ms365-token-backup'), '#!/usr/bin/env bash\ncp __HOME__/x y\n');
-    chmodSync(join(f.bin, 'ms365-token-backup'), 0o755);
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`),
+      plistXml(`com.whatsoup.${RETIRED_STEM}`, join(f.bin, RETIRED_STEM), true));
+    const result = run(f);
+    const output = result.stdout + result.stderr;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`retired: ${RETIRED_STEM} plist is installed`);
+    expect(result.stderr).toContain('remove');
+    expect(output).not.toContain(`missing installed: ${RETIRED_STEM}`);
+    expect(output).not.toContain(`${RETIRED_STEM}-watchdog`);
+    expect(output).not.toContain(`${RETIRED_STEM} plist structural`);
+    expect(output).not.toContain(`unmanaged launchd surface: com.whatsoup.${RETIRED_STEM}.plist`);
+    expect(output).not.toContain(FAKE_SECRET);
+    expect(result.stdout).not.toContain('all managed launchd surfaces match');
+  });
+
+  it('reports a leftover retired script without its plist', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.bin, RETIRED_STEM), '#!/usr/bin/env bash\necho ok\n');
+    chmodSync(join(f.bin, RETIRED_STEM), 0o755);
     const result = run(f);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('drift: ms365-token-backup script');
+    expect(result.stderr).toContain(`retired: ${RETIRED_STEM} script is installed`);
+    expect(result.stderr).toContain('remove');
+    expect(result.stdout).not.toContain('all managed launchd surfaces match');
+  });
+
+  it('never opens a retired plist in the maintenance scan', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`), 'not a plist\n');
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`retired: ${RETIRED_STEM} plist is installed`);
+    expect(result.stdout).toContain('ok: harness-maintenance');
+  });
+
+  it('skips a retired plist in the collector scan only when its Label is the retired label', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const plist = join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`);
+    writeFileSync(plist, plistXml(`com.whatsoup.${RETIRED_STEM}`, '/opt/x/bot_errors_j1_collector.py'));
+    expect(run(f).stdout).not.toContain('unmanaged collector job');
+    writeFileSync(plist, plistXml('com.example.other', '/opt/x/bot_errors_j1_collector.py'));
+    expect(run(f).stdout).toContain(`warn: unmanaged collector job: com.whatsoup.${RETIRED_STEM}`);
+  });
+
+  it('checks a retired name that a configured instance owns as that instance', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const config = join(f.home, '.config/whatsoup/instances', RETIRED_STEM);
+    mkdirSync(config, { recursive: true });
+    writeFileSync(join(config, 'config.json'), '{}\n');
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}.plist`), plistXml(`com.whatsoup.${RETIRED_STEM}`, '/usr/local/bin/node', true));
+    writeFileSync(join(f.launchd, `com.whatsoup.${RETIRED_STEM}-watchdog.plist`), subst(WATCHDOG_TEMPLATE, f.repo, f.home, RETIRED_STEM));
+    writeFileSync(join(f.bin, `${RETIRED_STEM}-watchdog`), '#!/usr/bin/env bash\necho ok\n');
+    chmodSync(join(f.bin, `${RETIRED_STEM}-watchdog`), 0o755);
+    const result = run(f, [], { XDG_CONFIG_HOME: join(f.home, '.config') });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`ok: ${RETIRED_STEM} plist structural`);
+    expect(result.stdout + result.stderr).not.toContain('retired:');
+    expect(result.stdout + result.stderr).not.toContain(FAKE_SECRET);
+  });
+
+  it('says nothing about a retired job the host does not have', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain(RETIRED_STEM);
   });
 });
 
@@ -885,8 +944,6 @@ describe('manifest parity (deploy/managed-components.json)', () => {
         && src.includes('check_template_surface "$bot-watchdog plist"'),
       'reply-guarantee': () => src.includes('check_template_surface "reply-guarantee"'),
       'release-drift-check': () => count('check_release_drift_surface') >= 2,
-      'ms365-token-backup': () => src.includes('check_optional_template_surface "ms365-token-backup"')
-        && count('check_ms365_script') >= 2,
       'bot-errors-j1-collector': () => src.includes('check_optional_template_surface "bot-errors-j1-collector"')
         && count('check_j1_collector_script') >= 2,
     };
@@ -895,6 +952,17 @@ describe('manifest parity (deploy/managed-components.json)', () => {
       expect(probe, `no parity probe defined for protective service: ${entry.name} — add one to WIRED`).toBeDefined();
       expect(probe!(), `checker must WIRE protective service: ${entry.name}`).toBe(true);
     }
+  });
+
+  it('keeps a retired job out of the manifest and wires it only as retired', () => {
+    const manifest = JSON.parse(readFileSync(join(process.cwd(), 'deploy/managed-components.json'), 'utf8'));
+    const src = readFileSync(SCRIPT, 'utf8');
+    const names = (manifest.protective_services.entries as Array<{ name: string }>).map((entry) => entry.name);
+    expect(names).not.toContain(RETIRED_STEM);
+    expect(src).toMatch(new RegExp(`^RETIRED_STEMS=\\([^)]*\\b${RETIRED_STEM}\\b[^)]*\\)$`, 'm'));
+    expect(src).not.toMatch(new RegExp(`^NON_INSTANCE_STEMS=\\([^)]*\\b${RETIRED_STEM}\\b`, 'm'));
+    expect(src.split('check_retired_surfaces').length - 1).toBeGreaterThanOrEqual(2);
+    expect(src).not.toContain(`deploy/templates/com.whatsoup.${RETIRED_STEM}.plist`);
   });
 });
 

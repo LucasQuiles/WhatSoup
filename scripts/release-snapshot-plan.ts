@@ -39,6 +39,17 @@ export const DEFAULT_RELEASE_MUTABLE_EXCLUDES = [
   RELEASE_MANIFEST_FILE,
 ] as const;
 
+/**
+ * Tracked paths `.gitattributes` marks `export-ignore`, so `git archive` never stages them. They are not copied into a
+ * release and not listed in its manifest; unlike a mutable exclude, the drift check still reports one found in a
+ * release. Today: the retired token backup job's templates, tracked until they can be deleted
+ * (docs/releases/2026-11-20-token-backup-job-retired.md). Keep this list equal to the `.gitattributes` lines.
+ */
+export const RELEASE_EXPORT_IGNORED_PATHS: readonly string[] = [
+  'deploy/templates/com.whatsoup.ms365-token-backup.plist',
+  'deploy/templates/ms365-token-backup.sh',
+];
+
 // A tree that ships the console source requires its host build (the `dist/**`
 // exclude above), so a release without it reports `required-output-missing`
 // instead of reading clean.
@@ -160,6 +171,14 @@ function normalizeRepoPath(filePath: string): string {
   return normalized;
 }
 
+// The retired path a required output names, if any. Activation joins the
+// output's segments with path.join on a case-insensitive macOS volume, so the
+// comparison folds case and ignores doubled, `.` and trailing separators.
+function retiredReleasePath(relPath: string): string | undefined {
+  const canonical = path.posix.normalize(relPath).replace(/\/+$/, '').toLowerCase();
+  return RELEASE_EXPORT_IGNORED_PATHS.find((retired) => retired.toLowerCase() === canonical);
+}
+
 function requireAbsolute(label: string, value: string): string {
   if (!path.isAbsolute(value)) throw new Error(`${label} must be absolute`);
   return path.resolve(value);
@@ -270,7 +289,7 @@ export function createReleaseSnapshotPlan(options: CreateReleaseSnapshotPlanOpti
   const mutablePathExcludes = [...(options.mutablePathExcludes ?? DEFAULT_RELEASE_MUTABLE_EXCLUDES)];
   const trackedPaths = [...new Set(options.trackedFiles.map(normalizeRepoPath))];
   const files = trackedPaths
-    .filter((filePath) => !matchesExclude(filePath, mutablePathExcludes))
+    .filter((filePath) => !matchesExclude(filePath, mutablePathExcludes) && !RELEASE_EXPORT_IGNORED_PATHS.includes(filePath))
     .sort()
     .map((filePath) => readSourceFile(sourceRoot, filePath));
 
@@ -278,6 +297,15 @@ export function createReleaseSnapshotPlan(options: CreateReleaseSnapshotPlanOpti
     ...(options.requiredOutputs ?? []),
     ...(trackedPaths.includes(CONSOLE_PACKAGE_FILE) ? [CONSOLE_BUILD_OUTPUT] : []),
   ].map(normalizeRepoPath))].sort();
+  // A retired path is export-ignored, so no release holds it. Requiring one
+  // would publish a manifest that only the retired file, put back, satisfies.
+  for (const relPath of requiredOutputs) {
+    const retired = retiredReleasePath(relPath);
+    if (retired !== undefined) {
+      const given = relPath === retired ? '' : ` (given as ${relPath})`;
+      throw new Error(`required output ${retired} is retired from releases${given}: it is export-ignored, so no release may require it`);
+    }
+  }
 
   const manifest: ReleaseSnapshotManifest = {
     schemaVersion: 2,

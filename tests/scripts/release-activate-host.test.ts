@@ -452,6 +452,97 @@ describe('release:activate-host group transaction', () => {
     expect(plan.document.preconditions).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'loaded:com.whatsoup.rogue', ok: false })]));
   });
 
+  // A job retired from the standard (docs/releases/2026-11-20-token-backup-job-retired.md) refuses by name with the
+  // files to remove, whether only its plist is left or launchd still has it loaded; never as a missing load.
+  it.each([['installed but unloaded', false], ['installed and loaded', true]] as const)('refuses a retired job that is %s, by name, and says to remove it', async (_state, loaded) => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const contents = plist(label, [path.join(world.home, '.local', 'bin', 'ms365-token-backup')], world.home);
+    if (loaded) world.addJob(label, contents); else writeFileSync(path.join(world.launchAgents, `${label}.plist`), contents);
+    const plan = await planTwoMemberWorld(world);
+    expect(plan.ready).toBe(false);
+    const rows = (plan.document.preconditions as Array<{ id: string }>).filter((row) => row.id.endsWith(`:${label}`));
+    expect(rows).toEqual([
+      expect.objectContaining({ id: `retired:${label}`, ok: false, detail: expect.stringMatching(/retired from the standard.*remove/) }),
+    ]);
+  });
+
+  it.each([['present', true], ['gone', false]] as const)('names the plist a retired job was loaded from, the canonical plist when %s, and the script', async (_state, canonicalPresent) => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const script = path.join(world.home, '.local', 'bin', 'ms365-token-backup'); writeFileSync(script, '#!/bin/sh\n');
+    const elsewhere = path.join(world.root, 'elsewhere', `${label}.plist`); mkdirSync(path.dirname(elsewhere), { recursive: true });
+    writeFileSync(elsewhere, plist(label, [script], world.home));
+    const canonical = world.addJob(label, plist(label, [script], world.home));
+    if (!canonicalPresent) unlinkSync(canonical);
+    const fake = world.host.exec;
+    const loaded = `gui/501/${label} = {\n\tpath = ${elsewhere}\n\ttype = LaunchAgent\n\tprogram = ${script}\n\tstate = running\n\tpid = 4242\n\targuments = {\n\t\t${script}\n\t}\n}\n`;
+    world.host.exec = (file, args, options) => (file === '/bin/launchctl' && args[0] === 'print' && args[1] === `gui/501/${label}` ? Promise.resolve({ code: 0, stdout: loaded, stderr: '' }) : fake(file, args, options));
+    const plan = await planTwoMemberWorld(world);
+    const rows = (plan.document.preconditions as Array<{ id: string; ok: boolean; detail: string }>).filter((row) => row.id.endsWith(`:${label}`));
+    expect(rows.map((row) => [row.id, row.ok])).toEqual([[`retired:${label}`, false]]);
+    expect(rows[0]!.detail).toContain(`boot the job out (loaded from ${elsewhere})`);
+    expect(rows[0]!.detail).toContain(script);
+    expect(rows[0]!.detail.includes(canonical)).toBe(canonicalPresent);
+    // The loaded-from plist is in the remove list itself, first, not only in the boot-out text.
+    expect(rows[0]!.detail.split(', then remove ')[1]?.split(' and ')).toEqual([elsewhere, ...(canonicalPresent ? [canonical] : []), script]);
+  });
+
+  it('leaves a canonical plist whose Label is another job out of the remove list while the retired job is loaded from elsewhere', async () => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const script = path.join(world.home, '.local', 'bin', 'ms365-token-backup'); writeFileSync(script, '#!/bin/sh\n');
+    const elsewhere = path.join(world.root, 'elsewhere', `${label}.plist`); mkdirSync(path.dirname(elsewhere), { recursive: true });
+    writeFileSync(elsewhere, plist(label, [script], world.home));
+    const canonical = world.addJob(label, plist('com.example.other', ['/usr/bin/true'], world.home));
+    const fake = world.host.exec;
+    const loaded = `gui/501/${label} = {\n\tpath = ${elsewhere}\n\ttype = LaunchAgent\n\tprogram = ${script}\n\tstate = running\n\tpid = 4242\n\targuments = {\n\t\t${script}\n\t}\n}\n`;
+    world.host.exec = (file, args, options) => (file === '/bin/launchctl' && args[0] === 'print' && args[1] === `gui/501/${label}` ? Promise.resolve({ code: 0, stdout: loaded, stderr: '' }) : fake(file, args, options));
+    const rows = ((await planTwoMemberWorld(world)).document.preconditions as Array<{ id: string; detail: string }>).filter((row) => row.id.endsWith(`:${label}`));
+    expect(rows.map((row) => row.id)).toEqual([`retired:${label}`]);
+    expect(rows[0]!.detail.split(', then remove ')[1]?.split(' and ')).toEqual([elsewhere, script]);
+    expect(rows[0]!.detail).not.toContain(canonical);
+  });
+
+  it('checks a configured instance that owns the retired name as an instance, never as the retired job', async () => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    const config = path.join(world.home, '.config', 'whatsoup', 'instances', 'ms365-token-backup'); mkdirSync(config, { recursive: true });
+    writeFileSync(path.join(config, 'config.json'), JSON.stringify({ healthPort: 19003 }));
+    writeFileSync(path.join(world.launchAgents, `${label}.plist`), plist(label, [world.link, 'ms365-token-backup'], world.oldRelease));
+    const plan = await planTwoMemberWorld(world);
+    const ids = (plan.document.preconditions as Array<{ id: string }>).map((row) => row.id).filter((id) => id.endsWith(`:${label}`));
+    expect(ids).not.toContain(`retired:${label}`);
+    expect(ids).toContain(`loaded:${label}`);
+  });
+
+  const retiredRows = async (world: TwoMemberWorld): Promise<Array<{ id: string; detail: string }>> =>
+    ((await planTwoMemberWorld(world)).document.preconditions as Array<{ id: string; detail: string }>).filter((row) => row.id.endsWith(':com.whatsoup.ms365-token-backup'));
+
+  it('says only to boot out a loaded retired job whose plist and script are gone and whose load path is unread', async () => {
+    const world = twoMemberWorld();
+    const label = 'com.whatsoup.ms365-token-backup';
+    unlinkSync(world.addJob(label, plist(label, [path.join(world.home, '.local', 'bin', 'ms365-token-backup')], world.home)));
+    const fake = world.host.exec;
+    world.host.exec = (file, args, options) => (file === '/bin/launchctl' && args[0] === 'print' && args[1] === `gui/501/${label}` ? Promise.resolve({ code: 113, stdout: '', stderr: '' }) : fake(file, args, options));
+    expect((await retiredRows(world)).map((row) => [row.id, row.detail])).toEqual([[`retired:${label}`, 'retired from the standard; boot the job out; no plist or script is left to remove']]);
+  });
+
+  it('gives no retired row for a plist with the retired file name whose Label is another job', async () => {
+    const world = twoMemberWorld();
+    writeFileSync(path.join(world.launchAgents, 'com.whatsoup.ms365-token-backup.plist'), plist('com.example.other', ['/usr/bin/true'], world.home));
+    const ids = (await retiredRows(world)).map((row) => row.id);
+    expect(ids).not.toContain('retired:com.whatsoup.ms365-token-backup');
+    expect(ids).toContain('installed:com.whatsoup.ms365-token-backup');
+  });
+
+  it('does not take a directory named config.json as an instance owning the retired name', async () => {
+    const world = twoMemberWorld();
+    mkdirSync(path.join(world.home, '.config', 'whatsoup', 'instances', 'ms365-token-backup', 'config.json'), { recursive: true });
+    writeFileSync(path.join(world.launchAgents, 'com.whatsoup.ms365-token-backup.plist'), plist('com.whatsoup.ms365-token-backup', ['/usr/bin/true'], world.home));
+    expect((await retiredRows(world)).map((row) => row.id)).toEqual(['retired:com.whatsoup.ms365-token-backup']);
+  });
+
   it('refuses an external-label installed consumer of a member old release before any mutation', async () => {
     const world = twoMemberWorld();
     writeFileSync(path.join(world.launchAgents, 'com.bot-errors.health.plist'), plist('com.bot-errors.health', ['/bin/bash', `${world.oldRelease}/deploy/scripts/health-reader.sh`], world.oldRelease));

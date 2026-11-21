@@ -279,7 +279,7 @@ describe('migration 56 — inbound_events.processing_status CHECK constraint', (
     const db = new Database(':memory:');
     try {
       db.open();
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(69);
+      expect(CURRENT_SCHEMA_MIGRATION).toBe(70);
       expect(
         (
           db.raw
@@ -295,7 +295,7 @@ describe('migration 56 — inbound_events.processing_status CHECK constraint', (
           .get() as { sql: string }
       ).sql;
       expect(sql).toContain('CHECK (processing_status IN');
-      // All eight production triggers survive the rebuild.
+      // The rebuilt triggers coexist with the later source-identity guard.
       const triggers = (
         db.raw
           .prepare(
@@ -303,7 +303,8 @@ describe('migration 56 — inbound_events.processing_status CHECK constraint', (
           )
           .all() as Array<{ name: string }>
       ).map((row) => row.name);
-      expect(triggers).toHaveLength(8);
+      expect(triggers).toHaveLength(9);
+      expect(triggers).toContain('operator_catchup_resolution_source_immutable');
       // Production cross-table triggers referencing inbound_events survive.
       const cross = (
         db.raw

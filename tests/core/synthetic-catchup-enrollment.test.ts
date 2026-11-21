@@ -305,7 +305,7 @@ describe('synthetic scheduled-job catch-up enrollment (#3754)', () => {
         ) VALUES ('per_chat', ?, ?, ?, ?, ?, 'catchup-manager', 1, 'replied',
                   'finalized_replied', 'echoed', ?, 1)
       `).run(CONVERSATION_KEY, CHAT_JID, catchupSeq, catchupSeq, `catchup-turn-${label}`, opId);
-      return closeOperatorCatchupRecovery(db, {
+      return closeOperatorCatchupRecovery(db, { originalFulfillmentConfirmed: true,
         planId,
         conversationKey: CONVERSATION_KEY,
         expectedSourceSeqs: [sourceSeq],

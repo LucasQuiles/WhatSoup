@@ -123,6 +123,21 @@ describe('ops-lifecycle handlers', () => {
     expect(deps.serviceManager.enable).not.toHaveBeenCalled();
   });
 
+  it('create refuses a name reserved by a retired launchd job, says why, and writes nothing', async () => {
+    const deps = makeDeps<any>({}) as OpsDeps;
+    const res = mockRes();
+
+    await handleCreateLine(
+      mockReq({ method: 'POST', body: JSON.stringify({ name: 'ms365-token-backup', type: 'chat', adminPhones: ['15551230006'] }) }),
+      res, deps,
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toMatch(/^name 'ms365-token-backup' is reserved: com\.whatsoup\.ms365-token-backup is the label of a retired launchd job/);
+    expect(fs.existsSync(path.join(tmpDir, 'config'))).toBe(false);
+    expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+  });
+
   it('creates a configured M365 agent with the full deny floor before launch', async () => {
     const { REQUIRED_DENY } = await import('../../../src/core/settings-template.ts');
     const { lookupCredential } = await import('../../../src/lib/keyring.ts');

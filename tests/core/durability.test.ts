@@ -631,6 +631,52 @@ describe('DurabilityEngine', () => {
   });
 
   describe('sendTracked', () => {
+    it('binds an operator catch-up to the exact pending request without retrying the original', async () => {
+      const seq = engine.journalInbound('missed-request', '15550000002', '15550000002@s.whatsapp.net', 'agent');
+      db.raw.prepare("UPDATE inbound_events SET processing_status = 'failed' WHERE seq = ?").run(seq);
+      db.raw.exec(`INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+        VALUES ('catchup-plan', 'operator', 'operator:test', 'Missed request')`);
+      db.raw.prepare(`INSERT INTO inbound_disposition_links
+        (inbound_seq, recovery_plan_id, disposition, reason, actor)
+        VALUES (?, 'catchup-plan', 'recovery_pending_operator_catchup', 'No reply', 'operator:test')`).run(seq);
+      const messenger = {
+        sendMessage: async () => ({ waMessageId: 'WA_OPERATOR_REPLY' }),
+        sendMedia: async () => ({ waMessageId: null }),
+      };
+      await sendTracked(messenger, '15550000002@s.whatsapp.net', 'The requested result', engine, {
+        replayPolicy: 'unsafe', caller: 'health',
+        operatorCatchup: { planId: 'catchup-plan', sourceSeq: seq, actor: 'operator:test', evidenceRef: 'test://authorized-reply' },
+      });
+      expect(db.raw.prepare(`SELECT source_inbound_seq, conversation_key, is_terminal, replay_policy
+        FROM outbound_ops WHERE wa_message_id = 'WA_OPERATOR_REPLY'`).get()).toEqual({
+        source_inbound_seq: seq, conversation_key: '15550000002', is_terminal: 0, replay_policy: 'unsafe',
+      });
+      expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq))
+        .toEqual({ processing_status: 'failed' });
+    });
+
+    it('stores a mapped LID reply under the same conversation as its original inbound', async () => {
+      db.raw.prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+        .run('900001', '15550000001@s.whatsapp.net');
+      const seq = engine.journalInbound('mapped-request', '15550000001', '900001@lid', 'agent');
+      const messenger = {
+        sendMessage: async () => ({ waMessageId: 'WA_MAPPED_REPLY' }),
+        sendMedia: async () => ({ waMessageId: null }),
+      };
+
+      await sendTracked(messenger, '900001@lid', 'The requested result', engine, {
+        replayPolicy: 'unsafe', sourceInboundSeq: seq,
+      });
+
+      expect(db.raw.prepare(`
+        SELECT conversation_key, chat_jid, source_inbound_seq, status
+        FROM outbound_ops WHERE wa_message_id = 'WA_MAPPED_REPLY'
+      `).get()).toEqual({
+        conversation_key: '15550000001', chat_jid: '900001@lid',
+        source_inbound_seq: seq, status: 'submitted',
+      });
+    });
+
     it('creates outbound op, marks sending, marks submitted on success', async () => {
       const mockMessenger = {
         sendMessage: vi.fn().mockResolvedValue({ waMessageId: 'WA_123' }),

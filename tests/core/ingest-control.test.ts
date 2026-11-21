@@ -60,7 +60,8 @@ vi.mock('../../src/core/access-policy.ts', () => ({
 }));
 
 // Real extractLocal implementation (strips @domain suffix)
-vi.mock('../../src/core/access-list.ts', () => ({
+vi.mock('../../src/core/access-list.ts', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   extractLocal: vi.fn((jid: string) => jid.split('@')[0]),
   resolvePhoneFromJid: vi.fn((jid: string) => jid.split('@')[0]),
   // QR-143 (B4): grant primitive — authenticated transports resolve to the

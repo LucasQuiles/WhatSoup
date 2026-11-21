@@ -511,6 +511,7 @@ export const NON_STATUS_TABLES: Set<string> = new Set([
   'messages_fts_idx',
   'metrics_hourly',
   'operator_catchup_closure_witnesses',
+  'operator_catchup_resolutions',
   'outbound_quarantine_retirements',
   'pending_heal_reports',
   'pending_polls',

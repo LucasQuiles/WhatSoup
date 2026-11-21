@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { createInternalOutboundFailureEvidence } from '../../src/core/outbound-failure-disposition.ts';
+import { processHistoryBatch } from '../../src/core/history-sync.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSource = vi.hoisted(() => vi.fn(() => true));
@@ -38,11 +39,11 @@ function makeDb(): Database {
 }
 
 /** Insert a raw message into the messages table (simulating an ingest echo). */
-function insertMessage(db: Database, messageId: string, chatJid = 'jid-1@s.whatsapp.net'): void {
+function insertMessage(db: Database, messageId: string, chatJid = 'jid-1@s.whatsapp.net', conversationKey = chatJid): void {
   db.raw.prepare(
     `INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
      VALUES (?, ?, ?, ?, 'text', 1, ?)`,
-  ).run(chatJid, chatJid, 'bot@s.whatsapp.net', messageId, Date.now());
+  ).run(chatJid, conversationKey, 'bot@s.whatsapp.net', messageId, Date.now());
 }
 
 /** Read a single row from tool_calls by id. */
@@ -382,7 +383,7 @@ describe('DurabilityEngine — postConnectRecovery()', () => {
     engine.markMaybeSent(opId, 'crash-in-flight');
 
     // Simulate the echo arriving via normal ingest
-    insertMessage(db, 'WA_MSG_FOUND_1');
+    insertMessage(db, 'WA_MSG_FOUND_1', 'j1', 'k1');
 
     const stats = engine.postConnectRecovery();
 
@@ -935,10 +936,10 @@ describe('DurabilityEngine — end-to-end recovery scenario', () => {
 
   it('full crash-and-recovery cycle: sending → maybe_sent → echoed via messages table', () => {
     // Simulate: inbound arrived, outbound created, sending state, then crash
-    const seq = engine.journalInbound('msg-full-1', 'k1', 'j1@s.whatsapp.net', 'agent');
+    const seq = engine.journalInbound('msg-full-1', 'j1', 'j1@s.whatsapp.net', 'agent');
     engine.markTurnDone(seq);
     const opId = engine.createOutboundOp({
-      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      conversationKey: 'j1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
       payload: '{"text":"reply"}', replayPolicy: 'unsafe',
       sourceInboundSeq: seq, isTerminal: true,
     });
@@ -952,7 +953,10 @@ describe('DurabilityEngine — end-to-end recovery scenario', () => {
     expect(preStats.outboundReconciled).toBe(1);
 
     // Simulate the message arriving via history sync (echo)
-    insertMessage(db, 'wa-msg-reply-1');
+    expect(processHistoryBatch(db, [{
+      key: { id: 'wa-msg-reply-1', remoteJid: 'j1@s.whatsapp.net', fromMe: true },
+      messageTimestamp: 1, message: { conversation: 'reply' },
+    }])).toMatchObject({ inserted: 1, failed: 0 });
     // Fix: the op needs a wa_message_id to be matched — simulate markSubmitted happened before crash
     db.raw.prepare('UPDATE outbound_ops SET wa_message_id = ? WHERE id = ?').run('wa-msg-reply-1', opId);
 
@@ -979,13 +983,16 @@ describe('DurabilityEngine — end-to-end recovery scenario', () => {
 
     // Op 2: unsafe, wa_message_id found in messages → echoed
     const op2 = engine.createOutboundOp({
-      conversationKey: 'k1', chatJid: 'j1', opType: 'text',
+      conversationKey: 'j1', chatJid: 'j1@s.whatsapp.net', opType: 'text',
       payload: '{"text":"unsafe-sent"}', replayPolicy: 'unsafe',
     });
     engine.markSending(op2);
     db.raw.prepare('UPDATE outbound_ops SET status = ?, wa_message_id = ? WHERE id = ?')
       .run('maybe_sent', 'WA_CONFIRMED', op2);
-    insertMessage(db, 'WA_CONFIRMED');
+    expect(processHistoryBatch(db, [{
+      key: { id: 'WA_CONFIRMED', remoteJid: 'j1@s.whatsapp.net', fromMe: true },
+      messageTimestamp: 1, message: { conversation: 'unsafe-sent' },
+    }])).toMatchObject({ inserted: 1, failed: 0 });
 
     // Op 3: unsafe, wa_message_id not found → quarantined
     const op3 = engine.createOutboundOp({

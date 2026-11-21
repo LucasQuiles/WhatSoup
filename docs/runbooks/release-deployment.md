@@ -558,6 +558,18 @@ installed consumer of a selected shared wrapper is declared (the limits are
 below). It prints only paths,
 digests, membership, port numbers, and state; it never prints health tokens,
 config contents, plist environment values, or health bodies.
+A WhatSoup job retired from the standard refuses by name when its plist is
+installed or its label is loaded in the running user's launchd domain
+(`retired:<label>`). The detail says to boot a loaded job out, names the plist
+launchd loaded it from when that differs from the canonical one, and names the
+canonical plist and the script when they exist; with nothing left to remove it
+says only to boot the job out. A plist with the retired file name whose own
+`Label` is another job is never named for removal. A leftover script alone is not
+detected. Planning never loads, reloads or counts a retired job as a member. An
+instance that owns the name (a regular `config.json` under the instance config
+root, `$XDG_CONFIG_HOME/whatsoup/instances` or `~/.config/whatsoup/instances`) is
+checked as an instance instead. The host steps, due before the next login or
+restart, are in [the retirement note](../releases/2026-11-20-token-backup-job-retired.md).
 `--backup-dir` has the `release:activate` rule: absent, or a real directory
 owned by the current user with no group or other access, checked for each
 member (`<instance>:backup-dir-private-owned`) when planning and again by

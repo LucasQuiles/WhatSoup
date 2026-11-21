@@ -12,8 +12,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { Database } from '../../src/core/database.ts';
+import { CURRENT_SCHEMA_MIGRATION } from '../../src/core/database-schema-version.ts';
+import { DurabilityEngine, sendTrackedWithReceipt } from '../../src/core/durability.ts';
 import { closeOperatorCatchupRecoveryRaw } from '../../src/core/recovery-catchup-closure.ts';
 import {
+  assertSchema43Foundation,
   classifyError,
   loadOrCreateRedactionSalt,
   openExistingWritableDatabase,
@@ -44,6 +47,14 @@ function runCliSubprocess(args: string[]): { code: number; stdout: string; stder
   );
   return { code: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
+
+it('refuses a future schema instead of treating a contiguous ledger as compatible', () => {
+  const db = new Database(':memory:'); db.open();
+  try {
+    db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION + 1);
+    expect(() => assertSchema43Foundation(db.raw)).toThrow(/newer than supported/i);
+  } finally { db.close(); }
+});
 
 const tmp = trackTmpDirs('whatsoup-close-');
 
@@ -150,6 +161,7 @@ function argsFor(fixture: RecoveryFixture, extra: string[] = []): string[] {
     '--catchup-seq', String(fixture.catchupSeq),
     '--actor', 'operator:private',
     '--evidence-ref', 'secret://must-not-echo',
+    '--confirm-original-fulfillment',
     ...extra,
   ];
 }
@@ -184,6 +196,36 @@ afterEach(() => {
 });
 
 describe('close-recovery-catchup CLI', () => {
+  it('inspects and confirms a bound operator reply without creating a later inbound', async () => {
+    const dbPath = path.join(makeTempRoot(), 'bound.db');
+    const db = new Database(dbPath); db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const seq = engine.journalInbound('original-bound-request', '15550000005', '15550000005@s.whatsapp.net', 'agent');
+      db.raw.exec(`INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+        VALUES ('bound-plan', 'operator', 'operator:test', 'Pending request')`);
+      db.raw.prepare(`INSERT INTO inbound_disposition_links (inbound_seq, recovery_plan_id, disposition, reason, actor)
+        VALUES (?, 'bound-plan', 'recovery_pending_operator_catchup', 'No reply', 'operator:test')`).run(seq);
+      const opId = await sendTrackedWithReceipt({
+        sendMessage: async () => ({ waMessageId: 'WA_BOUND_CLI' }), sendMedia: async () => ({ waMessageId: null }),
+      }, '15550000005@s.whatsapp.net', 'Requested result', engine, {
+        replayPolicy: 'unsafe', caller: 'health', operatorCatchup: {
+          planId: 'bound-plan', sourceSeq: seq, actor: 'operator:test', evidenceRef: 'test://authorized-response',
+        },
+      });
+      engine.markEchoed(opId!);
+      const args = ['--db', dbPath, '--plan-id', 'bound-plan', '--conversation-key', '15550000005',
+        '--source-seqs', String(seq), '--operator-op', String(opId), '--actor', 'operator:test',
+        '--evidence-ref', 'test://original-fulfilled', '--confirm-original-fulfillment'];
+      expect(captureRun(args).output).toMatchObject({ dryRun: true, inserted: 0, ready: true });
+      expect(db.raw.prepare('SELECT * FROM operator_catchup_resolutions').all()).toEqual([]);
+      expect(captureRun([...args, '--confirm']).output).toMatchObject({ dryRun: false, inserted: 1 });
+      expect(captureRun([...args, '--confirm']).output).toMatchObject({ inserted: 0, idempotent: true });
+      expect(db.raw.prepare('SELECT COUNT(*) AS n FROM inbound_events').get()).toEqual({ n: 1 });
+      expect(() => captureRun(args.filter((arg) => arg !== '--confirm-original-fulfillment')))
+        .toThrow('Original request fulfillment must be confirmed');
+    } finally { db.close(); }
+  });
   it('is exposed through the pinned package script', () => {
     expect(packageJson.scripts['close-recovery-catchup']).toBe(
       'bash scripts/run-with-pinned-node.sh scripts/close-recovery-catchup.ts',
@@ -323,7 +365,7 @@ describe('close-recovery-catchup CLI', () => {
     const raw = new DatabaseSync(fixture.dbPath);
     try {
       raw.exec('PRAGMA foreign_keys = OFF');
-      expect(() => closeOperatorCatchupRecoveryRaw(raw, {
+      expect(() => closeOperatorCatchupRecoveryRaw(raw, { originalFulfillmentConfirmed: true,
         planId: fixture.planId,
         conversationKey: fixture.conversationKey,
         expectedSourceSeqs: fixture.sourceSeqs,
@@ -346,7 +388,7 @@ describe('close-recovery-catchup CLI', () => {
       contender.exec('PRAGMA foreign_keys = ON');
       contender.exec('PRAGMA busy_timeout = 1');
 
-      expect(() => closeOperatorCatchupRecoveryRaw(contender, {
+      expect(() => closeOperatorCatchupRecoveryRaw(contender, { originalFulfillmentConfirmed: true,
         planId: fixture.planId,
         conversationKey: fixture.conversationKey,
         expectedSourceSeqs: fixture.sourceSeqs,
@@ -372,7 +414,7 @@ describe('close-recovery-catchup CLI', () => {
       owner.exec('PRAGMA foreign_keys = ON');
       competingWriter.exec('PRAGMA busy_timeout = 1');
 
-      expect(() => closeOperatorCatchupRecoveryRaw(owner, {
+      expect(() => closeOperatorCatchupRecoveryRaw(owner, { originalFulfillmentConfirmed: true,
         planId: fixture.planId,
         conversationKey: fixture.conversationKey,
         expectedSourceSeqs: fixture.sourceSeqs,
@@ -787,6 +829,8 @@ describe('classifyError (bounded error-code taxonomy)', () => {
     ['Usage: close-recovery-catchup --db PATH ...', 'invalid_args'],
     ['Database must include canonical schema 43 receipts', 'invalid_proof'],
     ['Database must include contiguous schema 43+ receipts (migrations 1 through current)', 'invalid_proof'],
+    ['Database schema is newer than supported by this binary', 'invalid_proof'],
+    ['Operator catch-up fulfillment schema drift', 'invalid_proof'],
     ['canonical schema 43 receipt is missing', 'invalid_proof'],
     ['canonical schema 43 objects are missing or drifted: operator_catchup_closure_witness_append_only_update', 'invalid_proof'],
     ['Recovery plan does not exist', 'invalid_proof'],

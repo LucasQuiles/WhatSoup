@@ -5,6 +5,13 @@ function sqlAlias(value: string): string {
   return value;
 }
 
+/** A separately authorized catch-up says nothing about the original send's delivery. */
+export function notOperatorCatchupSql(outboundAlias: string): string {
+  const op = sqlAlias(outboundAlias);
+  return `CASE WHEN json_valid(${op}.payload)
+    THEN json_type(${op}.payload, '$.operatorCatchup') IS NULL ELSE 1 END`;
+}
+
 /**
  * Canonical semantic proof for a selected delivery: an append-only
  * corroboration row whose candidate is a later echoed operation for the same
@@ -25,6 +32,7 @@ export function validDeliveryCorroborationForTerminalSql(terminalAlias: string):
      AND candidate.chat_jid = selected.chat_jid
      AND candidate.status = 'echoed'
      AND candidate.id > selected.id
+     AND ${notOperatorCatchupSql('candidate')}
     WHERE selected.id = ${terminal}.delivery_op_id
       AND ${terminal}.delivery_kind = 'delivery_unknown'
       AND ${terminal}.inbound_seq IS NOT NULL
@@ -58,6 +66,7 @@ export function validDeliveryCorroboratedSelectedOpsSql(): string {
      AND candidate.chat_jid = selected.chat_jid
      AND candidate.status = 'echoed'
      AND candidate.id > selected.id
+     AND ${notOperatorCatchupSql('candidate')}
     WHERE corroboration.basis = 'same_source_later_echoed_op'`;
 }
 

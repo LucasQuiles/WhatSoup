@@ -24,7 +24,7 @@ import { pausedChatAdmission } from './paused-chat.ts';
 import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
 import { isBotMentioned } from './access-predicates.ts';
-import { resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
+import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { isLidJid, bareNumber, isStatusBroadcastJid } from './jid-constants.ts';
 import { stripSelfMentionsFrom } from '../lib/self-mention-strip.ts';
@@ -284,7 +284,7 @@ export function createIngestHandler(
           const storedEcho = persistIncomingMessage(db, msg);
           if (durability) {
             try {
-              durability.matchEcho(msg.messageId);
+              durability.matchEcho(msg.messageId, msg.chatJid);
             } catch (err) {
               log.error({ err, messageId: msg.messageId }, 'failed to correlate outbound echo');
             }
@@ -351,7 +351,7 @@ export function createIngestHandler(
             }
 
             if (durability) {
-              const seq = durability.journalInbound(msg.messageId, toConversationKey(msg.chatJid), msg.chatJid, 'control');
+              const seq = durability.journalInbound(msg.messageId, canonicalConversationKey(msg.chatJid, db), msg.chatJid, 'control');
               durability.markInboundSkipped(seq, 'control_message');
             }
             return;

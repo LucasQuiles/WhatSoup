@@ -115,6 +115,43 @@ function installEchoedReply(raw: DatabaseSync, seq: number, conversation = CONVE
   `).run(conversation, channel, seq, seq, `fixture-turn-${seq}`, opId);
 }
 
+/**
+ * Rewind a current database to schema 65, as the migration-66 upgrade test
+ * does: remove every receipt above 65 and the objects those migrations add (66:
+ * the closure ledger; 67 and 68: the protected-delivery and protected-secret
+ * tables; 69: the failed-terminal reply-debt index; 70: catch-up resolutions,
+ * the fulfillment column and the guards on pre-existing tables). Triggers go
+ * before the column they name. Then assert that the database holds none of them.
+ */
+function rewindToSchema65(raw: DatabaseSync): void {
+  raw.exec('DROP TRIGGER operator_catchup_resolution_outbound_immutable');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_source_immutable');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_no_legacy_close');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_fulfillment_required');
+  raw.exec('DROP TRIGGER operator_catchup_resolution_no_corroboration');
+  raw.exec('DROP TABLE operator_catchup_resolutions');
+  raw.exec('ALTER TABLE inbound_disposition_links DROP COLUMN original_fulfillment_confirmed');
+  raw.exec('DROP TABLE continuity_gap_closures');
+  raw.exec('DROP TABLE protected_delivery_events');
+  raw.exec('DROP TABLE protected_deliveries');
+  raw.exec('DROP TABLE protected_secret_inputs');
+  raw.exec('DROP INDEX idx_turn_terminal_failed_reply_debt');
+  raw.prepare('DELETE FROM schema_migrations WHERE version >= 66').run();
+  expect((raw.prepare('SELECT version FROM schema_migrations ORDER BY version')
+    .all() as Array<{ version: number }>).map((row) => Number(row.version)))
+    .toEqual(Array.from({ length: 65 }, (_, i) => i + 1));
+  expect(raw.prepare(`
+    SELECT type, name FROM sqlite_master
+    WHERE tbl_name IN ('continuity_gap_closures', 'protected_deliveries', 'protected_delivery_events',
+        'protected_secret_inputs', 'operator_catchup_resolutions')
+      OR name LIKE 'operator_catchup_resolution%'
+      OR name = 'idx_turn_terminal_failed_reply_debt'
+  `).all()).toEqual([]);
+  expect(raw.prepare(
+    "SELECT name FROM pragma_table_info('inbound_disposition_links') WHERE name = 'original_fulfillment_confirmed'",
+  ).all()).toEqual([]);
+}
+
 function buildFixture(): Fixture {
   const root = tmp.make('fixture');
   const dbPath = join(root, 'bot.db');
@@ -486,9 +523,11 @@ describe('close-continuity-gap preview', () => {
   it('reports schema_not_migrated for a snapshot without the closure ledger', () => {
     const fx = buildFixture();
     const raw = new DatabaseSync(fx.dbPath);
-    raw.exec('DROP TABLE continuity_gap_closures');
-    raw.prepare('DELETE FROM schema_migrations WHERE version >= 66').run();
-    raw.close();
+    try {
+      rewindToSchema65(raw);
+    } finally {
+      raw.close();
+    }
     const snapshot = makeSnapshot(fx);
     const result = run(fx, { snapshot }, writeManifest(fx, 'old', addressed(fx, 1)));
     expectRejected(result, 'blocked', 'schema_not_migrated');
