@@ -66,7 +66,7 @@ export function hasVisibleToolText(text: string): boolean {
 
 export function renderToolUpdates(
   updates: readonly ToolUpdate[],
-  mode: 'full' | 'minimal' | 'friendly',
+  mode: 'full' | 'minimal' | 'friendly' | 'unset',
 ): string {
   const categoryOrder: ToolCategory[] = [];
   const groups = new Map<ToolCategory, string[]>();

@@ -195,6 +195,53 @@ describe('loadContext', () => {
     expect(lines).toHaveLength(1);
   });
 
+  it('shows a legacy-id and a source-set-id record of one fact once, as the source-set record in the better slot', async () => {
+    // A consolidation promotion written before source-set identity keeps its
+    // claim-hash id; the same fact promoted again gets a durable:l1: id. In one
+    // leg the pair collapses to the source-set record, placed where the
+    // better-ranked twin was.
+    const pinecone = makeMockPinecone([
+      makeResult('durable:0123456789abcdef', 'user-a prefers green tea'),
+      makeResult('rec-other', 'user-a lives near the coast'),
+      makeResult('durable:l1:0123456789abcdef0123456789abcdef', 'user-a prefers green  tea'),
+    ]);
+
+    const result = await loadContext(
+      pinecone as any,
+      'chat@g.us',
+      'alice@s.whatsapp.net',
+      'test query',
+    );
+
+    const lines = result.split('\n').filter((l) => l.startsWith('- '));
+    expect(lines).toEqual(['- user-a prefers green  tea', '- user-a lives near the coast']);
+  });
+
+  it('keeps a user memory and a self fact with the same text, each under its own heading', async () => {
+    // Different recall legs never collapse, even for a legacy/source-set id pair.
+    const selfFact = makeResult('durable:l1:fedcba9876543210fedcba9876543210', 'prefers green tea');
+    selfFact.record.memoryType = 'self_fact';
+    const pinecone = makeMockPinecone(
+      [makeResult('durable:0123456789abcdef', 'prefers green tea')],
+      [],
+      [selfFact],
+    );
+
+    const result = await loadContext(
+      pinecone as any,
+      'chat@g.us',
+      'alice@s.whatsapp.net',
+      'test query',
+    );
+
+    const blocks = result.split('\n\n');
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatch(/^Background knowledge/);
+    expect(blocks[0]!.split('\n').filter((l) => l.startsWith('- '))).toEqual(['- prefers green tea']);
+    expect(blocks[1]).toMatch(/^Things you \(Loops\) have said about yourself before/);
+    expect(blocks[1]!.split('\n').filter((l) => l.startsWith('- '))).toEqual(['- prefers green tea']);
+  });
+
   it('chat results appear before sender results in the output (insertion order)', async () => {
     const pinecone = makeMockPinecone(
       [makeResult('c1', 'chat fact first')],

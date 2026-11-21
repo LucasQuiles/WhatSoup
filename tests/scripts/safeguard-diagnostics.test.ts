@@ -175,7 +175,7 @@ const qualityCiJobTimeoutBlock = [
   '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
   '    # one (the quality job runs the full suite + coverage and can take ~40min).',
   '    # Without this a hung run rides to the 6h GitHub default.',
-  '    timeout-minutes: 60',
+  '    timeout-minutes: 100',
   '    steps:',
 ].join('\n');
 
@@ -218,7 +218,7 @@ const requiredQualityWorkflow = [
   '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
   '    # one (the quality job runs the full suite + coverage and can take ~40min).',
   '    # Without this a hung run rides to the 6h GitHub default.',
-  '    timeout-minutes: 60',
+  '    timeout-minutes: 100',
   '    steps:',
   '      - name: Setup Node 24',
   '        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
@@ -1146,18 +1146,19 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
   });
 
-  it('fails when the quality job loses its bounded timeout', () => {
+  it('accepts the reviewed quality job budget of 100 minutes', () => {
+    const fixture = makeRepo();
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
+      .toMatchObject({ status: 'pass' });
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([60, 99, 101, 360])('rejects an unreviewed quality job timeout of %i minutes', (minutes) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
-    const mutated = workflow.replace(qualityCiJobTimeoutBlock, [
-      'quality:',
-      '    name: quality (24.x)',
-      '    runs-on: ubuntu-latest',
-      '    # Generous cap so it only kills a genuinely hung run, not a slow-but-live',
-      '    # one (the quality job runs the full suite + coverage and can take ~40min).',
-      '    # Without this a hung run rides to the 6h GitHub default.',
-      '    timeout-minutes: 360',
-      '    steps:',
-    ].join('\n'));
+    const mutated = workflow.replace(qualityCiJobTimeoutBlock,
+      qualityCiJobTimeoutBlock.replace('timeout-minutes: 100', `timeout-minutes: ${minutes}`));
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({
       files: {
@@ -1170,7 +1171,7 @@ describe('safeguard diagnostics', () => {
     expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
       .toMatchObject({
         status: 'fail',
-        evidence: expect.arrayContaining(['quality job timeout must be exactly 60 minutes']),
+        evidence: expect.arrayContaining(['quality job timeout must be exactly 100 minutes']),
       });
   });
 
@@ -1189,8 +1190,8 @@ describe('safeguard diagnostics', () => {
   it('accepts explicit false advisory settings on the quality job and bounded step', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const jobExplicit = workflow.replace(
-      '    timeout-minutes: 60\n    steps:',
-      '    timeout-minutes: 60\n    continue-on-error: false\n    steps:',
+      '    timeout-minutes: 100\n    steps:',
+      '    timeout-minutes: 100\n    continue-on-error: false\n    steps:',
     );
     expect(jobExplicit).not.toBe(workflow);
     const mutated = jobExplicit.replace(
@@ -1301,8 +1302,8 @@ describe('safeguard diagnostics', () => {
   it('fails when quoted YAML makes the quality job advisory', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      '    timeout-minutes: 60\n    steps:',
-      '    timeout-minutes: 60\n    "continue-on-error": true\n    steps:',
+      '    timeout-minutes: 100\n    steps:',
+      '    timeout-minutes: 100\n    "continue-on-error": true\n    steps:',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
@@ -1358,7 +1359,7 @@ describe('safeguard diagnostics', () => {
 
   it.each([
     ['depends on a skippable job', 'jobs:\n  quality:', "jobs:\n  suppress-quality:\n    runs-on: ubuntu-latest\n    if: false\n    steps:\n      - run: 'true'\n  quality:\n    needs: suppress-quality", 'quality job must not declare needs'],
-    ['becomes conditional', '    timeout-minutes: 60\n    steps:', "    timeout-minutes: 60\n    if: github.ref == 'refs/heads/main'\n    steps:", 'quality job must not declare if'],
+    ['becomes conditional', '    timeout-minutes: 100\n    steps:', "    timeout-minutes: 100\n    if: github.ref == 'refs/heads/main'\n    steps:", 'quality job must not declare if'],
   ])('fails when the quality job %s', (_name, anchor, replacement, evidence) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(anchor, replacement);
@@ -1402,8 +1403,8 @@ describe('safeguard diagnostics', () => {
 
   it('fails when quality-job run defaults can suppress command execution', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
-    const mutated = workflow.replace('    timeout-minutes: 60\n    steps:', [
-      '    timeout-minutes: 60',
+    const mutated = workflow.replace('    timeout-minutes: 100\n    steps:', [
+      '    timeout-minutes: 100',
       '    defaults:',
       '      run:',
       '        shell: bash -n {0}',
@@ -1513,8 +1514,8 @@ describe('safeguard diagnostics', () => {
   it('fails when the quality job becomes advisory', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      '    timeout-minutes: 60\n    steps:',
-      '    timeout-minutes: 60\n    continue-on-error: true\n    steps:',
+      '    timeout-minutes: 100\n    steps:',
+      '    timeout-minutes: 100\n    continue-on-error: true\n    steps:',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({
@@ -1535,8 +1536,8 @@ describe('safeguard diagnostics', () => {
   it('fails when a later quality-job timeout overrides the bounded timeout', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      '    timeout-minutes: 60\n    steps:',
-      '    timeout-minutes: 60\n    timeout-minutes: 360\n    steps:',
+      '    timeout-minutes: 100\n    steps:',
+      '    timeout-minutes: 100\n    timeout-minutes: 360\n    steps:',
     );
     expect(mutated).not.toBe(workflow);
     const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });

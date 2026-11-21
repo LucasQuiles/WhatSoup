@@ -1638,7 +1638,7 @@ The operation tracker monitors each tool invocation and thinking gap. Stream-jso
 **Recovery cascade:**
 
 1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
-   - Tracker records the stall and emits a user-visible warning (format depends on `toolUpdateMode`)
+   - Tracker records the stall and emits a user-visible warning in `full` and `friendly` modes (wording depends on the mode); in `minimal` mode and when `toolUpdateMode` is unset, the user sees only the typing indicator
    - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first.
    - **Liveness gate (CPU progress):** when the grace expires, the provider's process tree is CPU-sampled twice across a 5s window (`src/runtimes/agent/tree-liveness.ts`). A tree that burned CPU or changed shape is a **working long step, not a hang** (heavy browser automation, long bash/MCP calls): the kill is deferred, the grace re-arms, and the chat gets a rate-limited `_Long-running step still active (~N min in) — continuing. Send /new to interrupt._` notice. Extensions are bounded by `WHATSOUP_LONG_OP_CEILING_MS` (default 2 h) from the first fire of the quiet stretch. A flat tree — or any assessment failure — kills exactly as before: SIGKILL plus "_A tool call stalled and was terminated. Send your message again to retry._"
 
@@ -3372,6 +3372,8 @@ machine-readable disposition registry for sources that participate in fault clas
 | `bead_proposal_backlog` | `src/core/substrate/poller.ts` | Proposal state and `review_by_at`, not message volume |
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
+| `codex_resume_needs_per_chat_scope` | `src/runtimes/agent/codex-deferred-defect-check.ts`, run once at each start of an agent instance from `src/main.ts` | Instance config: `agentOptions.provider`, every fallback entry (`fallbacks` or the legacy `fallbackProvider`) and `sessionScope`. A startup warning: `codex-cli` is the provider or a fallback while `sessionScope` is `single`, `shared` or absent (absent means `single`). Codex resume is not proven in those scopes; if Codex loses the conversation, the user can get contradictory or duplicate lines. To fix it, set `agentOptions.sessionScope` to `per_chat`, or remove `codex-cli` from the provider and the fallbacks, then restart. The check never stops the bot from starting. Each restart raises the warning again while the config carries the risk, and the card's requested action names the fix. The incident clears at the next start after the configuration is fixed |
+| `codex_resume_unproven_under_host_admission` | `src/runtimes/agent/codex-deferred-defect-check.ts`, run once at each start of an agent instance from `src/main.ts` | Instance config (`agentOptions.provider` and every fallback entry) and the host's `WHATSOUP_WORK_ADMISSION`. A startup warning: `codex-cli` is the provider or a fallback and host work admission is on (Linux with `WHATSOUP_WORK_ADMISSION=systemd`), in any session scope. Codex resume is not proven under host work admission: whether Codex keeps the conversation across the suspension kill is unproven, and a rejected turn can get a duplicate generic reply. Changing `sessionScope` does not stop this warning; it stops only when `codex-cli` is no longer the provider or a fallback, or when the host runs without host work admission. The check never stops the bot from starting. Each restart raises the warning again while the risk remains, and the card's requested action names the fix. The incident clears at the next start after the configuration is fixed |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
 | `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair. Attribute each stale `processing` row with `scripts/inbound-ownership-snapshot.ts` (below) before any restart or replay |
 | `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates other than synthetic scheduled-job (`agentjob-*`) marks, which are reported as `syntheticContinuityCandidates` and never debt; failed terminals other than operator `/stop` cancellations (`operator_cancelled`); and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
@@ -3676,7 +3678,152 @@ WhatSoup can run in a Docker container as an alternative to the systemd/launchd 
 docker compose build
 ```
 
-The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on `node:24-slim`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
+The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on the reviewed Node tag and digest in `docker/container-inputs.json`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
+
+### Build input updates and evidence
+
+`docker/container-inputs.json` is the reviewed source of truth for the Linux target platform,
+Node image tag and index digest, its selected-platform dependency digest, Buildx client version,
+Linux release asset and SHA-256, BuildKit image, the digest-pinned BuildKit SBOM generator and
+its selected-platform dependency digest, builder name and driver, and Debian snapshot.
+For Docker Hub official images, BuildKit emits the familiar provenance PURL
+(`pkg:docker/node@...`), without the registry's implicit `library/` namespace; the policy stores
+that emitted identifier for receipt verification.
+`docker/Dockerfile` must match it exactly:
+the readable image tag remains alongside its immutable digest, and the package sources use
+only the declared snapshot. Check the static policy before a build:
+
+```bash
+npm run guard:node-pin-consistency
+```
+
+The digest-pinned Node binary exports its bundled Mozilla CA roots before the first APT
+request. Both snapshot sources use authenticated HTTPS, including on a slim image without
+the `ca-certificates` package. APT signature checks remain enabled. HTTP transport and TLS
+peer/hostname verification bypasses are rejected; this prevents replay by an on-path HTTP
+intermediary while the immutable snapshot uses `check-valid-until=no`.
+
+The image tag names no Debian release, so right after the CA bootstrap the base stage runs
+`grep -qx 'VERSION_CODENAME=bookworm' /etc/os-release` and the build stops if the pinned image is
+another release. The guard requires that exact instruction in that place, and derives it, the source
+lines and the snapshot `Release` probe from one suite name; changing the suite means changing all
+three together.
+
+The source-list bootstrap is the only authorized writer of the effective APT descriptor set.
+The guard rejects later absolute or relative descriptor operands, entry into `/etc` or its APT
+subtree, and APT-root indirection assignments, including both `ENV` forms and `ARG` default
+declarations. Active Dockerfile instructions may not use `$` expansion or backtick command
+substitution until a reviewed parser and behavior test explicitly support them. This is a
+static drift invariant, not proof of arbitrary shell semantics: ambiguous new paths or expansion
+forms are rejected until the invariant and its behavior test are extended together.
+
+CI also checks that both Debian snapshot `Release` files remain available before it builds.
+Run the network check when the environment can reach the snapshot service:
+
+```bash
+npm run guard:node-pin-consistency -- --verify-container-snapshot
+```
+
+To update inputs, verify a new Node tag-to-index-digest mapping and selected platform manifest,
+Buildx Linux release asset and SHA-256, BuildKit image digest, SBOM-generator index digest and
+selected platform manifest, and the Debian snapshot metadata, then update the policy, Dockerfile,
+and CI setup together. Run the guard, a clean Linux container build, and the focused receipt tests in the
+same change. Review inputs at least monthly and whenever a relevant Node, Docker, BuildKit,
+or Debian security update is published; immutable references make a reviewed build
+reproducible, but they do not update themselves.
+
+The Quality workflow downloads the policy's pinned Buildx Linux asset with a bounded request,
+checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, and
+creates its named `docker-container` builder from the policy's pinned BuildKit image. Before
+building, the runtime probe checks the single running node at its actual Docker endpoint,
+compares its immutable image ID with Docker's inspection of the reviewed digest, and retains
+`buildkit-runtime.json` bound to the source SHA and workflow invocation. The build receipt binds
+those runtime bytes and image ID alongside the independently checked SLSA source/invocation.
+BuildKit's SLSA materials do not themselves establish the builder image identity. It builds
+for the policy's explicit platform and sends the policy's digest-pinned SBOM generator to BuildKit.
+Every event builds the commit the job checked out (`github.sha`) from the fixed
+`https://github.com/LucasQuiles/WhatSoup.git` policy repository, so the image and the policy probe that
+later runs inside it come from the same tree. For a pull request that commit is the merge result.
+It is on no branch, so BuildKit fetches it through the pull request's merge ref, `refs/pull/<n>/merge`,
+and the verifier accepts that ref (`--source-ref`) only when both provenance records name the
+checked-out commit as the resolved revision. GitHub moves the merge ref when `main` advances or the
+pull request changes, and a re-run reuses the old commit. Before each fetch of the merge ref (the
+build step and the load step), the job lists it with `git ls-remote` and stops if it no longer names
+the checked-out commit, with a message that the merge ref moved. A re-run cannot recover such a run:
+push a commit, or close and reopen the pull request, to start a new one. If the ref moves between
+that check and the fetch, the receipt's revision checks or the loaded image comparison still fail
+the job. Push and merge-group builds fetch the event commit itself and list no ref. The CLI's explicit `--source-repository` override for another GitHub
+repository remains supported but the workflow does not use it. The selected source must be an
+`https://github.com/<owner>/<repo>.git` clone URL and is recorded in the receipt,
+so BuildKit records a verified `configSource` revision rather than a local checkout hint. The receipt verifies OCI descriptor sizes
+and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
+parsing their SLSA v1 and SPDX statements. It requires every statement subject to name the
+runnable manifest digest; checks the source repository, Dockerfile path, source revision,
+builder invocation, selected-platform base-image and SBOM-generator dependencies. It extracts the verified embedded SPDX
+predicate for attestation, so the attested SBOM is bound to the runnable manifest and to the policy-controlled scanner.
+
+The version 4 receipt also records the SHA-256 digest of the verified OCI image configuration.
+After receipt verification, CI performs a separate cached export from the same exact source,
+pinned builder, platform and Dockerfile into the job-local Docker image store. This runtime copy
+disables attestations because classic Docker stores cannot import them; the original OCI archive
+and its provenance and SBOM remain unchanged. CI requires the loaded image ID to equal the
+receipt's configuration digest, then imports the transcription provider chain by that immutable
+image ID with networking and image pulls disabled. A missing receipt, different source, failed
+export or identity mismatch fails the check before runtime execution. The runtime export has a
+five-minute limit within the existing 100-minute job deadline. The image is temporary CI job
+state, not a registry publication or deployment acceptance.
+
+The verifier caps each JSON input at 32 MiB before parsing, including the archive root index,
+nested index, image config, manifests, and attestation statements. Descriptor sizes and
+bounded extraction enforce that cap before decoding archive JSON. Binary image layers keep
+their separate 96 MiB entry limit. Each layer is also streamed through its declared
+decompressor (none, gzip or zstd) in a child process, and the ordered SHA-256 values of the
+uncompressed layers must equal the image config's `rootfs.diff_ids` (type `layers`, same count,
+same order); a missing list, another type or an undecodable layer fails. The config digest, and
+so the loaded image ID the runtime step compares, therefore stands for the archived filesystem.
+A layer may expand to at most 4 GiB; memory use stays constant. It caps the OCI archive and aggregate
+extracted bytes at 2 GiB, each extracted entry at 96 MiB, each descriptor list at 128, and all
+extraction attempts at 256. A shared 120-second monotonic deadline bounds archive traversal
+and hashing; each tar process also has a 30-second cap within the remaining budget. The
+workflow gives each receipt step five minutes. Creating a receipt runs two verification passes
+(creation and an independent readback of the written file); checking a stored receipt runs one,
+and the image digest it publishes comes from the receipt that passed that comparison. Exceeding
+a limit fails qualification; raise a bound only with reviewed workload evidence.
+
+Snapshot availability probes disable curl configuration, require HTTPS without redirects,
+and request `X-Download-Directly: 1` so Debian serves the pinned Release file without its
+normal redirect to the content-addressed file URL. Probes limit each response to 1 MiB
+with an independent parent-process output limit. Each curl attempt has a 30-second deadline.
+A transient failure (curl's transient set: a timeout or HTTP 408, 429, 500, 502, 503 or 504, plus
+a refused connection) is retried at most twice, 5 seconds apart, and no retry starts after
+60 seconds. A retry that starts just before 60 seconds can still run its full 30 seconds, so the
+parent's 75-second limit, not curl, bounds one request. The two requests run one after the other,
+so the probe step takes at most about 2.5 minutes. Both APT stages set `Acquire::Retries=3`; their retries stay inside the
+container build step's 10-minute bound. An exhausted retry fails the check like any other failure.
+
+The authority job has a 100-minute deadline: 45 minutes for coverage, 10 for the container,
+5 for the runtime export, 5 for browser system dependencies, 17 for bounded browser download
+attempts and backoff, and a 15-minute estimate for the remaining setup and checks, with 3 minutes
+of margin. The estimate includes the 2-minute Linux policy probe, which runs on the loaded runtime
+image, and the snapshot probe (at most about 2.5 minutes when both requests exhaust their retries).
+That remainder is a planning allowance, not a measured or enforced timeout, so the 3-minute margin
+is arithmetic over an estimate, not measured headroom. Individual failure
+bounds remain enforced; an exhausted download bound fails the job.
+
+On a push to `main`, once the receipt step has verified the build, the job uploads these files as
+`container-build-evidence-${{ github.sha }}` with a 14-day retention period, even if a later step
+fails. A run whose revision or receipt check failed uploads nothing. Pull requests, merge groups,
+tags and scheduled runs build and verify the image but upload no archive, because it contains `src/`.
+Retrieve the artifact from the Quality run of the `main` push for that commit before it expires
+when release verification or an investigation requires the original evidence.
+The workflow artifact is not a durable evidence archive.
+
+Only `main` pushes are attested. After a trusted `main` build succeeds, the
+attestation job rechecks that evidence, exports the verified runnable-manifest digest, and signs
+provenance and SBOM attestations with that digest as the subject. It never attests the OCI tar
+archive as though it were the container image. A local Docker or compatible container engine is
+still needed to establish local build proof; a missing engine is an inconclusive result, not a
+successful build.
 
 ### Configure
 

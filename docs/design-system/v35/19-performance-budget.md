@@ -13,11 +13,16 @@ does not set that flag. Budget approval and actual blocking enforcement are
 separate facts; confirm both before claiming a failing budget blocks delivery.
 
 The 200-row mount and event-storm measurements are implemented separately in
-`tests/browser/perf-budget.test.tsx`. That suite currently hardcodes
-`ENFORCE = false`; its comments about the environment flag do not wire the flag
-into those assertions. The script's deferred-leg report describes its own
-coverage, not absence of the browser harness. Budget enforcement in both paths
-still needs explicit wiring and acceptance.
+`tests/browser/perf-budget.test.tsx`. Its browser configuration forwards only the
+named `PERF_LANE_ENFORCE` variable; the exact value `1` enables budget assertions.
+Unset values and `0` retain report-only measurements. The suite rejects console
+errors so broken query fixtures cannot silently contaminate those measurements.
+Run `PERF_LANE_ENFORCE=1 npm run test:browser -- tests/browser/perf-budget.test.tsx`
+to qualify the opt-in path. An over-budget run must fail; wiring the flag does not
+establish acceptable performance. The script's deferred-leg report describes its
+own coverage, not absence of the browser harness. The Quality perf job still has
+`continue-on-error: true`; blocking CI requires an explicit workflow change and
+resolution of the owner decision above.
 
 **Baseline evidence (pre-G2 audit, prod build at b-02 tip):** console shell =
 **134 KB gzip JS** vs the ≤250 KB budget (46% headroom). The bundle number is the

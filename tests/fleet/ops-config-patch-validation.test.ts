@@ -423,6 +423,35 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
     expect(responseBody.agentOptions.provider).toBe('claude-cli');
   });
 
+  it('stores a null tool update mode, which the loader accepts', async () => {
+    // The console clears the setting with null: the PATCH merges keys and cannot remove one.
+    const agentCwd = makeAgentCwd('rt-tool-mode');
+    const dir = path.join(tmpDir, 'whatsoup', 'instances', 'roundtrip-tool');
+    fs.mkdirSync(dir, { recursive: true });
+    const cfg = path.join(dir, 'config.json');
+    fs.writeFileSync(cfg, JSON.stringify({
+      name: 'roundtrip-tool',
+      type: 'agent',
+      accessMode: 'self_only',
+      adminPhones: ['15551230007'],
+      healthPort: 9096,
+      toolUpdateMode: 'full',
+      agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
+    }));
+    const inst = fakeInstance(cfg, { name: 'roundtrip-tool', type: 'agent' });
+
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq({ method: 'PATCH', body: JSON.stringify({ toolUpdateMode: null }) }),
+      res, depsFor(inst), { name: 'roundtrip-tool' },
+    );
+    expect(res._status).toBe(200);
+
+    const persisted = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+    expect(persisted).toHaveProperty('toolUpdateMode', null);
+    expect(validateInstanceConfig(persisted, { name: 'roundtrip-tool', mode: 'load' })).toBeNull();
+  });
+
   it('rejects a PATCH that would render the instance unloadable and leaves the file untouched', async () => {
     const agentCwd = makeAgentCwd('rt-negative');
     const dir = path.join(tmpDir, 'whatsoup', 'instances', 'roundtrip-neg');

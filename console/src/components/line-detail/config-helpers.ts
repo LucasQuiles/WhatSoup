@@ -193,7 +193,9 @@ export { CONFIG_VALUE_TYPE_COLOR as TYPE_COLOR } from '../../lib/color-semantics
 
 export const ENUM_OPTIONS: Record<string, string[]> = {
   accessMode: [...ACCESS_MODE_VALUES],
-  toolUpdateMode: ['full', 'minimal'],
+  // '' is the default (no setting); ConfigEditDialog saves it as null. Every stored
+  // mode the service accepts is listed, so a stored value always shows as itself.
+  toolUpdateMode: ['', 'full', 'friendly', 'minimal'],
   'chatOptions.openaiProviderConfig.apiKeyService': ['', ...CHAT_API_KEY_SERVICE_OPTIONS],
 }
 

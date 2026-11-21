@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
@@ -188,11 +191,11 @@ const { mockConfig } = vi.hoisted(() => ({
     toolUpdateMode: 'full' as const,
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 2_000,
-    stateRoot: '/tmp/whatsoup-test-state-reset-teardown',
+    stateRoot: '', // set to a per-run folder in beforeAll
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
     startupNotifications: true,
     proactiveResumeOnStartup: true,
-    mediaDir: '/tmp/whatsoup-test-media-runtime-reset-teardown/tmp',
+    mediaDir: '', // set to a per-run folder in beforeAll
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
     elevenlabs: {
@@ -434,6 +437,18 @@ function makePerChatSession(active: boolean, dbRowId: number | null, startedAt: 
     shutdown: vi.fn(async () => {}),
   };
 }
+
+// One folder per run: a fixed /tmp state root is shared with earlier and
+// parallel runs, and one made by another user is unreadable.
+let runRoot = '';
+beforeAll(() => {
+  runRoot = mkdtempSync(join(tmpdir(), 'ws-rtd-'));
+  mockConfig.stateRoot = join(runRoot, 'state');
+  mockConfig.mediaDir = join(runRoot, 'media', 'tmp');
+});
+afterAll(() => {
+  rmSync(runRoot, { recursive: true, force: true });
+});
 
 describe('AgentRuntime reset teardown ownership', () => {
   beforeEach(() => {

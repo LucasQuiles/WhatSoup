@@ -16,12 +16,13 @@
  * really writes `.claude/sandbox-policy.json` to disk) while mocking
  * `session.ts` (so no real provider subprocess ever spawns).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { connect as netConnect } from 'node:net';
 import { request as httpRequest } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
 
@@ -40,12 +41,12 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     toolUpdateMode: 'full' as const,
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 0,
-    mediaDir: '/tmp/whatsoup-test-media-runtime-egress-wiring',
+    mediaDir: '', // set to a per-run folder in beforeAll
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
     // Required since the C5 restart-loop guard (#1929) merged into main: start()
     // and the health snapshot deref config.restartLoopGuard / config.stateRoot.
-    stateRoot: '/tmp/whatsoup-test-state-egress-wiring',
+    stateRoot: '', // set to a per-run folder in beforeAll
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
   },
   // TYPE NOTE: assertions use mockRuntimeLogger.warn/error; typed for property access.
@@ -295,6 +296,18 @@ function forwardGetStatus(proxyPort: number, targetHost: string, targetPort: num
     req.end();
   });
 }
+
+// One folder per run: a fixed /tmp state root is shared with earlier and
+// parallel runs, and one made by another user is unreadable.
+let runRoot = '';
+beforeAll(() => {
+  runRoot = mkdtempSync(join(tmpdir(), 'ws-egw-'));
+  mockConfig.stateRoot = join(runRoot, 'state');
+  mockConfig.mediaDir = join(runRoot, 'media');
+});
+afterAll(() => {
+  rmSync(runRoot, { recursive: true, force: true });
+});
 
 describe('AgentRuntime egress proxy lifecycle (#1607)', () => {
   const startedRuntimes = new Set<AgentRuntime>();

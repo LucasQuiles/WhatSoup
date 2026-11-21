@@ -1400,6 +1400,12 @@ function configProtectedDelivery() {
   }
 }
 
+// The configured tool update mode, null when unset. The effective mode maps unset
+// to 'unset'; the admin notice and the status redirect follow this value.
+function readConfiguredToolUpdateMode(): 'full' | 'friendly' | 'minimal' | null {
+  return optionalEnum(instance?.toolUpdateMode, 'toolUpdateMode', ['full', 'friendly', 'minimal'] as const) ?? null;
+}
+
 export const config = {
   clientOutputPolicies: parsedClientOutputPolicies.registry,
 
@@ -1526,11 +1532,15 @@ export const config = {
   recencyHalfLifeDays: positiveIntValue(instance?.recencyHalfLifeDays, positiveIntEnv('RECENCY_HALF_LIFE_DAYS', 14)),
   maxAgeDays: positiveIntValue(instance?.maxAgeDays, positiveIntEnv('MAX_AGE_DAYS', 90)),
 
-  // Tool update verbosity: 'full' (default — all updates shown to user),
-  // 'friendly' (all updates in plain language for non-technical users),
-  // 'minimal' (suppress most updates — only critical status shown)
-  toolUpdateMode: optionalEnum(instance?.toolUpdateMode, 'toolUpdateMode', ['full', 'friendly', 'minimal'] as const) ?? 'full',
-  toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
+  // Unset keeps tool progress private, as minimal does, but handles text as full does.
+  toolUpdateMode: readConfiguredToolUpdateMode() ?? 'unset',
+  // The admin back-online notice and the status redirect follow this, so an
+  // unset mode keeps both, as full does.
+  configuredToolUpdateMode: readConfiguredToolUpdateMode(),
+  // An explicit minimal mode sends tool status nowhere, as before; an unset mode keeps the redirect.
+  toolUpdateRedirectJid: readConfiguredToolUpdateMode() === 'minimal'
+    ? null
+    : stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
   // Gate the agent restart/back-online notification. Default true preserves existing behavior.
   startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),
   // How long the instance must stay up AND connected before the back-online

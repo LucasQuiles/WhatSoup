@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -21,9 +21,9 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     toolUpdateMode: 'full' as const,
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 0,
-    stateRoot: '/tmp/whatsoup-test-state-mcpdual',
+    stateRoot: '', // set to a per-run folder in beforeAll
     restartLoopGuard: { enabled: true, maxRestarts: 3, windowMs: 300_000 },
-    mediaDir: '/tmp/whatsoup-test-media-mcp-config-dual-write',
+    mediaDir: '', // set to a per-run folder in beforeAll
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as const,
   },
@@ -239,6 +239,19 @@ async function startRuntime(cwd: string, model?: string): Promise<AgentRuntime> 
 }
 
 const startedRuntimes = new Set<AgentRuntime>();
+
+// One folder per run: a fixed /tmp state root is shared with earlier and parallel
+// runs, and one made by another user is unreadable, which adds a restart-loop
+// guard warning to the warn counts below.
+let runRoot = '';
+beforeAll(() => {
+  runRoot = mkdtempSync(join(tmpdir(), 'ws-mcpd-'));
+  mockConfig.stateRoot = join(runRoot, 'state');
+  mockConfig.mediaDir = join(runRoot, 'media');
+});
+afterAll(() => {
+  rmSync(runRoot, { recursive: true, force: true });
+});
 
 describe('AgentRuntime startup MCP config dual-write', () => {
   let tmpDirs: string[] = [];

@@ -40,6 +40,9 @@ export default defineConfig({
     // blocking indefinitely under --pool=forks (issue #1834 root cause was
     // an incomplete child_process mock; this timeout is defense-in-depth).
     hookTimeout: 10_000,
+    // One temporary root per run; the worker HOMEs the setup file makes nest
+    // inside it, and its teardown removes them after the workers are gone.
+    globalSetup: ['./tests/setup/vitest-run-root.ts'],
     setupFiles: [
       './tests/setup/bot-errors-vitest-isolation.ts',
       './tests/setup/source-mutation-tripwire.ts',
