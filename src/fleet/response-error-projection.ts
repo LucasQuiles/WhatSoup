@@ -39,6 +39,7 @@ export type FleetErrorCode =
   | 'service_action_failed'
   | 'service_start_failed'
   | 'service_stop_failed'
+  | 'service_disable_failed'
   | 'restart_failed'
   | 'rollback_failed'
   | 'config_read_failed'
@@ -129,6 +130,7 @@ const SAFE_MESSAGES: Record<FleetErrorCode, string> = {
   service_action_failed: 'A service operation failed.',
   service_start_failed: 'The service could not be started.',
   service_stop_failed: 'The service could not be stopped.',
+  service_disable_failed: 'The service could not be disabled.',
   restart_failed: 'The restart operation failed.',
   rollback_failed:
     'A rollback operation failed; the instance may be in an inconsistent state.',

@@ -105,8 +105,9 @@ describe('ops-lifecycle handlers', () => {
     await handleDeleteLine(mockReq({ method: 'DELETE' }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1', code: 'service_stop_failed',
-      instance: name, operation: 'instance_delete', stage: 'execute', mutation_state: 'unknown', retryable: false });
+    expect(JSON.parse(res._body)).toEqual({ schema: 'fleet-error-v1', code: 'service_stop_failed',
+      message: 'The service could not be stopped.', instance: name, operation: 'instance_delete', stage: 'execute',
+      mutation_state: 'unknown', rollback_state: 'not_applicable', retryable: false, correlation_id: expect.any(String) });
     expect(deps.serviceManager.disable).not.toHaveBeenCalled();
     expect(fs.existsSync(dirs.configDir)).toBe(true);
   });
@@ -121,9 +122,10 @@ describe('ops-lifecycle handlers', () => {
     await handleDeleteLine(mockReq({ method: 'DELETE' }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body)).toMatchObject({ schema: 'fleet-error-v1',
+    expect(JSON.parse(res._body)).toEqual({ schema: 'fleet-error-v1',
       instance: name,
-      code: action === 'stop' ? 'service_stop_failed' : 'service_action_failed',
+      code: action === 'stop' ? 'service_stop_failed' : 'service_disable_failed',
+      message: action === 'stop' ? 'The service could not be stopped.' : 'The service could not be disabled.',
       operation: 'instance_delete', stage: 'execute', mutation_state: 'unknown', rollback_state: 'not_applicable', retryable: false,
       correlation_id: expect.any(String),
     });
@@ -149,9 +151,10 @@ describe('ops-lifecycle handlers', () => {
       const failed = mockRes();
       await handleDeleteLine(mockReq({ method: 'DELETE' }), failed, deps, { name });
       expect(failed._status).toBe(500);
-      expect(JSON.parse(failed._body)).toMatchObject({ schema: 'fleet-error-v1', operation: 'instance_delete', code: 'instance_cleanup_failed',
-        message: 'Instance cleanup is incomplete. Inspect remaining state before retrying.',
-        stage: 'commit', mutation_state: 'unknown', rollback_state: 'not_applicable', retryable: false });
+      expect(JSON.parse(failed._body)).toEqual({ schema: 'fleet-error-v1', operation: 'instance_delete', code: 'instance_cleanup_failed',
+        message: 'Instance cleanup is incomplete. Inspect remaining state before retrying.', instance: name,
+        stage: 'commit', mutation_state: 'unknown', rollback_state: 'not_applicable', retryable: false,
+        correlation_id: expect.any(String) });
       expect(failed._body).not.toContain('private cleanup diagnostic');
       expect(fs.existsSync(dirs.configDir)).toBe(true);
       expect(fs.existsSync(dirs.dataDir)).toBe(false);

@@ -707,7 +707,7 @@ describe('handleDeleteLine', () => {
     await handleDeleteLine(mockReq({ method: 'POST', body: '', url: `/api/lines/${name}` }), res, deps, { name });
 
     expect(res._status).toBe(500);
-    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_action_failed', mutation_state: 'unknown', retryable: false });
+    expect(JSON.parse(res._body)).toMatchObject({ code: 'service_disable_failed', mutation_state: 'unknown', retryable: false });
     expect(deps.discovery.scan).not.toHaveBeenCalled();
     expect(deps.realtime.publish).not.toHaveBeenCalled();
     expect(fs.existsSync(dirs.configDir)).toBe(true);

@@ -204,7 +204,7 @@ describe('response-error-projection — schema completeness', () => {
   it('every error code has a registered safe message', () => {
     const allCodes: FleetErrorResponse['code'][] = [
       'source_unavailable', 'permission_denied', 'storage_full',
-      'service_action_failed', 'service_start_failed', 'service_stop_failed',
+      'service_action_failed', 'service_start_failed', 'service_stop_failed', 'service_disable_failed',
       'restart_failed', 'rollback_failed', 'config_read_failed',
       'config_write_failed', 'instance_creation_failed', 'instance_cleanup_failed', 'auth_failed',
       'auth_timeout', 'validation_failed', 'internal_error',

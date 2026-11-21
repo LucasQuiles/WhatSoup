@@ -164,7 +164,7 @@ export async function handleDeleteLine(
     await deps.serviceManager.disable(params.name);
   } catch (err) {
     if (!isBenignServiceTeardownError(err, params.name)) {
-      const response = serviceActionError(err, 'instance_delete', 'service_action_failed');
+      const response = serviceActionError(err, 'instance_delete', 'service_disable_failed');
       log.error({ err, instance: params.name, correlationId: response.correlation_id }, 'delete line: service disable failed');
       jsonResponse(res, 500, { ...response, instance: params.name });
       return;
@@ -179,7 +179,7 @@ export async function handleDeleteLine(
       operation: 'instance_delete', stage: 'commit', mutationState: 'unknown', rollbackState: 'not_applicable',
     }, 'instance_cleanup_failed');
     log.error({ err: new AggregateError(cleanupErrors), instance: params.name, correlationId: response.correlation_id }, 'delete line: cleanup incomplete');
-    jsonResponse(res, 500, response);
+    jsonResponse(res, 500, { ...response, instance: params.name });
     return;
   }
 
