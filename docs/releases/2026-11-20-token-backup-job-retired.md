@@ -13,6 +13,8 @@ from the repository's standard so that no install creates it again.
   `deploy/templates/ms365-token-backup.sh`, stay tracked until they can be
   deleted. `.gitattributes` marks both `export-ignore`, so no release export
   carries them, and no setup step, deploy script or manifest references them.
+  `npm run release:export` refuses either template as a `--required-output`,
+  naming it as retired from releases, so no release manifest can require one.
 - New instances cannot take the name `ms365-token-backup`: instance creation
   refuses it, because the instance would get the retired label. An instance that
   already has that name is checked as that instance by every check below, never

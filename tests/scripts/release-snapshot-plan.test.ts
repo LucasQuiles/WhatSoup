@@ -298,6 +298,34 @@ describe('release snapshot planning', () => {
       .toEqual([]);
   });
 
+  // The retired token backup job's templates are export-ignored, so no release holds them
+  // (docs/releases/2026-11-20-token-backup-job-retired.md). Requiring one would publish a manifest
+  // that activation can only satisfy by placing the retired file back in the release.
+  it.each([
+    'deploy/templates/com.whatsoup.ms365-token-backup.plist',
+    'deploy/templates/ms365-token-backup.sh',
+  ])('refuses the retired template %s as a required output, in every spelling of that path', (retired) => {
+    const sourceRoot = makeFixtureSource();
+    const base = {
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot: path.join(tmpRoot, 'releases'),
+      buildTime: '2026-06-13T06:00:00.000Z',
+      // Tracked, as in the repository, and filtered out of the files by the export-ignore list.
+      trackedFiles: ['package.json', 'src/main.ts', retired],
+    };
+    // Activation joins a required output's segments with path.join on a case-insensitive macOS
+    // volume, so each of these spellings names the retired file there.
+    for (const spelling of [retired, `./${retired}`, retired.replace('/', '//'), `${retired}/`, retired.toUpperCase()]) {
+      expect(() => createReleaseSnapshotPlan({ ...base, requiredOutputs: ['dist/index.html', spelling] }), spelling)
+        .toThrow(`required output ${retired} is retired from releases`);
+    }
+    // Without it, the same tree still plans.
+    expect(createReleaseSnapshotPlan({ ...base, requiredOutputs: ['dist/index.html'] }).manifest.requiredOutputs)
+      .toEqual(['dist/index.html']);
+  });
+
   it('accepts a legacy v1 manifest with no requiredOutputs (back-compat)', () => {
     const manifest = parseReleaseSnapshotManifest({
       schemaVersion: 1,

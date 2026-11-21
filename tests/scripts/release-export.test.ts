@@ -238,6 +238,18 @@ describe('exportRelease', () => {
     expect(existsSync(path.join(report.releasePath, 'src/main.ts'))).toBe(true);
   });
 
+  // An explicit required output cannot bring a retired template back into a release manifest: the planner refuses
+  // it, so export publishes nothing, as W20's exporter refused it alone (then as a missing output).
+  it.each(['deploy/templates/com.whatsoup.ms365-token-backup.plist', 'deploy/templates/ms365-token-backup.sh'])(
+    'refuses the retired template %s as a required output and publishes no release',
+    (template) => {
+      const fixture = makeGitFixture();
+      expect(() => exportOk(fixture, { requiredOutputs: [template] }))
+        .toThrow(`required output ${template} is retired from releases`);
+      expect(existsSync(path.join(fixture.releaseRoot, `WhatSoup-release-${fixture.commit.slice(0, 12)}`))).toBe(false);
+    },
+  );
+
   it('refuses to clobber an existing release without replace', () => {
     const fixture = makeGitFixture();
     exportOk(fixture);

@@ -171,6 +171,14 @@ function normalizeRepoPath(filePath: string): string {
   return normalized;
 }
 
+// The retired path a required output names, if any. Activation joins the
+// output's segments with path.join on a case-insensitive macOS volume, so the
+// comparison folds case and ignores doubled, `.` and trailing separators.
+function retiredReleasePath(relPath: string): string | undefined {
+  const canonical = path.posix.normalize(relPath).replace(/\/+$/, '').toLowerCase();
+  return RELEASE_EXPORT_IGNORED_PATHS.find((retired) => retired.toLowerCase() === canonical);
+}
+
 function requireAbsolute(label: string, value: string): string {
   if (!path.isAbsolute(value)) throw new Error(`${label} must be absolute`);
   return path.resolve(value);
@@ -289,6 +297,15 @@ export function createReleaseSnapshotPlan(options: CreateReleaseSnapshotPlanOpti
     ...(options.requiredOutputs ?? []),
     ...(trackedPaths.includes(CONSOLE_PACKAGE_FILE) ? [CONSOLE_BUILD_OUTPUT] : []),
   ].map(normalizeRepoPath))].sort();
+  // A retired path is export-ignored, so no release holds it. Requiring one
+  // would publish a manifest that only the retired file, put back, satisfies.
+  for (const relPath of requiredOutputs) {
+    const retired = retiredReleasePath(relPath);
+    if (retired !== undefined) {
+      const given = relPath === retired ? '' : ` (given as ${relPath})`;
+      throw new Error(`required output ${retired} is retired from releases${given}: it is export-ignored, so no release may require it`);
+    }
+  }
 
   const manifest: ReleaseSnapshotManifest = {
     schemaVersion: 2,
