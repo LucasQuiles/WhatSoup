@@ -598,21 +598,34 @@ A release exported before this change has no guard and no flag: its
 `bash <tree>/deploy/setup.sh` from it switches the host without either.
 
 1. Export and build the target tree first (the host step under
-   [Dry-Run Planning](#dry-run-planning)), and record what runs now:
-   `readlink ~/.local/bin/whatsoup` and `systemctl --user list-units 'whatsoup*'`.
-2. Stop the timers, then the services whose commands run through
-   `~/.local/bin` (`deploy/whatsoup@.service`, `deploy/whatsoup-fleet.service`,
-   `deploy/harness-maintenance.service`, `deploy/whatsoup-reply-guarantee.service`,
-   `deploy/whatsoup-release-drift.service`), so no job starts through a link
-   while the links move:
+   [Dry-Run Planning](#dry-run-planning)). Record the old target and the
+   active set, and keep both:
+
+   ```bash
+   readlink ~/.local/bin/whatsoup
+   systemctl --user list-units --state=active --no-legend 'whatsoup*' 'harness-maintenance*'
+   ```
+
+2. Stop everything that runs through `~/.local/bin` (the commands in
+   `deploy/whatsoup@.service`, `deploy/whatsoup-fleet.service`,
+   `deploy/harness-maintenance.service`, `deploy/whatsoup-reply-guarantee.service`
+   and `deploy/whatsoup-release-drift.service`), so no job runs or starts
+   through a link while the links move. First the timers, so they start
+   nothing; then every bot instance (they all share the wrapper) and the
+   fleet; then the three one-shot services the timers start, because stopping
+   a timer does not stop a run already in progress:
 
    ```bash
    systemctl --user stop harness-maintenance.timer whatsoup-reply-guarantee.timer whatsoup-release-drift.timer
-   systemctl --user stop whatsoup@<instance>.service whatsoup-fleet.service
+   systemctl --user stop 'whatsoup@*.service' whatsoup-fleet.service
+   systemctl --user stop harness-maintenance.service whatsoup-reply-guarantee.service whatsoup-release-drift.service
    ```
 
-   The BOT ERRORS units and `whatsoup-heal-notify@.service` name their scripts
-   by other paths; no switch moves them.
+   Stopping a running one-shot ends that run; to let it finish instead, wait
+   until `systemctl --user is-active <unit>` prints `inactive` before the last
+   command. Then run the `list-units` command from step 1 again: it must list
+   none of these units. The BOT ERRORS units and `whatsoup-heal-notify@.service`
+   name their scripts by other paths; no switch moves them.
 3. Run the switch from the target tree, through the path the wrapper should
    name, and keep the printed rollback command:
 
@@ -620,15 +633,22 @@ A release exported before this change has no guard and no flag: its
    bash /abs/path/to/<target-tree>/deploy/setup.sh --switch-release-tree
    ```
 
-4. Start the services and timers you stopped, then verify: `readlink
-   ~/.local/bin/whatsoup` names `<target-tree>/deploy/whatsoup`; the running
-   process's command line names `<target-tree>/src/bootstrap.ts`
+4. Start exactly the units the step-1 list showed active, services first,
+   then timers (`systemctl --user start <unit> …`), and nothing else. Then
+   verify: `readlink ~/.local/bin/whatsoup` names
+   `<target-tree>/deploy/whatsoup`; each bot process's command line names
+   `<target-tree>/src/bootstrap.ts`
    (`tr '\0' ' ' < /proc/"$(systemctl --user show -p MainPID --value whatsoup@<instance>)"/cmdline`);
    and the authenticated health check in [docs/runbook.md](../runbook.md)
    reports the target's commit in `instance.commit` and a connected line.
-5. Rollback: stop the same units, run the printed command, which is the same
-   command from the old tree, start the units and verify the same way. If the
-   old tree's `setup.sh` predates this change, run it without the flag.
+5. Rollback: stop the same units as in step 2, run the printed rollback
+   command, start the step-1 set again and verify as in step 4 against the old
+   tree. Setup prints that command without the flag when the old tree's
+   `setup.sh` has none. An old export without a manifest carries no commit
+   stamp, so `instance.commit` cannot confirm it (it can be `null`); there,
+   check that the wrapper and each
+   bot process's command line name the old tree printed in step 3, and that
+   health reports a connected line.
 
 Removing `~/.local/bin/whatsoup` and running setup passes the guard as a first
 install. That is the deliberate bypass for a host whose wrapper does not
