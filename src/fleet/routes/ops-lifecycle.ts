@@ -447,6 +447,7 @@ export async function handleCreateLine(
   // --- Create directories ---
   const createdExtras: ExtraRecord[] = [];
   let serviceEnableAttempted = false;
+  let serviceEnabled = false;
   try {
     fs.mkdirSync(configRoot(), { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { mode: 0o700 });
@@ -517,6 +518,7 @@ export async function handleCreateLine(
     // --- Enable service ---
     serviceEnableAttempted = true;
     await deps.serviceManager.enable(name);
+    serviceEnabled = true;
 
     // --- Re-scan discovery ---
     deps.discovery.scan();
@@ -534,9 +536,21 @@ export async function handleCreateLine(
         disableFailure = { error: rollbackErr };
       }
     }
-    // The filesystem rollback never depends on the service: restoring the user's
-    // files and removing the instance folders always runs, so a failed create
-    // leaves no overwritten workspace file and no folder that refuses a retry.
+    // After a fulfilled enable the service may run with this configuration, so an
+    // uncompensated one keeps every file as written; a rejected enable never needs them.
+    if (disableFailure && serviceEnabled) {
+      const response = mutationError(disableFailure.error, {
+        operation: 'instance_create', stage: 'rollback', mutationState: 'rollback_failed', rollbackState: 'failed',
+      }, 'rollback_failed');
+      log.error(
+        { err: disableFailure.error, originalErr: err, instance: name, correlationId: response.correlation_id },
+        'failed to disable service after instance creation failure',
+      );
+      jsonResponse(res, 500, response);
+      return;
+    }
+    // Otherwise the filesystem rollback runs: it restores the user's files and
+    // removes the instance folders whatever the compensating disable did.
     const cleanupErrors = cleanupPartial(name, createdExtras);
     if (cleanupErrors.length > 0) {
       const response = mutationError(cleanupErrors[0], {

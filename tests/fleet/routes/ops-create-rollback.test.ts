@@ -181,13 +181,13 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     return files;
   }
 
-  function createRequest(name: string) {
+  function createRequest(name: string, claudeMd = 'AGENT_PROMPT — must not outlive a failed create\n') {
     return mockReq({
       method: 'POST',
       body: JSON.stringify({
         name, type: 'agent', adminPhones: ['15551234567'],
         agentOptions: { cwd: agentCwd, sessionScope: 'per_chat' },
-        claudeMd: 'AGENT_PROMPT — must not outlive a failed create\n',
+        claudeMd,
       }),
     });
   }
@@ -237,23 +237,29 @@ describe('handleCreateLine — rollback preserves pre-existing user files (#248)
     await expectRetryIsNotRefused(name);
   });
 
-  it('restores user files when enable succeeded, a later step failed and the disable rejected', async () => {
+  it('keeps the instance and the files as create wrote them when enable succeeded, a later step failed and the disable rejected (unchanged from main)', async () => {
     const files = seedUserFiles();
     const name = 'late-failure-agent';
+    const writtenClaudeMd = 'AGENT_PROMPT — written by create\n';
     const deps = makeDeps<any>({
       serviceManager: { disable: vi.fn().mockRejectedValue(new Error('disable response lost')) } as any,
       discovery: { scan: vi.fn(() => { throw new Error('scan failed after enable'); }) } as any,
     }) as OpsDeps;
     const res = mockRes();
 
-    await handleCreateLine(createRequest(name), res, deps);
+    await handleCreateLine(createRequest(name, writtenClaudeMd), res, deps);
 
     expect(deps.serviceManager.enable).toHaveBeenCalledWith(name);
+    expect(deps.serviceManager.disable).toHaveBeenCalledWith(name);
     expect(res._status).toBe(500);
-    // The service may still be enabled; the response says so instead of claiming a rollback.
+    // The enabled service may run with this configuration, so no file is touched in this order.
     expect(JSON.parse(res._body)).toMatchObject({
-      code: 'rollback_failed', stage: 'rollback', mutation_state: 'unknown', rollback_state: 'failed', retryable: false,
+      code: 'rollback_failed', stage: 'rollback', mutation_state: 'rollback_failed', rollback_state: 'failed', retryable: false,
     });
-    expectRestoredAndRemoved(name, files);
+    expect(fs.readFileSync(files[0].path, 'utf8')).toBe(writtenClaudeMd);
+    expect(fs.readFileSync(files[1].path)).not.toEqual(files[1].bytes);
+    for (const dir of [path.join(configRoot(), name), dataRoot(name), stateRoot(name)]) {
+      expect(fs.existsSync(dir)).toBe(true);
+    }
   });
 });
