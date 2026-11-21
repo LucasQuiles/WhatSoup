@@ -1,12 +1,28 @@
+# ── Stage 0: Immutable Node and Debian package inputs ──────────────────────────
+# Node version pinned to match .nvmrc and package.json#volta.node. The digest and
+# snapshot policy are verified by scripts/check-node-pin-consistency.ts.
+FROM node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
+
+# The pinned Node binary supplies bundled roots before APT installs certificates.
+# HTTPS authenticates the snapshot server; APT still verifies signed metadata.
+RUN node -e "require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\n') + '\n')"
+# The snapshot sources below name bookworm; stop if the pinned image is another Debian release.
+RUN grep -qx 'VERSION_CODENAME=bookworm' /etc/os-release
+RUN printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
+      > /etc/apt/sources.list \
+    && rm -rf /etc/apt/sources.list.d/*
+
 # ── Stage 1: Install production dependencies ──────────────────────────────────
-# Node version pinned to match .nvmrc and package.json#volta.node.
-FROM node:24.15.0-slim AS deps
+FROM base AS deps
 
 # python3, make and g++ let native dependencies (re2) build from source when
 # their prebuilt download fails (#3889). They stay in this build stage: the
 # runtime stage copies only node_modules and package.json from here.
 # RE2_DOWNLOAD_FORCE_BUILD=1 (build arg) skips the download to test that path.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       ca-certificates git python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
@@ -36,10 +52,10 @@ RUN npm run build
 # Output lands at /app/dist (vite.config.ts: outDir: '../dist')
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
-# Node version pinned to match .nvmrc and package.json#volta.node.
-FROM node:24.15.0-slim AS runtime
+FROM base AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       tini \
     && rm -rf /var/lib/apt/lists/*
 
