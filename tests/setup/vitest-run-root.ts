@@ -34,15 +34,18 @@ export const REMOVE_RETRY = { maxRetries: 5, retryDelay: 100 } as const;
 // a late writer gets.
 export const RUN_ROOT_REMOVE_RETRY = { maxRetries: 10, retryDelay: 100 } as const;
 
-// The total time the exit hook waits for the run root to go, in one bound; it
-// starts no attempt after it. A child process that a test file left running may
-// still write into a worker HOME when the run ends: the list probe's late writer
-// runs 2.5 s, and one attempt takes up to about 1 s. Ten seconds covers that
-// three times over on a slow host and stays well inside the 30 s and 120 s
-// timeouts of the callers that run `vitest list` in a child process.
+// The total time the exit hook waits for the run root to go, in one bound: it
+// starts no attempt after it, so its worst wall time is this bound plus one
+// attempt. A child process that a test file left running may still write into a
+// worker HOME when the run ends; the list probe's late writer runs 2.5 s. One
+// attempt takes about 1 s of back-off plus the time to remove what a writer
+// added (up to about 5 s against a writer in a tight loop on macOS). Ten seconds
+// outlasts the probe's writer with a margin for a slow host, and the worst case,
+// about 15 s, stays inside the 30 s and 120 s timeouts of the callers that run
+// `vitest list` in a child process.
 export const RUN_ROOT_EXIT_WAIT_MS = 10_000;
 const RUN_ROOT_EXIT_PAUSE_MS = 100;
-// The final failure names this many remaining entries at most.
+// The final failure names this many remaining top-level entries at most.
 const REMAINING_ENTRIES_SHOWN = 20;
 
 // /tmp, not os.tmpdir(): the macOS per-user TMPDIR is long enough to push
@@ -92,20 +95,40 @@ function removeTree(root: string): void {
   rmSync(root, { recursive: true, force: true, ...RUN_ROOT_REMOVE_RETRY });
 }
 
-// 'own': it carries this run's marker. 'unmarked': its marker file is missing.
-// 'other': anything else that is present, such as another run's marker.
+// What makes a root this run's: the token in its marker, and the device and
+// inode its directory had when this run made it. A pathname is not reserved:
+// after a rename another directory can take it.
+export interface RunRootOwner {
+  token: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+// The same file system node, compared as scripts/lib/guard-core.ts compares
+// source inventory nodes (sameSourceNode).
+function sameNode(left: { dev: bigint; ino: bigint }, right: { dev: bigint; ino: bigint }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+// 'own': this run's directory with its marker. 'unmarked': this run's directory
+// with no marker entry. 'other': anything else that is present, such as another
+// directory at the path or a marker that is not this run's readable token.
+// Every path returns a state; an unexpected error is 'other'.
 type RootState = 'own' | 'unmarked' | 'gone' | 'other';
 
-function runRootState(root: string, token: string): RootState {
-  if (!isAbsolute(root)) return 'other';
+function runRootState(root: string, owner: RunRootOwner): RootState {
   try {
-    const stat = lstatSync(root, { throwIfNoEntry: false });
+    if (!isAbsolute(root)) return 'other';
+    const stat = lstatSync(root, { bigint: true, throwIfNoEntry: false });
     if (stat === undefined) return 'gone';
-    if (stat.isSymbolicLink() || !stat.isDirectory() || realpathSync(root) !== root) return 'other';
-    return readFileSync(join(root, RUN_ROOT_MARKER), 'utf8') === token ? 'own' : 'other';
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'other';
-    return lstatSync(root, { throwIfNoEntry: false }) === undefined ? 'gone' : 'unmarked';
+    if (!stat.isDirectory() || !sameNode(stat, owner) || realpathSync(root) !== root) return 'other';
+    const marker = join(root, RUN_ROOT_MARKER);
+    const markerStat = lstatSync(marker, { throwIfNoEntry: false });
+    if (markerStat === undefined) return 'unmarked';
+    if (!markerStat.isFile()) return 'other';
+    return readFileSync(marker, 'utf8') === owner.token ? 'own' : 'other';
+  } catch {
+    return 'other';
   }
 }
 
@@ -116,15 +139,15 @@ export type RemoveResult = { outcome: 'removed' } | { outcome: 'refused' } | { o
 // the root. A removal can stop part way with the marker already gone: on Linux,
 // Node's rmSync returns as if done when remove_all meets an entry that another
 // process removed first (ENOENT), as a worker's own exit-hook HOME removal does
-// while teardown runs. So from then on a missing marker is accepted; a
-// different marker never is.
+// while teardown runs. So from then on a missing marker is accepted on the
+// directory this run made; another directory or a different marker never is.
 export function removeRunRoot(
   root: string,
-  token: string,
+  owner: RunRootOwner,
   remove: RemoveTree = removeTree,
   started = false,
 ): RemoveResult {
-  const state = runRootState(root, token);
+  const state = runRootState(root, owner);
   if (state === 'gone') return { outcome: 'removed' };
   if (state === 'other' || (state === 'unmarked' && !started)) {
     process.stderr.write(`vitest-run-root: refusing to remove ${root}: not this run's marked root\n`);
@@ -139,17 +162,17 @@ export function removeRunRoot(
   return lstatSync(root, { throwIfNoEntry: false }) === undefined ? { outcome: 'removed' } : { outcome: 'present', reason };
 }
 
-// The entries left in the root, relative to it: their number and the first
-// REMAINING_ENTRIES_SHOWN in sorted order.
+// The top-level entries left in the root, without walking the tree: their
+// number and the first REMAINING_ENTRIES_SHOWN names in sorted order.
 function remainingEntries(root: string): string {
   let names: string[];
   try {
-    names = readdirSync(root, { encoding: 'utf8', recursive: true }).sort();
+    names = readdirSync(root).sort();
   } catch {
-    return 'its entries could not be listed';
+    return 'its top-level entries could not be listed';
   }
   const shown = names.slice(0, REMAINING_ENTRIES_SHOWN);
-  return `${names.length} entries remain (${shown.length} shown): ${shown.join(', ')}`;
+  return `${names.length} top-level entries remain (${shown.length} shown): ${shown.join(', ')}`;
 }
 
 // A blocking sleep that needs no timer: the exit hook runs synchronously, so a
@@ -177,9 +200,10 @@ function failRunClosed(): void {
 export function startRunRoot(parent: string = defaultTempParent(), options: RunRootOptions = {}): () => void {
   const previous = process.env[RUN_ROOT_ENV];
   const root = realpathSync(mkdtempSync(join(parent, RUN_ROOT_PREFIX)));
+  const { dev, ino } = lstatSync(root, { bigint: true });
   chmodSync(root, 0o700);
-  const token = randomUUID();
-  writeFileSync(join(root, RUN_ROOT_MARKER), token, { mode: 0o600 });
+  const owner: RunRootOwner = { token: randomUUID(), dev, ino };
+  writeFileSync(join(root, RUN_ROOT_MARKER), owner.token, { mode: 0o600 });
   process.env[RUN_ROOT_ENV] = root;
 
   // Teardown makes one attempt and the exit hook makes the last ones, so a root
@@ -190,7 +214,7 @@ export function startRunRoot(parent: string = defaultTempParent(), options: RunR
   let removed = false;
   const attempt = (): RemoveResult => {
     if (removed) return { outcome: 'removed' };
-    const result = removeRunRoot(root, token, options.remove, started);
+    const result = removeRunRoot(root, owner, options.remove, started);
     started ||= result.outcome !== 'refused';
     removed = result.outcome === 'removed';
     return result;
@@ -199,10 +223,14 @@ export function startRunRoot(parent: string = defaultTempParent(), options: RunR
   // skips teardown but still emits `exit`.
   const reapAtExit = (): void => {
     const waitMs = options.exitWaitMs ?? RUN_ROOT_EXIT_WAIT_MS;
-    const deadline = Date.now() + waitMs;
+    // A monotonic clock, so a wall-clock step cannot extend the wait.
+    const deadline = performance.now() + waitMs;
     let result = attempt();
-    while (result.outcome === 'present' && Date.now() < deadline) {
-      pause(Math.min(RUN_ROOT_EXIT_PAUSE_MS, deadline - Date.now()));
+    while (result.outcome === 'present') {
+      const left = deadline - performance.now();
+      if (left <= 0) break;
+      pause(Math.min(RUN_ROOT_EXIT_PAUSE_MS, left));
+      if (performance.now() >= deadline) break;
       result = attempt();
     }
     if (result.outcome === 'removed') return;

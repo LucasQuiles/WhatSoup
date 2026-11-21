@@ -170,7 +170,7 @@ describe('Vitest run root', () => {
         expect(process.exitCode).toBe(writerStops ? undefined : 1);
         const reports = stderr.mock.calls.map(([chunk]) => String(chunk)).join('');
         expect(reports.includes(`could not remove ${root} within 50 ms`)).toBe(!writerStops);
-        expect(reports.includes(join(basename(home), 'credential-bin', 'secret-tool'))).toBe(!writerStops);
+        expect(reports.includes(`2 top-level entries remain (2 shown): ${RUN_ROOT_MARKER}, ${basename(home)}`)).toBe(!writerStops);
       });
     } finally {
       stderr.mockRestore();

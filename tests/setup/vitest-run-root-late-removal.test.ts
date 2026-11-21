@@ -1,5 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { RUN_ROOT_ENV, RUN_ROOT_MARKER, type RunRootOptions, startRunRoot, workerHomePrefix } from './vitest-run-root.ts';
@@ -151,25 +163,122 @@ describe('Vitest run root after a removal that stopped part way', () => {
     });
   });
 
-  it('names at most 20 remaining entries, relative to the root, when the last attempt fails', () => {
+  it('names at most 20 remaining top-level entries when the last attempt fails', () => {
     withLateRun({ remove: () => {}, exitWaitMs: 0 }, ({ root, teardown, exitHooks, reports }) => {
-      // This case lays out its own tree: the marker and 26 entries under it.
+      // This case lays out its own tree: the marker, a nested directory and 24 files.
       for (const name of readdirSync(root)) if (name !== RUN_ROOT_MARKER) rmSync(join(root, name), { recursive: true });
-      mkdirSync(join(root, 'left'));
-      for (let i = 0; i < 25; i += 1) writeFileSync(join(root, 'left', `f${String(i).padStart(2, '0')}`), 'x');
+      mkdirSync(join(root, 'a-nested', 'inner'), { recursive: true });
+      for (let i = 0; i < 24; i += 1) writeFileSync(join(root, `f${String(i).padStart(2, '0')}`), 'x');
 
       teardown();
       exitHooks()[0]!();
       expect(process.exitCode).toBe(1);
       const final = reports().split('\n').find((line) => line.includes('entries remain'));
       expect(final).toContain(`could not remove ${root} within 0 ms`);
-      expect(final).toContain('27 entries remain (20 shown): ');
+      expect(final).toContain('26 top-level entries remain (20 shown): ');
       const shown = final!.split('shown): ')[1]!.split(', ');
       expect(shown).toEqual([
         RUN_ROOT_MARKER,
-        'left',
-        ...Array.from({ length: 18 }, (_, i) => join('left', `f${String(i).padStart(2, '0')}`)),
+        'a-nested',
+        ...Array.from({ length: 18 }, (_, i) => `f${String(i).padStart(2, '0')}`),
       ]);
+    });
+  });
+
+  it('starts no attempt after the deadline', () => {
+    const starts: number[] = [];
+    let hookStarted = 0;
+    const remove = (): void => {
+      if (hookStarted > 0) starts.push(performance.now() - hookStarted);
+    };
+    withLateRun({ remove, exitWaitMs: 250 }, ({ teardown, exitHooks }) => {
+      teardown();
+      hookStarted = performance.now();
+      exitHooks()[0]!();
+      expect(process.exitCode).toBe(1);
+      // Attempts start at about 0, 100 and 200 ms; none at or after 250 ms.
+      expect(starts.length).toBeGreaterThanOrEqual(2);
+      expect(Math.max(...starts)).toBeLessThan(250);
+    });
+  });
+});
+
+// A pathname is not reserved: after a rename, another directory can take it.
+// Only the directory this run made may be removed.
+describe('Vitest run root whose path another directory took', () => {
+  function replaceRoot(root: string, marker?: string): void {
+    renameSync(root, `${root}-moved`);
+    mkdirSync(root, { mode: 0o700 });
+    writeFileSync(join(root, 'replacement.txt'), 'keep');
+    if (marker !== undefined) writeFileSync(join(root, RUN_ROOT_MARKER), marker);
+  }
+
+  // The first removal deletes the marker and returns with the root present.
+  function markerOnlyRemoval(): { remove: (root: string) => void; calls: () => number } {
+    let calls = 0;
+    return {
+      remove: (root) => {
+        calls += 1;
+        if (calls > 1) rmSync(root, { recursive: true, force: true });
+        else rmSync(join(root, RUN_ROOT_MARKER));
+      },
+      calls: () => calls,
+    };
+  }
+
+  it('refuses an unmarked directory at the root path after its own removal started', () => {
+    const removal = markerOnlyRemoval();
+    withLateRun({ remove: removal.remove, exitWaitMs: 1_000 }, ({ root, teardown, exitHooks, reports }) => {
+      teardown();
+      expect(process.exitCode).toBeUndefined();
+      replaceRoot(root);
+
+      exitHooks()[0]!();
+      expect(readFileSync(join(root, 'replacement.txt'), 'utf8')).toBe('keep');
+      expect(process.exitCode).toBe(1);
+      expect(reports()).toContain(`refusing to remove ${root}: not this run's marked root`);
+      expect(removal.calls()).toBe(1);
+    });
+  });
+
+  it("refuses a directory at the root path that carries this run's marker", () => {
+    const remove = vi.fn((root: string): void => rmSync(root, { recursive: true, force: true }));
+    withLateRun({ remove }, ({ root, teardown, reports }) => {
+      replaceRoot(root, readFileSync(join(root, RUN_ROOT_MARKER), 'utf8'));
+
+      teardown();
+      expect(readFileSync(join(root, 'replacement.txt'), 'utf8')).toBe('keep');
+      expect(process.exitCode).toBe(1);
+      expect(reports()).toContain(`refusing to remove ${root}: not this run's marked root`);
+      expect(remove).not.toHaveBeenCalled();
+    });
+  });
+
+  it('refuses its own root when the marker became a dangling symlink after its removal started', () => {
+    const removal = markerOnlyRemoval();
+    withLateRun({ remove: removal.remove, exitWaitMs: 1_000 }, ({ root, teardown, exitHooks, reports }) => {
+      teardown();
+      symlinkSync(join(root, 'no-such-marker'), join(root, RUN_ROOT_MARKER));
+
+      exitHooks()[0]!();
+      expect(lstatSync(join(root, RUN_ROOT_MARKER)).isSymbolicLink()).toBe(true);
+      expect(process.exitCode).toBe(1);
+      expect(reports()).toContain(`refusing to remove ${root}: not this run's marked root`);
+      expect(removal.calls()).toBe(1);
+    });
+  });
+
+  it('refuses an otherwise intact root whose marker is a dangling symlink', () => {
+    const remove = vi.fn((root: string): void => rmSync(root, { recursive: true, force: true }));
+    withLateRun({ remove }, ({ root, teardown, reports }) => {
+      rmSync(join(root, RUN_ROOT_MARKER));
+      symlinkSync(join(root, 'no-such-marker'), join(root, RUN_ROOT_MARKER));
+
+      teardown();
+      expect(lstatSync(join(root, RUN_ROOT_MARKER)).isSymbolicLink()).toBe(true);
+      expect(process.exitCode).toBe(1);
+      expect(reports()).toContain(`refusing to remove ${root}: not this run's marked root`);
+      expect(remove).not.toHaveBeenCalled();
     });
   });
 });
