@@ -374,38 +374,6 @@ jobs:
       - name: Repo hygiene commit-author guard
         run: npm run guard:repo:commit-authors
 
-      - name: Install test-integrity plugin
-        env:
-          TEST_INTEGRITY_DEPLOY_KEY: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY }}
-          TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c
-        run: |
-          if [ -z "$TEST_INTEGRITY_DEPLOY_KEY" ]; then
-            echo "::error::TEST_INTEGRITY_DEPLOY_KEY secret is required to install the private LucasQuiles/test-integrity plugin"
-            exit 2
-          fi
-          plugin_dir="$HOME/.claude/plugins/test-integrity"
-          mkdir -p "$plugin_dir" "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
-          printf '%s\n' "$TEST_INTEGRITY_DEPLOY_KEY" > "$HOME/.ssh/test_integrity_deploy"
-          chmod 600 "$HOME/.ssh/test_integrity_deploy"
-          trap 'rm -f "$HOME/.ssh/test_integrity_deploy"' EXIT
-          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
-          git -C "$plugin_dir" init
-          git -C "$plugin_dir" remote add origin git@github.com:LucasQuiles/test-integrity.git
-          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/test_integrity_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
-            git -C "$plugin_dir" fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"
-          git -C "$plugin_dir" switch --detach FETCH_HEAD
-          observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"
-          if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then
-            echo "::error::test-integrity checkout mismatch: expected $TEST_INTEGRITY_COMMIT observed $observed_commit"
-            exit 2
-          fi
-
-      - name: Test integrity baseline check
-        env:
-          WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'
-        run: npm run guard:test-integrity
-
       - name: ESLint fitness ring
         run: npm run guard:lint:src
 

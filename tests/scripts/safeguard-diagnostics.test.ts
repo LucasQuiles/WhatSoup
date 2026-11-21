@@ -246,19 +246,6 @@ const requiredQualityWorkflow = [
   '          fi',
   '          npm run guard:semantic-quality -- --mode shadow --base "$base" --receipt "$SEMANTIC_RECEIPT"',
   '          node -e \'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.SEMANTIC_RECEIPT,"utf8")); process.stdout.write(`### Semantic quality (shadow)\\n\\nDecision: **${r.decision}**\\n\\nFindings: ${r.findings.length}\\n`)\' >> "$GITHUB_STEP_SUMMARY"',
-  '      - name: Install test-integrity plugin',
-  '        env:',
-  '          TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
-  '        run: |',
-  '          mkdir -p "$plugin_dir" "$HOME/.ssh"',
-  '          git -C "$plugin_dir" fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"',
-  '          git -C "$plugin_dir" switch --detach FETCH_HEAD',
-  '          observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"',
-  '          if [ "$observed_commit" != "$TEST_INTEGRITY_COMMIT" ]; then',
-  '            exit 2',
-  '          fi',
-  '      - name: Test integrity baseline check',
-  '        run: npm run guard:test-integrity',
   '      - name: Install console dependencies',
   '        run: npm --prefix console ci',
   '      - name: Design-system hygiene changed files',
@@ -319,6 +306,23 @@ const requiredQualityWorkflow = [
   '    steps:',
   '      - name: Portable Python and release-proof prerequisites (real macOS)',
   '        run: npm test -- tests/helpers/python-interpreter.test.ts tests/scripts/bot-errors-python-atomic-write-guard.test.ts tests/scripts/bot-errors-release-proof-installer.test.ts tests/scripts/bot-errors-release-proof-run.test.ts --pool=forks --maxWorkers=1',
+].join('\n');
+
+const requiredPrivateTestIntegrityWorkflow = [
+  'name: Private test integrity',
+  'on:',
+  '  workflow_run:',
+  '    workflows: [Quality]',
+  '    types: [completed]',
+  'jobs:',
+  '  private-scanner:',
+  "    if: github.repository == 'LucasQuiles/WhatSoup' && github.event.workflow_run.status == 'completed' && github.event.workflow_run.head_repository.full_name == github.repository && ( github.event.workflow_run.event == 'pull_request' || (github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v'))) || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main') )",
+  '    steps:',
+  '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+  '        with:',
+  '          repository: LucasQuiles/test-integrity',
+  '          ref: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
+  '          persist-credentials: false',
 ].join('\n');
 
 const requiredTagReleaseWorkflow = [
@@ -428,6 +432,7 @@ const requiredFiles: Record<string, string> = {
   'console/scripts/design-regression.sh': 'command -v rg',
   'console/src/components/primitives/Modal.tsx': 'useDismissable',
   '.github/workflows/quality.yml': requiredQualityWorkflow,
+  '.github/workflows/private-test-integrity.yml': requiredPrivateTestIntegrityWorkflow,
   '.github/workflows/tag-release-gate.yml': requiredTagReleaseWorkflow,
   '.husky/pre-commit': [
     'npm run guard:repo:staged',
@@ -940,7 +945,7 @@ describe('safeguard diagnostics', () => {
   it('fails when Quality loses the semantic shadow receipt step', () => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(
-      /      - name: Semantic quality \(shadow\)[\s\S]*?(?=      - name: Install test-integrity plugin)/,
+      /      - name: Semantic quality \(shadow\)[\s\S]*?(?=      - name: Install console dependencies)/,
       '',
     );
     expect(mutated).not.toBe(workflow);
@@ -1096,14 +1101,6 @@ describe('safeguard diagnostics', () => {
         '        if: github.ref == \'refs/heads/main\'\n        run: npm test -- --pool=forks',
       ),
       evidence: 'quality (25.x) required step must be unconditional and blocking: npm test -- --pool=forks',
-    },
-    {
-      name: 'floats the Test Integrity revision',
-      mutate: (workflow: string) => workflow.replace(
-        'TEST_INTEGRITY_COMMIT: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c',
-        'TEST_INTEGRITY_COMMIT: main',
-      ),
-      evidence: 'Test Integrity commit pin must match the reviewed 40-hex object',
     },
     {
       name: 'restores masked unconditional disk cleanup',
@@ -1360,25 +1357,48 @@ describe('safeguard diagnostics', () => {
       });
   });
 
-  it('fails when the quality job depends on a skippable job', () => {
+  it.each([
+    ['depends on a skippable job', 'jobs:\n  quality:', "jobs:\n  suppress-quality:\n    runs-on: ubuntu-latest\n    if: false\n    steps:\n      - run: 'true'\n  quality:\n    needs: suppress-quality", 'quality job must not declare needs'],
+    ['becomes conditional', '    timeout-minutes: 60\n    steps:', "    timeout-minutes: 60\n    if: github.ref == 'refs/heads/main'\n    steps:", 'quality job must not declare if'],
+  ])('fails when the quality job %s', (_name, anchor, replacement, evidence) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
-    const mutated = workflow.replace('jobs:\n  quality:', [
-      'jobs:',
-      '  suppress-quality:',
-      '    runs-on: ubuntu-latest',
-      '    if: false',
-      '    steps:',
-      "      - run: 'true'",
-      '  quality:',
-      '    needs: suppress-quality',
-    ].join('\n'));
+    const mutated = workflow.replace(anchor, replacement);
     expect(mutated).not.toBe(workflow);
-    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
-    const result = checkSafeguards(fixture);
+    const result = checkSafeguards(makeRepo({ files: { '.github/workflows/quality.yml': mutated } }));
 
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
-      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['quality job must not declare needs']) });
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
+  });
+
+  // The private test-integrity check runs only in the trusted private workflow: Quality holds no
+  // deploy key and installs no plugin, and the private workflow keeps its trigger and pins.
+  it.each([
+    ['quality.yml', 'reads the test-integrity deploy key', '      - name: Install console dependencies', '      - name: Leak\n        env:\n          KEY: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY }}\n        run: echo "$KEY"\n      - name: Install console dependencies', 'quality-ci-lane-partition', 'quality workflow must not reference TEST_INTEGRITY_DEPLOY_KEY'],
+    ['quality.yml', 'installs the private plugin', '      - name: Install console dependencies', '      - name: Install test-integrity plugin\n        run: git -C "$HOME/.claude/plugins/test-integrity" fetch --depth 1 origin\n      - name: Install console dependencies', 'quality-ci-lane-partition', 'quality workflow must not reference .claude/plugins/test-integrity'],
+    ['quality.yml', 'runs the test-integrity guard', '      - name: Install console dependencies', '      - name: Test integrity baseline check\n        run: npm run guard:test-integrity\n      - name: Install console dependencies', 'quality-ci-lane-partition', 'quality workflow must not reference guard:test-integrity'],
+    ['quality.yml', 'names the private plugin repository', '      - name: Install console dependencies', '      - name: Fetch plugin\n        run: gh repo clone LucasQuiles/test-integrity "$RUNNER_TEMP/plugin"\n      - name: Install console dependencies', 'quality-ci-lane-partition', 'quality workflow must not reference LucasQuiles/test-integrity'],
+    ['private-test-integrity.yml', 'floats the scanner pin', 'ref: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c', 'ref: main', 'private-test-integrity-gate', 'Test Integrity commit pin must match the reviewed 40-hex object'],
+    ['private-test-integrity.yml', 'drops the same-repository condition', 'head_repository.full_name == github.repository', 'status == \'completed\'', 'private-test-integrity-gate', 'private-scanner must run only for same-repository Quality runs'],
+    ['private-test-integrity.yml', 'persists checkout credentials', 'persist-credentials: false', 'persist-credentials: true', 'private-test-integrity-gate', 'private-scanner checkout must set persist-credentials: false'],
+    ['private-test-integrity.yml', 'stops starting on Quality', 'workflows: [Quality]', 'workflows: [Other]', 'private-test-integrity-gate', 'private test-integrity workflow must start on workflow_run of Quality'],
+    ['private-test-integrity.yml', 'adds a second trigger', 'on:\n  workflow_run:', 'on:\n  workflow_dispatch:\n  workflow_run:', 'private-test-integrity-gate', 'private test-integrity workflow must declare no trigger other than workflow_run'],
+    ['private-test-integrity.yml', 'also starts on requested Quality runs', 'types: [completed]', 'types: [completed, requested]', 'private-test-integrity-gate', 'private test-integrity workflow must start only on completed Quality runs'],
+    ['private-test-integrity.yml', 'filters Quality runs by branch', 'types: [completed]', 'types: [completed]\n    branches: [main]', 'private-test-integrity-gate', 'private test-integrity workflow_run must declare only workflows and types'],
+    ['private-test-integrity.yml', 'pins the scanner commit in another repository', 'repository: LucasQuiles/test-integrity', 'repository: example/test-integrity', 'private-test-integrity-gate', 'private-scanner must check out the private test-integrity repository'],
+    ['private-test-integrity.yml', 'makes the same-repository condition optional', "== 'main') )", "== 'main') ) || true", 'private-test-integrity-gate', 'private-scanner must run only for same-repository Quality runs'],
+    ['private-test-integrity.yml', 'negates the same-repository comparison', 'github.event.workflow_run.head_repository.full_name == github.repository', '!(github.event.workflow_run.head_repository.full_name == github.repository)', 'private-test-integrity-gate', 'private-scanner must run only for same-repository Quality runs'],
+    ['private-test-integrity.yml', 'quotes persist-credentials as a string', 'persist-credentials: false', "persist-credentials: 'false'", 'private-test-integrity-gate', 'private-scanner checkout must set persist-credentials: false'],
+  ])('fails when %s %s', (file, _name, anchor, replacement, checkId, evidence) => {
+    const path = `.github/workflows/${file}`;
+    const workflow = requiredFiles[path]!;
+    const mutated = workflow.replace(anchor, replacement);
+    expect(mutated).not.toBe(workflow);
+    const result = checkSafeguards(makeRepo({ files: { [path]: mutated } }));
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === checkId))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining([evidence]) });
   });
 
   it('fails when quality-job run defaults can suppress command execution', () => {
@@ -1510,24 +1530,6 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({
         status: 'fail',
         evidence: expect.arrayContaining(['quality job continue-on-error must be absent or false']),
-      });
-  });
-
-  it('fails when the quality job becomes conditional', () => {
-    const workflow = requiredFiles['.github/workflows/quality.yml'];
-    const mutated = workflow.replace(
-      '    timeout-minutes: 100\n    steps:',
-      "    timeout-minutes: 100\n    if: github.ref == 'refs/heads/main'\n    steps:",
-    );
-    expect(mutated).not.toBe(workflow);
-    const fixture = makeRepo({ files: { '.github/workflows/quality.yml': mutated } });
-    const result = checkSafeguards(fixture);
-
-    expect(result.ok).toBe(false);
-    expect(result.checks.find((check) => check.id === 'quality-ci-playwright-timeouts'))
-      .toMatchObject({
-        status: 'fail',
-        evidence: expect.arrayContaining(['quality job must not declare if']),
       });
   });
 
