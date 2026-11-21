@@ -552,19 +552,29 @@ release, including an older release without a manifest. A wrapper that does not
 resolve to an existing `deploy/whatsoup`, such as one whose target is gone or
 whose link chain is longer than 40 links, is refused too; on a fresh install,
 remove `~/.local/bin/whatsoup` first. A first install with no wrapper is
-allowed. The refusal happens before any step changes anything. Its message
-prints a `release:activate` command with an `--aux-label` for each setup timer;
-add the others the host runs, as in the example above.
+allowed. The first check runs after option parsing, before the preflight, so a
+refusal there changes nothing. Steps 3 and 4 check again when they start: if
+the wrapper changed during the preflight or step 2 (another writer, since setup
+takes no activation lock), the refusal comes after those ran, but before the
+step itself changes anything. On macOS the message prints a
+`release:activate` command with an `--aux-label` for both setup timers: pass
+one for each timer plist the host has installed (drop a printed one it does
+not have, add any other it runs, as in the example above).
 
 From a tree other than the active release:
 
-- `--npmrc-only` runs only step 5, the hardened `~/.npmrc` merge;
-- on Linux, `--skip-wrappers` skips step 3 and `--timers-only` runs only step 4;
-- on macOS, only `--npmrc-only` runs, because `--skip-wrappers` and
-  `--timers-only` still reach step 4.
+- `--npmrc-only` runs only step 5, the hardened `~/.npmrc` merge, alone or with
+  `--skip-wrappers`;
+- on Linux, `--skip-wrappers` skips step 3 and `--timers-only` runs only step 4
+  (any combination of the two with `--npmrc-only` too);
+- on macOS, `--skip-wrappers` alone and `--timers-only` still reach step 4 and
+  are refused, so only `--npmrc-only` (with or without `--skip-wrappers`) runs;
+- the standalone modes `--check`, `--remove-timers`, `--reconcile` and `--help`
+  run before the guard and are never refused by it.
 
 `--wrappers-only` runs only step 3, so on a release host it runs only from the
-active release. The preflight and the step 1 checks always run. Step 3 replaces
+active release. The preflight and the step 1 checks always run, even with an
+`--*-only` flag, and the preflight can install the pinned Node. Step 3 replaces
 each link by renaming a new link over it, so a link is never missing while it
 changes.
 
@@ -647,8 +657,9 @@ passed the guard:
 - `whatsoup-heal-notify`
 - `whatsoup-release-drift-linux.sh`
 
-After an activation they still run the previous release, and they break if
-that release is removed.
+After `release:activate` all seven still run the previous release; after
+`release:activate-host` with a `fleet-wrapper` entry, six do (`whatsoup-fleet`
+moved). They break if that release is removed.
 
 To move them, run `deploy/setup.sh --wrappers-only` from the active release,
 through the path that `~/.local/bin/whatsoup` names:

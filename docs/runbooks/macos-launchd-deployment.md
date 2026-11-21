@@ -98,11 +98,15 @@ logs in automatically, the next reboot loads an installed plist, so installing
 one is a live change.
 
 On a release host, steps 3 and 4 refuse to move the bot wrapper or the timer
-plists to another tree; `release:activate` owns that switch. On macOS, a tree
-other than the active release can run only `--npmrc-only`: `--skip-wrappers`
-and `--timers-only` still reach step 4. From the active release, run through
-the path the wrapper names, `--wrappers-only` runs only step 3 and moves the
-seven helper links that `release:activate` leaves on the previous release. See
+plists to another tree; `release:activate` owns that switch. On macOS, from a
+tree other than the active release, setup's numbered steps run only with
+`--npmrc-only` (alone or with `--skip-wrappers`): `--skip-wrappers` alone and
+`--timers-only` still reach step 4; the standalone `--check`, `--remove-timers`,
+`--reconcile` and `--help` modes are not affected. From the active release, run
+through the path the wrapper names, `--wrappers-only` runs only step 3 and
+moves the helper links that activation leaves on the previous release (all
+seven after `release:activate`; six after `release:activate-host` with a
+`fleet-wrapper` entry, which moves `whatsoup-fleet` itself). See
 "`deploy/setup.sh` on a release host" in
 [release-deployment.md](release-deployment.md#deploysetupsh-on-a-release-host).
 
