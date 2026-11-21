@@ -165,6 +165,18 @@ describe('transport inbound exits record observations', () => {
     },
   );
 
+  it('a stale batch entry with a throwing accessor cannot reject the event callback', async () => {
+    (cm as unknown as { sock: unknown }).sock = { replaced: true };
+    const hostile = { get key(): never { throw new Error('hostile accessor'); } };
+    await expect(deliver({ 'messages.upsert': { messages: [hostile, USER_MESSAGE], type: 'notify' } })).resolves.toBeUndefined();
+    expect(consumer).not.toHaveBeenCalled();
+    expect(emitAlert).not.toHaveBeenCalled();
+    expect(getInboundObservationHealth()).toMatchObject({
+      counts: { 'transport.stale_socket': 0 },
+      recorder_failures: 1,
+    });
+  });
+
   it('a batch with an unsupported upsert type records its attempts, advisory', async () => {
     await deliver({ 'messages.upsert': { messages: [USER_MESSAGE], type: 'prepend' } });
     expect(consumer).not.toHaveBeenCalled();

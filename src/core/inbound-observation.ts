@@ -159,6 +159,24 @@ export function observeInbound(instance: string, reason: InboundObservationReaso
   }
 }
 
+/**
+ * Count and record in one step that cannot throw into the caller. The count
+ * runs inside the guard, so a batch entry that throws on access is counted as
+ * a recorder failure, records no attempt, and leaves the caller's control flow
+ * as it was. Every transport and ingest call site goes through this.
+ */
+export function observeInboundSafely(
+  instance: string,
+  reason: InboundObservationReason,
+  countAttempts: () => number = () => 1,
+): void {
+  try {
+    observeInbound(instance, reason, countAttempts());
+  } catch {
+    recorderFailures += 1;
+  }
+}
+
 /** Advisory projection for /health. Never feeds status or degradation causes. */
 export function getInboundObservationHealth(): InboundObservationHealth {
   return { counts: { ...counts }, alerts: { ...alerts }, recorder_failures: recorderFailures };

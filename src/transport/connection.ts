@@ -63,7 +63,7 @@ import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 import { RECENT_DISCONNECT_DEGRADED_THRESHOLD } from '../core/health-reason-hold.ts';
-import { observeInbound } from '../core/inbound-observation.ts';
+import { observeInboundSafely } from '../core/inbound-observation.ts';
 import {
   buildDisconnectDecisionRecord,
   decideDisconnectAction,
@@ -2035,8 +2035,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     sock.ev.process(async (events) => {
       // Stale-socket guard: drop events from a socket that is no longer current
       if (this.sock !== sock) {
-        const staleUpsert = events['messages.upsert'] as { messages?: WAMessage[] } | undefined;
-        observeInbound(config.botName, 'transport.stale_socket', countInboundObservationMessages(staleUpsert?.messages));
+        // This branch is outside the guarded handlers below; the observation
+        // is guarded itself and cannot reject this callback.
+        observeInboundSafely(config.botName, 'transport.stale_socket', () => countInboundObservationMessages(
+          (events['messages.upsert'] as { messages?: unknown } | undefined)?.messages,
+        ));
         return;
       }
 
@@ -3320,7 +3323,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     const { messages, type } = data;
     // Only process real-time and appended messages, not full history syncs
     if (type !== 'notify' && type !== 'append') {
-      observeInbound(config.botName, 'transport.unsupported_upsert_type', countInboundObservationMessages(messages));
+      observeInboundSafely(config.botName, 'transport.unsupported_upsert_type', () => countInboundObservationMessages(messages));
       return;
     }
 
@@ -3371,7 +3374,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       const parsed = parseIncomingMessage(msg);
-      if (!parsed && msg.key.fromMe !== true) observeInbound(config.botName, 'transport.parser_refused');
+      if (!parsed && msg.key.fromMe !== true) observeInboundSafely(config.botName, 'transport.parser_refused');
       if (parsed) {
         // Build contacts directory from every incoming sender for @mention resolution
         this.contactsDir.observe(parsed.senderJid, parsed.senderName);
@@ -3391,7 +3394,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             this.log.warn({ err, messageId: parsed.messageId }, 'onMessage callback threw');
           }
         } else if (!parsed.isFromMe) {
-          observeInbound(config.botName, 'transport.no_consumer');
+          observeInboundSafely(config.botName, 'transport.no_consumer');
         }
       }
     }
