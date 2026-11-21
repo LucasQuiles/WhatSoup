@@ -9180,8 +9180,9 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
     """Daily-report summary of one producer's authority record, last 24 hours.
 
     Counts per outcome and how many notices enforce mode would have held or
-    refused, so the owner can see when a host is ready for enforce, and how
-    many rows it could not read. Returns None when the record does not exist.
+    refused, so the owner can see when a host is ready for enforce, how many
+    rows it could not read, and the time of the oldest row it counted.
+    Returns None when the record does not exist.
     Plain text, not WARN: observe mode holds nothing.
     """
     try:
@@ -9197,6 +9198,9 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
     counts = {outcome: 0 for outcome in _INCIDENT_AUTHORITY_OUTCOMES}
     modes: set[str] = set()
     skipped = 0
+    # The dispatcher record is size-bounded, so on a busy host the counted
+    # rows may start later than 24 hours ago; the line names where they start.
+    oldest_counted: float | None = None
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -9221,14 +9225,21 @@ def incident_authority_record_line(producer: str, path: Path, now_epoch: float) 
         ):
             continue
         counts[record["outcome"]] += 1
+        if oldest_counted is None or observed < oldest_counted:
+            oldest_counted = observed
         if record.get("mode") in ("observe", "enforce"):
             modes.add(record["mode"])
     would_stop = sum(counts[outcome] for outcome in _INCIDENT_AUTHORITY_ENFORCE_WOULD_STOP)
     outcome_text = " ".join(f"{outcome}={counts[outcome]}" for outcome in _INCIDENT_AUTHORITY_OUTCOMES)
+    oldest_text = (
+        "none"
+        if oldest_counted is None
+        else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(oldest_counted))
+    )
     return (
         f"incident_authority_record: producer={producer} last_24h total={sum(counts.values())} "
         f"{outcome_text} would_hold_or_refuse_in_enforce={would_stop} "
-        f"mode={','.join(sorted(modes)) or 'none'} skipped={skipped}"
+        f"mode={','.join(sorted(modes)) or 'none'} skipped={skipped} oldest_counted={oldest_text}"
     )
 
 

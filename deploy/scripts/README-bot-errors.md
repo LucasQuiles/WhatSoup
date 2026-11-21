@@ -276,10 +276,15 @@ scope are `refused`; a rate limit, an outage and an unreadable credential are
 with reason `authority_client_error`. The daily health report adds, per
 producer, a plain line `incident_authority_record: producer=… last_24h
 total=… granted=… refused=… not_ready=… protocol_error=… not_configured=…
-not_asked=… would_hold_or_refuse_in_enforce=… mode=… skipped=…`. The count enforce
-would have stopped is refused + not_ready + protocol_error + not_configured;
-`skipped` counts the rows the report could not read (not JSON, or an outcome
-or reason that is not a known string).
+not_asked=… would_hold_or_refuse_in_enforce=… mode=… skipped=…
+oldest_counted=…`. The count enforce would have stopped is refused +
+not_ready + protocol_error + not_configured; `skipped` counts the rows the
+report could not read (not JSON, or an outcome or reason that is not a known
+string), not rows the size bound dropped. `oldest_counted` is the time of the
+oldest row the line counted, as `YYYY-MM-DDTHH:MM:SSZ` in UTC, or `none` when
+it counted no row. Because the dispatcher record is bounded to 1 MiB, a busy
+host may hold fewer than 24 hours of rows: `last_24h` is the window the report
+asks for, and `oldest_counted` shows where the counted rows really start.
 
 **Enrolling a host and switching it to enforce.**
 
@@ -291,7 +296,12 @@ or reason that is not a known string).
 2. Restart the BOT ERRORS services and let the host run in observe mode.
 3. Read the health report's `incident_authority_record` lines: switch only
    after a period in which `would_hold_or_refuse_in_enforce` is 0 and
-   `granted` covers the host's traffic.
+   `granted` covers the host's traffic. A line with
+   `would_hold_or_refuse_in_enforce=0` counts only when its `oldest_counted`
+   is at the start of the 24-hour window (close to the report time less 24
+   hours), or when the host is known to have started its record after that
+   start, so that no older row exists. A later `oldest_counted` on a busy host
+   means the size bound dropped older rows, so that line covers fewer hours.
 4. Close every item in "Before any host is switched to enforce" below.
 5. The owner sets `BOT_ERRORS_INCIDENT_AUTHORITY_MODE=enforce` in that host's
    env file and restarts the services (on macOS, rerun
