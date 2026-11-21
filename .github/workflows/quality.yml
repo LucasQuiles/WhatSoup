@@ -36,10 +36,12 @@ jobs:
     # the re2 build on Node 25 (GCC 15), the GNU coreutils timeout the boundary-run
     # validator requires, and the Playwright Chromium install. Move back once those work.
     runs-on: ubuntu-24.04
-    # Generous cap so it only kills a genuinely hung run, not a slow-but-live
-    # one (the authority job runs the full suite + coverage and can take ~40min).
-    # Without this a hung run rides to the 6h GitHub default.
-    timeout-minutes: 60
+    # Bounds: coverage 45m, container 10m, runtime export 5m, browser
+    # deps/download 5m + 17m, remaining setup/checks allowance 15m (an
+    # unmeasured estimate that includes the 2m Linux policy probe and up to
+    # about 2.5m of snapshot probe retries). The 100m cap retains 3m of
+    # margin over these explicit bounds and the estimate.
+    timeout-minutes: 100
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -87,9 +89,199 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Container input policy and snapshot availability
+        run: npm run guard:node-pin-consistency -- --verify-container-snapshot
+
+      - name: Install reviewed Buildx
+        run: |
+          set -euo pipefail
+          docker_config="$RUNNER_TEMP/whatsoup-docker-config"
+          mkdir -m 700 "$docker_config"
+          bash scripts/run-with-pinned-node.sh scripts/install-pinned-buildx.ts \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --docker-config "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+
+      - name: Create reviewed BuildKit builder
+        run: |
+          set -euo pipefail
+          builder_name="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name)')"
+          builder_driver="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.driver)')"
+          buildkit_image="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.buildkitImage)')"
+          docker buildx create \
+            --name "$builder_name" \
+            --driver "$builder_driver" \
+            --driver-opt "image=$buildkit_image" \
+            --use
+
       - name: Build Docker deployment image
+        id: build-container
         timeout-minutes: 10
-        run: docker build --file docker/Dockerfile --tag whatsoup-ci .
+        env:
+          # Buildx otherwise emits `{}` for buildx.build.provenance, which
+          # cannot establish the receipt's requested source/build details.
+          BUILDX_METADATA_PROVENANCE: max
+          # The image is built from the commit this job checked out, which the
+          # policy probe below also comes from: the merge result on a pull
+          # request, the event commit otherwise. A pull request's merge commit
+          # is on no branch, so BuildKit fetches it through the pull request's
+          # merge ref; the receipt requires both provenance records to name
+          # SOURCE_REVISION, so a merge ref that moved after checkout fails.
+          SOURCE_REVISION: ${{ github.sha }}
+          SOURCE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "$SOURCE_REVISION" ]; then
+            echo '::error::the checked-out commit is not the commit the image is built from' >&2
+            exit 1
+          fi
+          if [ "$SOURCE_REF" != "$SOURCE_REVISION" ] && ! [[ "$SOURCE_REF" =~ ^refs/pull/[1-9][0-9]*/merge$ ]]; then
+            echo '::error::container source ref must be the revision or a pull request merge ref' >&2
+            exit 1
+          fi
+          container_dir="$RUNNER_TEMP/whatsoup-container"
+          mkdir -p "$container_dir"
+          platform="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.platform)')"
+          sbom_generator="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sbom.generator)')"
+          # Buildx v0.38.0 inspect has no format flag. Parse its supported text
+          # interface and fail closed on missing, duplicate, or drifted fields.
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          builder_name="$(
+            bash scripts/run-with-pinned-node.sh scripts/verify-buildx-runtime.ts \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --output "$container_dir/buildkit-runtime.json" \
+              --source "$SOURCE_REVISION" \
+              --provenance-builder-id "$provenance_builder_id"
+          )"
+          source_repository="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sourceRepository)')"
+          if ! node -e 'const source = process.argv[1]; process.exit(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(source) ? 0 : 1)' "$source_repository"; then
+            echo '::error::container source repository must be a canonical GitHub HTTPS clone URL'
+            exit 1
+          fi
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "$SOURCE_REF" != "$SOURCE_REVISION" ]; then
+            # GitHub moves a merge ref when main advances or the pull request changes; a rerun keeps the old commit.
+            merge_ref_listing="$(git ls-remote "$source_repository" "$SOURCE_REF")"
+            if [ "$merge_ref_listing" != "$(printf '%s\t%s' "$SOURCE_REVISION" "$SOURCE_REF")" ]; then
+              echo '::error::the pull request merge ref moved after this run started (main advanced or the pull request changed); a rerun reuses the old commit and cannot recover, so push a commit or close and reopen the pull request' >&2
+              exit 1
+            fi
+          fi
+          docker buildx build \
+            --builder "$builder_name" \
+            --file docker/Dockerfile \
+            --platform "$platform" \
+            --tag whatsoup-ci \
+            --attest "type=provenance,mode=max,builder-id=$provenance_builder_id" \
+            --sbom "generator=$sbom_generator" \
+            --metadata-file "$container_dir/build-metadata.json" \
+            --output type=oci,dest="$container_dir/whatsoup-image.oci.tar" \
+            "${source_repository}#${SOURCE_REF}"
+
+      - name: Verify container build receipt
+        id: verify-container-receipt
+        timeout-minutes: 5
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          SOURCE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+        run: |
+          set -euo pipefail
+          container_dir="$RUNNER_TEMP/whatsoup-container"
+          builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
+          buildx_version="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.version)')"
+          buildkit_version="$(node -e 'const policy = require("./docker/container-inputs.json"); const prefix = "moby/buildkit:"; const image = policy.buildx.buildkitImage; if (!image.startsWith(prefix)) process.exit(1); process.stdout.write(image.slice(prefix.length).split("@", 1)[0])')"
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
+            --metadata "$container_dir/build-metadata.json" \
+            --runtime-evidence "$container_dir/buildkit-runtime.json" \
+            --verified-sbom-output "$container_dir/whatsoup-image.spdx.json" \
+            --image "$container_dir/whatsoup-image.oci.tar" \
+            --source "$SOURCE_REVISION" \
+            --source-ref "$SOURCE_REF" \
+            --builder "$builder" \
+            --buildx-version "$buildx_version" \
+            --buildkit-version "$buildkit_version" \
+            --provenance-builder-id "$provenance_builder_id" \
+            --output "$container_dir/container-build-receipt.json"
+          bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
+            --metadata "$container_dir/build-metadata.json" \
+            --runtime-evidence "$container_dir/buildkit-runtime.json" \
+            --sbom "$container_dir/whatsoup-image.spdx.json" \
+            --image "$container_dir/whatsoup-image.oci.tar" \
+            --source "$SOURCE_REVISION" \
+            --source-ref "$SOURCE_REF" \
+            --builder "$builder" \
+            --buildx-version "$buildx_version" \
+            --buildkit-version "$buildkit_version" \
+            --provenance-builder-id "$provenance_builder_id" \
+            --receipt "$container_dir/container-build-receipt.json"
+
+      - name: Load verified deployment image and runtime providers
+        timeout-minutes: 5
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+          SOURCE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE_REF" != "$SOURCE_REVISION" ] && ! [[ "$SOURCE_REF" =~ ^refs/pull/[1-9][0-9]*/merge$ ]]; then
+            echo '::error::container source ref must be the revision or a pull request merge ref' >&2
+            exit 1
+          fi
+          expected_image_id="$(node -e '
+            const fs = require("node:fs");
+            const receipt = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-container/container-build-receipt.json", "utf8"));
+            const policy = require("./docker/container-inputs.json");
+            if (receipt.schemaVersion !== 4 || !/^sha256:[a-f0-9]{64}$/.test(receipt.imageConfigDigest)
+                || receipt.sourceRevision !== process.env.SOURCE_REVISION
+                || !/^[a-f0-9]{40}$/.test(receipt.sourceRevision)
+                || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(receipt.sourceRepository)
+                || receipt.platform !== policy.platform
+                || receipt.builder !== policy.builder.name + "|" + policy.builder.driver) {
+              throw new Error("runtime export requires the verified receipt for this source and builder");
+            }
+            process.stdout.write(receipt.imageConfigDigest);
+          ')"
+          builder_name="$(node -e 'process.stdout.write(require("./docker/container-inputs.json").builder.name)')"
+          platform="$(node -e 'process.stdout.write(require("./docker/container-inputs.json").platform)')"
+          source_repository="$(node -e 'const fs = require("node:fs"); const receipt = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-container/container-build-receipt.json", "utf8")); process.stdout.write(receipt.sourceRepository)')"
+          if [ "$SOURCE_REF" != "$SOURCE_REVISION" ]; then
+            # GitHub moves a merge ref when main advances or the pull request changes; a rerun keeps the old commit.
+            merge_ref_listing="$(git ls-remote "$source_repository" "$SOURCE_REF")"
+            if [ "$merge_ref_listing" != "$(printf '%s\t%s' "$SOURCE_REVISION" "$SOURCE_REF")" ]; then
+              echo '::error::the pull request merge ref moved after this run started (main advanced or the pull request changed); a rerun reuses the old commit and cannot recover, so push a commit or close and reopen the pull request' >&2
+              exit 1
+            fi
+          fi
+          # The OCI export retains attestations. A separate cached runtime copy
+          # also works with classic Docker stores that cannot import attestations.
+          docker buildx build \
+            --builder "$builder_name" \
+            --file docker/Dockerfile \
+            --platform "$platform" \
+            --tag whatsoup-ci \
+            --provenance=false --sbom=false \
+            --load \
+            "${source_repository}#${SOURCE_REF}"
+          loaded_image_id="$(docker image inspect --format '{{.Id}}' whatsoup-ci)"
+          if [ "$loaded_image_id" != "$expected_image_id" ]; then
+            echo '::error::loaded runtime image differs from verified OCI configuration' >&2
+            exit 1
+          fi
+          docker run --rm --network none --pull=never --entrypoint node "$expected_image_id" \
+            --experimental-strip-types --input-type=module \
+            --eval "const { transcribeAudio } = await import('./src/runtimes/chat/providers/transcription/chain.ts'); if (typeof transcribeAudio !== 'function') throw new Error('transcription entrypoint missing');"
+
+      # Upload only what the receipt verified for this commit; a failed revision
+      # or receipt check must not publish an archive under github.sha.
+      # The archive contains src/; only the main-push attestation job downloads it.
+      - name: Upload container build evidence
+        if: ${{ always() && steps.verify-container-receipt.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: container-build-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/whatsoup-container
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify Linux policy ownership and controller readability
         timeout-minutes: 2
@@ -98,7 +290,8 @@ jobs:
           trap 'rm -rf -- "$policy_scratch"' EXIT
           export TMPDIR="$policy_scratch"
           cc -static -Wall -Wextra -Werror tests/runtimes/agent/provider-policy-reader.integration.c -o "$policy_scratch/policy-reader"
-          docker run --rm --network none --read-only --user 0:0 \
+          # The verified runtime step above loaded whatsoup-ci; never fall back to a registry pull.
+          docker run --rm --network none --pull=never --read-only --user 0:0 \
             --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add FSETID --cap-add SETUID --cap-add SETGID --cap-add KILL \
             --tmpfs /opt/policy-probe:rw,nosuid,noexec,size=16m,mode=0755 \
             --env TMPDIR=/opt/policy-probe \
@@ -268,9 +461,6 @@ jobs:
       - name: Publication guard
         run: npm run guard:publication:all
 
-      - name: Node pin consistency guard
-        run: npm run guard:node-pin-consistency
-
       - name: Source runtime drift guard
         run: npm run guard:source-runtime-drift
 
@@ -375,8 +565,8 @@ jobs:
       # 1376 s once and exceeded the 1800 s bound twice, with every test file
       # reporting completion, so the default leaves no margin for hosted-runner
       # speed variance. This step raises the bound to 45 min on the hosted
-      # runner only; local gates keep the default. 45 min plus the other steps
-      # (about 9 min) stays inside the job's 60-minute cap.
+      # runner only; local gates keep the default. The coverage limit
+      # and the container/browser bounds fit the job's explicit 100-minute cap.
       - name: Test suite + coverage thresholds
         env:
           WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'
@@ -425,10 +615,12 @@ jobs:
         run: npx playwright install-deps chromium
 
       - name: Install Playwright chromium
+        timeout-minutes: 17
         # The chromium download intermittently hangs on the hosted ubuntu runners
         # (observed repeatedly on the 24.x lane). Bound each attempt with a timeout
         # so a hung attempt is killed and retried, rather than stalling the whole
-        # job until the 60-minute cap. Fails only after 3 genuine failures.
+        # job until its cap. The 17m step bound includes three 300s attempts
+        # and their 15s + 30s + 45s backoffs; any exhausted bound fails.
         run: |
           TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"
           for attempt in 1 2 3; do
@@ -460,6 +652,69 @@ jobs:
             tests/browser/__screenshots__
             tests/browser-motion/__screenshots__
           if-no-files-found: ignore
+
+  attest-container-build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Download checked container evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: container-build-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/whatsoup-container
+
+      - name: Reverify downloaded container evidence
+        timeout-minutes: 5
+        id: reverify-container-evidence
+        run: |
+          set -euo pipefail
+          container_dir="$RUNNER_TEMP/whatsoup-container"
+          builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
+          buildx_version="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.version)')"
+          buildkit_version="$(node -e 'const policy = require("./docker/container-inputs.json"); const prefix = "moby/buildkit:"; const image = policy.buildx.buildkitImage; if (!image.startsWith(prefix)) process.exit(1); process.stdout.write(image.slice(prefix.length).split("@", 1)[0])')"
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
+            --metadata "$container_dir/build-metadata.json" \
+            --runtime-evidence "$container_dir/buildkit-runtime.json" \
+            --sbom "$container_dir/whatsoup-image.spdx.json" \
+            --image "$container_dir/whatsoup-image.oci.tar" \
+            --source "$GITHUB_SHA" \
+            --builder "$builder" \
+            --buildx-version "$buildx_version" \
+            --buildkit-version "$buildkit_version" \
+            --provenance-builder-id "$provenance_builder_id" \
+            --github-output "$GITHUB_OUTPUT" \
+            --receipt "$container_dir/container-build-receipt.json"
+
+      - name: Attest container image provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
+        with:
+          subject-name: ghcr.io/lucasquiles/whatsoup
+          subject-digest: ${{ steps.reverify-container-evidence.outputs.image_digest }}
+
+      - name: Attest container image SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
+        with:
+          subject-name: ghcr.io/lucasquiles/whatsoup
+          subject-digest: ${{ steps.reverify-container-evidence.outputs.image_digest }}
+          sbom-path: ${{ runner.temp }}/whatsoup-container/whatsoup-image.spdx.json
 
   compatibility:
     name: quality (25.x)

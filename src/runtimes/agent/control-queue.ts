@@ -66,7 +66,7 @@ export class ControlQueue implements IOutboundQueue {
   }
 
   /** No-op — control sessions don't surface tool updates to users. */
-  setToolUpdateMode(_mode: 'full' | 'minimal' | 'friendly'): void {
+  setToolUpdateMode(_mode: 'full' | 'minimal' | 'friendly' | 'unset'): void {
     // intentional no-op
   }
 

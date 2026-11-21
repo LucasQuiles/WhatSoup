@@ -19,6 +19,8 @@ import {
   deleteMessagesAndHandoffArtifacts,
 } from './runtimes/agent/handoff-artifact.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
+import { reportCodexDeferredDefects } from './runtimes/agent/codex-deferred-defect-check.ts';
+import { isHostWorkAdmissionEnabled } from './runtimes/agent/host-work-admission.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
 import { extractExpectedAccountDigest } from './lib/service-identity-config.ts';
 import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from './lib/time-units.ts';
@@ -254,7 +256,7 @@ const startupNotificationController = startupJournalPath === null
       send: {
         send: (chatJid, text, options) => sendTracked(connectionManager, chatJid, text, durability, options),
       },
-      genericNotificationsEnabled: config.startupNotifications && config.toolUpdateMode !== 'minimal',
+      genericNotificationsEnabled: config.startupNotifications && config.configuredToolUpdateMode !== 'minimal',
     });
 startupNotificationController?.recordStartupBoot();
 
@@ -539,6 +541,15 @@ if (instanceType === 'agent') {
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
+  // Logs an ERROR and raises a BOT ERRORS warning when codex-cli can reach a
+  // Codex resume risk that is not proven fixed. It never refuses to start.
+  reportCodexDeferredDefects({
+    instance: config.botName,
+    provider: config.agentProvider,
+    fallbacks: config.agentFallbacks,
+    sessionScope: agentOpts?.sessionScope,
+    hostWorkAdmission: isHostWorkAdmissionEnabled(),
+  });
   const agentRuntime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
     providerProcessIsolation: config.providerProcessIsolation ?? undefined,
@@ -688,7 +699,7 @@ const invalidateAgentHandoffArtifacts = instanceType === 'agent'
 // emit an info-severity completion alert with measured downtime, and queue the
 // "back online" continuity ping. This is delivered on connect via a DEDICATED,
 // un-gated path (see start()) — NOT pendingStartupMessage — because the existing
-// startup-notification path is suppressed under toolUpdateMode:'minimal'
+// startup-notification path is suppressed under an explicit toolUpdateMode:'minimal'
 // (the live agent's setting) and startupNotifications, whereas a user-requested
 // restart must always confirm. Guarded so a failure here never blocks startup.
 let selfRestartBackOnline: { chatJid: string; text: string } | null = null;
@@ -1433,7 +1444,7 @@ async function start(): Promise<void> {
       && !needsIntro
       && adminChatJid !== null
       && config.startupNotifications
-      && config.toolUpdateMode !== 'minimal'
+      && config.configuredToolUpdateMode !== 'minimal'
     )
       ? {
           recipient: adminChatJid,

@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "68a75d4aa64d90a8849dfcd00f0d130bbf7eb55d2e62bfdb22309e6dbcda7e67",
+      "sha256": "fb1e46c8d49b319e1132d34ac6a41a5c8d0c1990eab965000b53ce9af652cdde",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -63,7 +63,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "42fec4894a97677d05e405e8ffbc6cae7f508da0a4e70c93341c09369255ee02",
+      "sha256": "241ac02980f554d8f1e83d69d9132b3c3e4f3e06312883efa71a0869298524df",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -94,7 +94,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "adaca5226901794d020c7147878dcd6c09605721902332121fa83fa4fd21ef1d",
+      "sha256": "e82d02e7e09fd8e13305757a7ac467a479d4adb858d5c5f8624f93b733643941",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",
@@ -104,7 +104,7 @@
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
-      "sha256": "af736b3fbfb310e06af01a05c6e88308ff94a64368ec0d7d62b503319e135f66",
+      "sha256": "704eabe11353561e8df1f84576c04a4c9442b923f859af83bec8bf35a1ae5da5",
       "mustContain": [
         "getSessionTokenSnapshot"
       ],

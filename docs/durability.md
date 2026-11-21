@@ -2002,8 +2002,9 @@ durable run receipts, cancellation, and the post-stop write fence;
 query, top-100, with a provider-side filter excluding the `consolidated`
 confidence qualifier while retaining records without that field), scopes them by chat+sender, clusters them
 (`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
-upserts promoted claims back to the remote store under
-`durable:<shortHash(scope + claim)>` ids with `confidenceQualifier: 'consolidated'`.
+upserts promoted claims back to the remote store with `confidenceQualifier: 'consolidated'`.
+Before source-set identity those ids were `durable:<shortHash(scope + claim)>` (§10.2 now
+owns the identity rule).
 
 Three defects were proven against this shape (#2569):
 
@@ -2014,9 +2015,10 @@ Three defects were proven against this shape (#2569):
    order: the same record set produced different cluster partitions (and therefore
    different model inputs) when only arrival order changed. A bridge record arriving
    first could merge two unrelated topics into one cluster.
-3. **Wording-keyed promotion identity.** The durable id hashes scope + claim text:
-   identical wording silently overwrites, while a wording variation for the same
-   sources mints a new durable record with no supersession link.
+3. **Wording-keyed promotion identity.** The durable id hashed scope + claim text:
+   identical wording silently overwrote, while a wording variation for the same
+   sources minted a new durable record with no supersession link. Fixed by source-set
+   identity (§10.2); records written before it keep their old ids (legacy, §10.3).
 
 ### 10.2 Landed guards (this slice)
 
@@ -2040,7 +2042,57 @@ run's `skipped` counter (which therefore accrues both exclusion reasons; the log
 `consolidatedExcluded` and `unscopedSkipped` keep the reasons distinct and content-free).
 A consolidation run can no longer consume its own prior output.
 
-These are live-safe defect fixes: no schema, store, or contract change.
+**Source-set identity (lineage policy 1).** A promotion's id is
+`durable:l<policy>:<hash>`, where the hash covers the lineage policy version, the
+chat+sender scope and the canonical (code-unit ascending) set of source record ids
+(`consolidationLineage`, `src/memory/consolidation-lineage.ts`). Claim wording never
+enters it, so a wording variant of the same sources overwrites the same record. The
+record carries the lineage as structured `lineage_id`, `lineage_policy_version` and
+`source_record_ids` fields; the joined `evidence` string is no longer written.
+Validation fails a cluster closed, before any write, when a promotion cites a source
+outside the cluster or twice, or when a discard is listed twice or names a source
+outside the cluster. Two output shapes drop one item instead and keep the cluster
+(`consolidateCluster`, `src/memory/consolidation.ts`): when two promotions cite the same
+source set (they would share one id), the first is kept and the later ones are dropped;
+when a source is both promoted and discarded, the discard entry is dropped, because
+discards are not persisted. A cluster with any drop logs one content-free warning with
+the drop counts (`consolidation output items dropped`); a drop adds no failed count, so
+it neither turns the run `partial` or `failed` nor degrades `/health`, in dry runs as in
+live runs. The
+write site re-derives every lineage before its first write and rejects the cluster as
+`output_invalid` if any fails.
+
+What source-set identity does and does not do:
+
+- **One record per cited source set.** Within a scope and lineage policy, one set of
+  cited sources maps to one remote record. A later run whose promotion cites the same
+  set replaces the earlier record's text, confidence and reason, even when the model
+  states a different fact from those sources; the earlier text is not kept.
+- **A changed source set is a new record.** When a later run cites a different set for
+  the same fact (a supporting record arrived, aged out of the lookback window or fell
+  out of the top-100 selection), it writes a new record with no link to the earlier one.
+  The earlier record stays until recall decay removes it; supersession belongs to the
+  ledger design in §10.3, which is not built.
+- **Legacy records are not reconciled.** Records written before source-set identity
+  keep their claim-hash ids (`durable:<16 hex>`) and are never rewritten or migrated. A
+  fact promoted again gets a source-set record beside its legacy record. Recall
+  collapses exactly that pair (`collapseConsolidationTwins`,
+  `src/lib/recall-text-dedup.ts`): a legacy record (`durable:` + 16 lowercase hex) and a
+  source-set record (the exact id the writer builds) whose texts match after trimming
+  and collapsing whitespace, within one scope. The scope is one recall leg (chat,
+  sender or self) in chat recall (`loadContextDetailed`, `src/runtimes/chat/context.ts`),
+  and one namespace, memory tier and entity type in `knowledge_search`
+  (`src/mcp/tools/knowledge.ts`, before ordering and the rerank cap). The source-set
+  record survives with the better position and the higher score of the two, so the
+  fact is never ranked lower, or filtered by a minimum score, a candidate cap or a
+  result limit, where its legacy twin would have passed. Every other pair of records
+  is left alone, whatever its text: two documents or two ordinary memories with the
+  same text both show, and so does a pair split across recall legs. Both twins still
+  take a provider search slot.
+
+No SQLite schema or migration change; the promoted record's id and fields change as
+described above, and both recall surfaces collapse a legacy and source-set pair of one
+fact.
 
 ### 10.3 Durable lineage contract (designed; ledger slices owner-gated)
 
@@ -2064,16 +2116,20 @@ designed contract mirrors the fact-export queue machinery (§9):
   (`pending_write`) → re-drive the same idempotent upsert while its sources stay
   un-leasable; written-but-undispositioned sources → complete the disposition. The
   promote-once guarantee lives in this replay, not in the happy path.
-- **Promotion identity.** Anchored on scope + a hash of the sorted source-set (not
-  claim wording); a claim-hash column distinguishes re-affirmation from wording
-  drift, and drift records supersession instead of minting an unlinked sibling.
-  Policy version rides as a column, not an identity input, so policy bumps do not
-  mint sibling records. Truncated-hash collisions (same id, different source-set)
-  fail the write closed and count under a stable `conflict` code — collision policy
-  is an owner decision.
+- **Promotion identity.** Landed as source-set identity (§10.2): scope + the canonical
+  source set + the lineage policy version, never claim wording. Because the policy
+  version is an identity input, a policy bump mints a new lineage. The rest of this
+  bullet is designed and **not built**: the ledger would record the prior lineage as
+  superseded rather than leaving an unlinked sibling; a claim-hash column would
+  distinguish re-affirmation from wording drift; and a truncated-hash collision (same
+  id, different source set) would fail the write closed under a stable `conflict` code
+  (collision policy is an owner decision). Today no `conflict` code exists, and a
+  collision would overwrite the record, because the write is an upsert by id.
 - **Legacy classification.** Existing `durable:*` records and unattributed sources get
   an explicit migration disposition (`legacy_unclassified`) and never become
-  recursively eligible by default.
+  recursively eligible by default. Legacy claim-hash promotion ids match
+  `durable:<16 hex>` and source-set ids are `durable:l<policy>:<32 hex>`, so the class is
+  decidable from the id alone.
 - **Confidentiality.** As §9: raw identities, memory text, claims, evidence, model
   output, and exceptions never cross into logs, health, alerts, or the redacted
   operator reader; only opaque ids, states, counts, and stable failure codes do.

@@ -30,7 +30,7 @@ vi.mock('node:child_process', async () => {
 });
 
 import { handleAuth } from '../../../src/fleet/routes/ops.ts';
-import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
+import type { OpsAuthDeps } from '../../../src/fleet/routes/ops-auth.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { privateConfigLockPath } from '../../../src/core/private-config-file.ts';
 import { acquireProcessLock, releaseProcessLock } from '../../../src/lib/process-lock.ts';
@@ -53,7 +53,7 @@ function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredIn
   } as DiscoveredInstance;
 }
 
-function depsFor(instance: DiscoveredInstance): OpsDeps {
+function depsFor(instance: DiscoveredInstance): OpsAuthDeps {
   return makeDeps<any>({ discovery: { getInstance: vi.fn(() => instance) } });
 }
 

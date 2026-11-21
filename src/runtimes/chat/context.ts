@@ -21,6 +21,7 @@ import {
   type ChatRecallBoundary,
 } from '../../core/memory-scope.ts';
 import { sanitizeProtectedMessageText } from '../../core/protected-message.ts';
+import { collapseConsolidationTwins } from '../../lib/recall-text-dedup.ts';
 
 const log = createChildLogger('conversation');
 
@@ -208,25 +209,32 @@ export async function loadContextDetailed(
     scopeOutcome('self', selfDetails),
   ];
 
-  // Merge, deduplicate by id, preserve insertion order (chat results first)
-  const seen = new Set<string>();
-  const merged: SearchResult[] = [];
-
-  for (const result of [...chatResults, ...senderResults]) {
-    if (!seen.has(result.id)) {
-      seen.add(result.id);
-      merged.push(result);
-    }
-  }
+  // Merge, deduplicate by id, preserve insertion order (chat results first,
+  // then sender results, then self facts). Then, within one leg only, a
+  // consolidation fact stored under both its legacy claim-hash id and its
+  // source-set id collapses to the source-set record, in the earlier slot of
+  // the two (durability §10.2). Nothing is re-sorted, so every other record
+  // keeps its place.
+  const seenIds = new Set<string>();
+  const candidates: Array<{ result: SearchResult; leg: 'chat' | 'sender' | 'self' }> = [
+    ...chatResults.map((result) => ({ result, leg: 'chat' as const })),
+    ...senderResults.map((result) => ({ result, leg: 'sender' as const })),
+    ...selfResults.map((result) => ({ result, leg: 'self' as const })),
+  ].filter(({ result }) => {
+    if (seenIds.has(result.id)) return false;
+    seenIds.add(result.id);
+    return true;
+  });
+  const unique = collapseConsolidationTwins(
+    candidates,
+    ({ result }) => result.id,
+    ({ result, leg }) => ({ text: result.record.text, scope: leg, score: result.score }),
+    (entry, score) => ({ ...entry, result: { ...entry.result, score } }),
+  );
+  const merged = unique.filter((entry) => entry.leg !== 'self').map((entry) => entry.result);
 
   // Self-facts go into a separate block
-  const selfFacts: SearchResult[] = [];
-  for (const result of selfResults) {
-    if (!seen.has(result.id)) {
-      seen.add(result.id);
-      selfFacts.push(result);
-    }
-  }
+  const selfFacts = unique.filter((entry) => entry.leg === 'self').map((entry) => entry.result);
 
   const topResults = [...merged, ...selfFacts];
   log.info(

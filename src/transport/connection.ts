@@ -63,6 +63,7 @@ import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 import { RECENT_DISCONNECT_DEGRADED_THRESHOLD } from '../core/health-reason-hold.ts';
+import { observeInboundSafely } from '../core/inbound-observation.ts';
 import {
   buildDisconnectDecisionRecord,
   decideDisconnectAction,
@@ -623,6 +624,13 @@ export declare interface ConnectionManager {
 // ---------------------------------------------------------------------------
 // ConnectionManager
 // ---------------------------------------------------------------------------
+
+function countInboundObservationMessages(messages: unknown): number {
+  if (!Array.isArray(messages)) return 0;
+  return messages.reduce((count, message: unknown) => (
+    isRecord(message) && isRecord(message.key) && message.key.fromMe !== true ? count + 1 : count
+  ), 0);
+}
 
 export class ConnectionManager extends EventEmitter implements Messenger {
   private sock: WhatsAppSocket | null = null;
@@ -2047,7 +2055,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private registerEventHandlers(sock: WhatsAppSocket, saveCreds: () => Promise<void>): void {
     sock.ev.process(async (events) => {
       // Stale-socket guard: drop events from a socket that is no longer current
-      if (this.sock !== sock) return;
+      if (this.sock !== sock) {
+        // This branch is outside the guarded handlers below; the observation
+        // is guarded itself and cannot reject this callback.
+        observeInboundSafely(config.botName, 'transport.stale_socket', () => countInboundObservationMessages(
+          (events['messages.upsert'] as { messages?: unknown } | undefined)?.messages,
+        ));
+        return;
+      }
 
       if (events['connection.update']) {
         this.handleConnectionUpdate(sock, events['connection.update']);
@@ -3433,7 +3448,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private handleMessagesUpsert(data: any): void {
     const { messages, type } = data;
     // Only process real-time and appended messages, not full history syncs
-    if (type !== 'notify' && type !== 'append') return;
+    if (type !== 'notify' && type !== 'append') {
+      observeInboundSafely(config.botName, 'transport.unsupported_upsert_type', () => countInboundObservationMessages(messages));
+      return;
+    }
 
     for (const msg of messages as WAMessage[]) {
       this.historySyncWatch.observeUpsert(msg);
@@ -3482,6 +3500,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       const parsed = parseIncomingMessage(msg);
+      if (!parsed && msg.key.fromMe !== true) observeInboundSafely(config.botName, 'transport.parser_refused');
       if (parsed) {
         // Build contacts directory from every incoming sender for @mention resolution
         this.contactsDir.observe(parsed.senderJid, parsed.senderName);
@@ -3500,6 +3519,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           } catch (err) {
             this.log.warn({ err, messageId: parsed.messageId }, 'onMessage callback threw');
           }
+        } else if (!parsed.isFromMe) {
+          observeInboundSafely(config.botName, 'transport.no_consumer');
         }
       }
     }

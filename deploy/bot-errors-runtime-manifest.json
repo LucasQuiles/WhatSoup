@@ -67,7 +67,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b81b5fc962b249573e87bbc7ecf59b8b302f8685359103bc6ff7ac7a9eb8e2f0",
+      "sha256": "85e8d3d2c59a32a3ef4e18cfc6aa41a01c6a4ed9835e6671c77a8e0794bdb902",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -143,7 +143,11 @@
         "orphanPagedAtEpoch",
         "observe_credential_members(paths)",
         "send_credential_pages(paths)",
-        "def send_meta_alert("
+        "def send_meta_alert(",
+        "--format-human-report",
+        "--human-report-approved-root",
+        "qualify_report_file(",
+        "render_human_report("
       ]
     },
     {
@@ -549,12 +553,40 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/bot_errors_reporting.py",
+      "sha256": "5be5958351f5c860803814ccec9d2a89132324717fe6af3e5ea186ebb6af52d6",
+      "mustContain": [
+        "bot-errors-human-report/v2",
+        "bot-errors-human-report-record/v1",
+        "class ReportQualificationError",
+        "def qualify_report(",
+        "def qualify_report_file(",
+        "def render_human_report(",
+        "O_NOFOLLOW",
+        "evidence_hash_mismatch",
+        "maintenance_authority_unqualified"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/bot_errors_roster.py",
       "sha256": "882b41b4e1eb2cccea2717f1a054651d9c705d249f9ddd791578094b3e668431",
       "mustContain": [
         "roster_digest",
         "roster_inventory",
         "load_roster"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_submission.py",
+      "sha256": "aa022519919218180e38e9775f09179f0aef186db522eef4cdfebfdb94b15c20",
+      "mustContain": [
+        "bot-errors-submission-result/1",
+        "class MonitorSubmissionRequest",
+        "class SignalSubmissionRequest",
+        "def normalize_monitor_submission(",
+        "def normalize_signal_submission(",
+        "retained_receipt_missing",
+        "signal_identity_conflict"
       ]
     },
     {
@@ -869,7 +901,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "4ac740104260dcf208070f714e4f35f7b45680ebba2c32b607abd3ccc2ffb0ad",
+      "sha256": "9b110fb59c1ac0c46f5a76360f935d3a1f1d05a029e635065a2c706e47f8a664",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

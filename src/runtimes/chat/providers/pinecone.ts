@@ -536,6 +536,10 @@ export interface MemoryRecord {
   warrant?: string;
   confidenceQualifier?: string;
   contradicts?: string;
+  /** Consolidation lineage (#2569): structured and opaque; never parsed from `evidence`. */
+  lineageId?: string;
+  lineagePolicyVersion?: number;
+  sourceRecordIds?: string[];
 }
 
 export interface SearchResult {
@@ -617,6 +621,9 @@ export function toPineconeRecord(record: MemoryRecord): PineconeRecord {
     warrant: record.warrant,
     confidence_qualifier: record.confidenceQualifier,
     contradicts: record.contradicts,
+    lineage_id: record.lineageId,
+    lineage_policy_version: record.lineagePolicyVersion,
+    source_record_ids: record.sourceRecordIds,
   };
 
   // Strip null/undefined values — Pinecone requires primitive fields only.
@@ -661,6 +668,14 @@ export function fromPineconeHit(hit: {
   if (typeof f['warrant'] === 'string') record.warrant = f['warrant'];
   if (typeof f['confidence_qualifier'] === 'string') record.confidenceQualifier = f['confidence_qualifier'];
   if (typeof f['contradicts'] === 'string') record.contradicts = f['contradicts'];
+  if (typeof f['lineage_id'] === 'string') record.lineageId = f['lineage_id'];
+  if (typeof f['lineage_policy_version'] === 'number') {
+    record.lineagePolicyVersion = f['lineage_policy_version'];
+  }
+  const sourceRecordIds = f['source_record_ids'];
+  if (Array.isArray(sourceRecordIds) && sourceRecordIds.every((id) => typeof id === 'string')) {
+    record.sourceRecordIds = sourceRecordIds;
+  }
 
   return { id: hit._id, score: hit._score, record };
 }

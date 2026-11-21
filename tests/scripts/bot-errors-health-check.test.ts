@@ -6,6 +6,7 @@ import { join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
+import { installFakeLaunchctl } from '../helpers/fake-launchctl.ts';
 
 let tmpRoot = '';
 
@@ -234,6 +235,16 @@ describe('Claude provider-probe credential selector', () => {
     });
   });
 });
+
+// The deadman reads the dispatcher's uptime from the service manager unless the dry seam answers it. A pinned uptime
+// past --restart-grace 0 grants no grace, as an unanswered read does; `path` puts a recorder first, so a call that
+// still reaches the service manager is recorded instead of decided by the host. The pinned platform keeps that call
+// on the recorded `launchctl` branch on every host; a Linux host would otherwise ask `systemctl`, unrecorded. The
+// empty boot identity skips `sysctl`, so the seam starts no host program.
+function deadmanServiceSeam(path: string): Record<string, string> {
+  return { PATH: path, BOT_ERRORS_DRY_PLATFORM: 'darwin', BOT_ERRORS_DRY_HOST_BOOT_ID: '',
+    BOT_ERRORS_DRY_SERVICE_UPTIME_SECONDS: '3600' };
+}
 
 function runDeadman(tmpRoot: string, extraEnv: Record<string, string> = {}) {
   return spawnSync('python3', [
@@ -1706,10 +1717,12 @@ print(json.dumps(samples, sort_keys=True))
       me: { id: 'personal@s.whatsapp.net', lid: 'personal@lid' },
       registrationId: 2,
     });
+    const launchctl = installFakeLaunchctl(tmpRoot);
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        PATH: launchctl.path,
         HOME: tmpRoot,
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_DRY_PLATFORM: 'darwin',
@@ -1770,6 +1783,11 @@ print(json.dumps(samples, sort_keys=True))
     expect(event.evidence).toContain('outbound_success_evidence=provider_acknowledged_or_better');
     expect(event.evidence).not.toContain('latest_successful_transport_id');
     expect(event.evidence).not.toContain('personal@s.whatsapp.net');
+    // The fallback is earned only after the service manager was asked about the reported label and could not prove it.
+    const label = /service personal: active_process_fallback \((\S+)\)/.exec(event.evidence)?.[1];
+    const calls = launchctl.calls();
+    expect(calls).toContain(`print gui/${process.getuid!()}/${label}`);
+    expect(calls.filter((call) => !/^(print|list)( |$)/.test(call))).toEqual([]);
   });
 
   it('fails daily health when expected q-loop state is missing', () => {
@@ -7930,7 +7948,9 @@ print(m.probe_health(9092))
     writePrivateJson(dispatcherState, { time: new Date().toISOString() });
     writeFileSync(socket, '');
     const baseEpoch = Math.floor(Date.now() / 1000);
+    const launchctl = installFakeLaunchctl(tmpRoot);
     const env = {
+      ...deadmanServiceSeam(launchctl.path),
       BOT_ERRORS_SOCKET_PATH: socket,
       BOT_ERRORS_DRY_DIRECT_SEND_LOG: directLog,
       BOT_ERRORS_DRY_SERVICE_STATUS: 'inactive',
@@ -7987,6 +8007,7 @@ print(m.probe_health(9092))
     expect(updatedState.episode.onset.lastAcceptedAtEpoch).toBe(baseEpoch + 61);
     expect(updatedState.episode.onset.sentCount).toBe(2);
     expect(updatedState.episode.onset.suppressed).toBe(0);
+    expect(launchctl.calls()).toEqual([]);
   });
 
   it('falls back to email when deadman direct WhatsApp send fails', () => {
@@ -8002,8 +8023,10 @@ print(m.probe_health(9092))
       '',
     ].join('\n'));
     chmodSync(fallback, 0o700);
+    const launchctl = installFakeLaunchctl(tmpRoot);
 
     const result = runDeadman(tmpRoot, {
+      ...deadmanServiceSeam(launchctl.path),
       BOT_ERRORS_EMAIL_FALLBACK: fallback,
       BOT_ERRORS_TEST_EMAIL_LOG: fallbackLog,
       BOT_ERRORS_DRY_SERVICE_STATUS: 'inactive',
@@ -8030,6 +8053,7 @@ print(m.probe_health(9092))
     expect(stateDoc.episode.onset.lastAttempt.direct_whatsapp).toBe('failed');
     expect(stateDoc.episode.onset.lastAttempt.email_fallback).toBe('accepted_unconfirmed');
     expect(stateDoc.episode.onset.deliveredKind).toBe('accepted_unconfirmed');
+    expect(launchctl.calls()).toEqual([]);
   });
 
   it('sends a single deadman recovery clear when the supervised path is healthy again', () => {
@@ -8047,8 +8071,10 @@ print(m.probe_health(9092))
     // flips the healthy runs to exit 2.
     const baseEpoch = Math.floor(Date.now() / 1000);
     utimesSync(dispatcherState, new Date(baseEpoch * 1000), new Date(baseEpoch * 1000));
+    const launchctl = installFakeLaunchctl(tmpRoot);
 
     const failingEnv = {
+      ...deadmanServiceSeam(launchctl.path),
       BOT_ERRORS_SOCKET_PATH: socket,
       BOT_ERRORS_DRY_DIRECT_SEND_LOG: directLog,
       BOT_ERRORS_DRY_SERVICE_STATUS: 'inactive',
@@ -8059,6 +8085,7 @@ print(m.probe_health(9092))
     expect(readJsonl(directLog)).toHaveLength(1);
 
     const healthyEnv = {
+      ...deadmanServiceSeam(launchctl.path),
       BOT_ERRORS_SOCKET_PATH: socket,
       BOT_ERRORS_DRY_DIRECT_SEND_LOG: directLog,
       BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
@@ -8088,5 +8115,6 @@ print(m.probe_health(9092))
     });
     expect(recoveredAgain.status).toBe(0);
     expect(readJsonl(directLog)).toHaveLength(2);
+    expect(launchctl.calls()).toEqual([]);
   });
 });

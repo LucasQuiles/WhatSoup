@@ -8,6 +8,7 @@ import {
   type MemoryOperationFailureCode,
 } from '../lib/memory-operation-telemetry.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
+import { canonicalSourceRecordIds } from './consolidation-lineage.ts';
 import type {
   ClusterConsolidationOutcome,
   ClusterConsolidationStatus,
@@ -73,19 +74,51 @@ function outcome(
   };
 }
 
-function outputMatchesCluster(
+interface ClusterMatchedOutput {
+  result: ConsolidationResult;
+  droppedPromotions: number;
+  droppedDiscards: number;
+}
+
+/**
+ * The model output restricted to what this cluster can write, or null when the
+ * output must fail the cluster closed: a source cited twice or from outside the
+ * cluster, or a discard listed twice or from outside the cluster.
+ *
+ * Promotion identity is the canonical source set (#2569), so two promotions
+ * citing one set would resolve to one remote record and the second write would
+ * replace the first. The later promotion is dropped instead. A source both
+ * promoted and discarded loses its discard entry: discards are not persisted,
+ * so the promotion is what the run would otherwise lose. Neither shape fails
+ * the cluster.
+ */
+function matchOutputToCluster(
   result: ConsolidationResult,
   clusterRecordIds: ReadonlySet<string>,
-): boolean {
+): ClusterMatchedOutput | null {
+  const promotedIds = new Set<string>();
+  const sourceSets = new Set<string>();
+  const durableKnowledge: ConsolidationResult['durableKnowledge'] = [];
   for (const durable of result.durableKnowledge) {
     const uniqueIds = new Set(durable.sourceRecordIds);
-    if (uniqueIds.size !== durable.sourceRecordIds.length) return false;
-    if (durable.sourceRecordIds.some((id) => !clusterRecordIds.has(id))) return false;
+    if (uniqueIds.size !== durable.sourceRecordIds.length) return null;
+    if (durable.sourceRecordIds.some((id) => !clusterRecordIds.has(id))) return null;
+    const sourceSet = JSON.stringify(canonicalSourceRecordIds(durable.sourceRecordIds));
+    if (sourceSets.has(sourceSet)) continue;
+    sourceSets.add(sourceSet);
+    for (const id of uniqueIds) promotedIds.add(id);
+    durableKnowledge.push(durable);
   }
 
   const discardedIds = result.discarded.map((item) => item.recordId);
-  if (new Set(discardedIds).size !== discardedIds.length) return false;
-  return discardedIds.every((id) => clusterRecordIds.has(id));
+  if (new Set(discardedIds).size !== discardedIds.length) return null;
+  if (!discardedIds.every((id) => clusterRecordIds.has(id))) return null;
+  const discarded = result.discarded.filter((item) => !promotedIds.has(item.recordId));
+  return {
+    result: { durableKnowledge, discarded },
+    droppedPromotions: result.durableKnowledge.length - durableKnowledge.length,
+    droppedDiscards: result.discarded.length - discarded.length,
+  };
 }
 
 const CONSOLIDATION_PROMPT = `You are a memory consolidation engine. Given a cluster of related memories from an AI agent's episodic history, identify which patterns represent durable knowledge worth keeping long-term.
@@ -113,6 +146,10 @@ Promotion criteria:
 - Consistent over weeks = lasting truth
 - Single mentions of time-bound facts (e.g. "meeting at 3pm") = discard
 - Preferences and identity facts = promote even on single mention if high confidence
+
+Output rules:
+- Each durableKnowledge item must cite a different set of sourceRecordIds; combine facts drawn from exactly the same records into one claim
+- Never list a record in both a sourceRecordIds array and discarded
 
 Output ONLY valid JSON. No markdown.`;
 
@@ -265,7 +302,10 @@ export async function consolidateCluster(
 
   try {
     const parsed = consolidationOutputSchema.safeParse(JSON.parse(jsonStr));
-    if (!parsed.success || !outputMatchesCluster(parsed.data, new Set(clusterRecordIds))) {
+    const matched = parsed.success
+      ? matchOutputToCluster(parsed.data, new Set(clusterRecordIds))
+      : null;
+    if (matched === null) {
       log.warn({
         status: 'output_invalid',
         failureCode: 'invalid_request',
@@ -280,7 +320,15 @@ export async function consolidateCluster(
         evidenceCoverage: 'provider_response',
       });
     }
-    const result: ConsolidationResult = parsed.data;
+    if (matched.droppedPromotions > 0 || matched.droppedDiscards > 0) {
+      log.warn({
+        droppedPromotions: matched.droppedPromotions,
+        droppedDiscards: matched.droppedDiscards,
+        recordCount: cluster.records.length,
+        evidenceCoverage: 'provider_response',
+      }, 'consolidation output items dropped');
+    }
+    const result: ConsolidationResult = matched.result;
     return outcome(
       result.durableKnowledge.length > 0
         ? 'completed_promoted'

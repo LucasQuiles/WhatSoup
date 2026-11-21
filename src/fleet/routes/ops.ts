@@ -26,10 +26,10 @@ export interface OpsDeps {
 // callers and tests are unchanged.
 export { handleSend, handleAccessUpdate, handleMarkRead, handleSaveContact } from './ops-messages.ts';
 
-// handleAuth + its module-level auth-session state (activeAuthProcesses,
-// authInFlight) extracted to ./ops-auth.ts (#2239). Re-exported here as a
-// migration shim so existing callers and tests are unchanged; follow-up
-// slices update imports to point at ops-auth.ts directly.
+// handleAuth extracted to ./ops-auth.ts (#2239); its auth session state lives
+// in the per-server AuthSessionRegistry (./auth-session-registry.ts), passed in
+// as `deps.authSessions`. Re-exported here as a migration shim so existing
+// callers and tests are unchanged.
 export { handleAuth } from './ops-auth.ts';
 
 // handleConfigUpdate (PATCH /api/lines/:name/config, including the

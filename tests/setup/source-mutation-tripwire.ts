@@ -10,8 +10,9 @@ import { join } from 'node:path';
 // exit: the file whose run moved the hash names ITSELF in the raw CI log, so
 // one red run pinpoints the mutator. An optional externally exported
 // WHATSOUP_TRIPWIRE_MAIN_SHA256 (set by the CI workflow before vitest starts)
-// additionally catches cross-file gaps on entry. globalSetup cannot carry the
-// baseline — its process.env never reaches forked workers.
+// additionally catches cross-file gaps on entry. (A globalSetup's process.env
+// does reach the workers Vitest forks after it; tests/setup/vitest-run-root.ts
+// relies on that.)
 const target = join(process.cwd(), 'src/main.ts');
 
 function currentDigest(): string {

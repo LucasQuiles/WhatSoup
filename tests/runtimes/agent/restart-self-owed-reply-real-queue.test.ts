@@ -114,10 +114,19 @@ async function callRestart(queue: OutboundQueue, advanceMs = SETTLE_MS) {
   return { result: result as RestartSelfResult, trigger, sendAck };
 }
 
-/** A full-mode turn whose first tool status was already sent, so the turn counts as visible. */
-async function queueAfterVisibleToolStatus(messenger: Messenger, durability: ReturnType<typeof makeDurabilityStub>) {
+/**
+ * A turn whose first tool status batch was already flushed, so the turn counts as visible. In 'full'
+ * mode the status is sent; in 'unset' mode (no configured mode) the same flush runs but the status
+ * send is withheld.
+ */
+async function queueAfterVisibleToolStatus(
+  messenger: Messenger,
+  durability: ReturnType<typeof makeDurabilityStub>,
+  mode: 'full' | 'unset' = 'full',
+) {
   const queue = new OutboundQueue(messenger, DM_JID);
   queue.setDurability(durability as unknown as DurabilityEngine);
+  queue.setToolUpdateMode(mode);
   queue.beginTurnEvidence('turn-1');
   queue.enqueueToolUpdate({ category: 'running', detail: 'Running deploy check' });
   // The tool batch timer sends the status. No queue.flush() here: it would reset
@@ -422,6 +431,51 @@ describe('restart_self owed reply through a real OutboundQueue (#3829)', () => {
       expect(attempts.at(-1)).toEqual({ jid: DM_JID, text: OWED });
       expect(durability.markFailedPermanent).toHaveBeenCalledWith(
         2,
+        expect.objectContaining({ failure_code: 'outbound.governor_shed' }),
+      );
+      expect(queue.getSendFailureCount()).toBe(1);
+    });
+  });
+
+  describe('(e) owed answer after a withheld tool status with no configured mode', () => {
+    // guard: instances with no configured tool mode run the queue in 'unset' (src/config.ts). The
+    // tool batch flush still runs as in full mode, so the turn counts as visible, but the status
+    // line is never sent. The owed answer must still reach the user once, before the restart.
+    it('sends the deferred answer once, with no tool status line, before the restart', async () => {
+      const { messenger, attempts } = makeMessenger();
+      const durability = makeDurabilityStub();
+      const queue = await queueAfterVisibleToolStatus(messenger, durability, 'unset');
+      expect(attempts).toEqual([]);
+
+      const { result, trigger } = await callRestart(queue);
+
+      expect(result).toMatchObject({ ok: true, restarting: true });
+      expect(trigger).toHaveBeenCalledTimes(1);
+      expect(attempts).toEqual([{ jid: DM_JID, text: OWED }]);
+      const sendOrder = vi.mocked(messenger.sendMessage).mock.invocationCallOrder;
+      expect(sendOrder.at(-1)).toBeLessThan(trigger.mock.invocationCallOrder[0] ?? 0);
+      // No status op was created; the owed text is op 1 with the status role, as in (c).
+      const evidence = await settle(queue.flushTurnEvidence('turn-1'));
+      expect(evidence.statusOpIds).toEqual([1]);
+      expect(evidence.answerOpIds).toEqual([]);
+    });
+
+    it('refuses the restart with send_failed when that answer send fails, as in full mode', async () => {
+      const { messenger, attempts } = makeMessenger(async (_jid, text) => {
+        if (text.includes(OWED)) throw governorShed();
+        return { waMessageId: null };
+      });
+      const durability = makeDurabilityStub();
+      const queue = await queueAfterVisibleToolStatus(messenger, durability, 'unset');
+
+      const { result, trigger, sendAck } = await callRestart(queue);
+
+      expect(result).toMatchObject({ ok: false, restarting: false, cause: 'send_failed' });
+      expect(trigger).not.toHaveBeenCalled();
+      expect(sendAck).not.toHaveBeenCalled();
+      expect(attempts).toEqual([{ jid: DM_JID, text: OWED }]);
+      expect(durability.markFailedPermanent).toHaveBeenCalledWith(
+        1,
         expect.objectContaining({ failure_code: 'outbound.governor_shed' }),
       );
       expect(queue.getSendFailureCount()).toBe(1);

@@ -1259,11 +1259,103 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
 })
 
 // ---------------------------------------------------------------------------
+// toolUpdateMode — the default (no setting) is a choice of its own
+// ---------------------------------------------------------------------------
+
+describe('ConfigEditDialog — toolUpdateMode default', () => {
+  function toolUpdateSelect(): HTMLSelectElement {
+    return screen.getByLabelText('toolUpdateMode') as HTMLSelectElement
+  }
+
+  async function save(): Promise<void> {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save \(1\)/ }))
+    })
+  }
+
+  it('shows the default for an agent line with no tool update mode', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const select = toolUpdateSelect()
+    expect(select.tagName).toBe('SELECT')
+    expect(select.value).toBe('')
+    expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'full', 'friendly', 'minimal'])
+    expect(select.options[select.selectedIndex]?.textContent).toMatch(/default/i)
+  })
+
+  it('shows a stored friendly mode and keeps it when another field is saved', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog open={true} config={{ ...BASE_CONFIG, toolUpdateMode: 'friendly' }} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const select = toolUpdateSelect()
+    expect(select.value).toBe('friendly')
+    expect(select.options[select.selectedIndex]?.textContent).toBe('friendly')
+
+    fireEvent.change(screen.getByLabelText('accessMode'), { target: { value: 'allowlist' } })
+    await save()
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, { accessMode: 'allowlist' })
+  })
+
+  it('shows the default for a line whose mode was cleared to null', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={{ ...BASE_CONFIG, toolUpdateMode: null }} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const select = toolUpdateSelect()
+    expect(select.tagName).toBe('SELECT')
+    expect(select.value).toBe('')
+  })
+
+  it('keeps the default when an unset line is saved with another change', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(screen.getByLabelText('accessMode'), { target: { value: 'allowlist' } })
+    await save()
+
+    expect(updateConfigMock).toHaveBeenCalledTimes(1)
+    expect(updateConfigMock.mock.calls[0]?.[1]).not.toHaveProperty('toolUpdateMode')
+  })
+
+  it('stores minimal when the operator picks it on an unset line', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(toolUpdateSelect(), { target: { value: 'minimal' } })
+    await save()
+
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, { toolUpdateMode: 'minimal' })
+  })
+
+  it('clears an explicit mode with null when the operator picks the default', async () => {
+    updateConfigMock.mockResolvedValue(undefined)
+    render(withProviders(
+      <ConfigEditDialog open={true} config={{ ...BASE_CONFIG, toolUpdateMode: 'full' }} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    fireEvent.change(toolUpdateSelect(), { target: { value: '' } })
+    await save()
+
+    // The config PATCH merges keys, so null is how a key is cleared; the service reads null as unset.
+    expect(updateConfigMock).toHaveBeenCalledWith(LINE, { toolUpdateMode: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Empty config
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — empty config', () => {
-  it('renders with no visible fields when all keys are excluded', () => {
+  it('opens an agent config of excluded keys unmodified, with Save disabled', () => {
     const excludedOnly: Record<string, unknown> = {
       name: 'test',
       type: 'agent',
