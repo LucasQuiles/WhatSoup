@@ -156,18 +156,20 @@ phase facts. Each phase requires its matching actor class and scope, the exact
 previous fact identity, a later observation time, the accepted incident and
 occurrence, and a valid source event. A second fact for an already recorded
 phase is stored state-inert. The approver cannot record execution, and the
-executor or approver cannot confirm recovery. Chat text is observation only:
-approval-shaped or recovery-shaped messages cannot grant scope or change an
-incident. Use separate credentials for notifier, Q receiver, diagnostician,
-approver, executor, and recovery witness roles.
+opener, the executor or the approver cannot confirm recovery. Chat text is
+observation only: approval-shaped or recovery-shaped messages cannot grant
+scope or change an incident. Use separate credentials for notifier, Q
+receiver, diagnostician, approver, executor, and recovery witness roles.
 
 The producer that opened an occurrence cannot resolve it with its own clear,
 and an occurrence without recorded opener provenance stays open. Two paths can
 resolve an occurrence:
 
 - The phase route resolves it only through the complete phase chain and a
-  fresh `recovery_confirmed` fact from an independent recovery-witness
-  producer.
+  fresh `recovery_confirmed` fact from a recovery-witness producer that is
+  independent of the opener, the approver and the executor. A fact from the
+  opener, or for an occurrence without recorded opener, is stored state-inert
+  with reason `opener_confirmed_recovery`.
 - A `condition_recovered` signal from a different producer in the same
   producer domain still resolves it, provided the signal is newer, by
   occurrence sequence and observation time, than the last observation. This

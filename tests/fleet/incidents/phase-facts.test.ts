@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openIncidentDb } from '../../../src/fleet/incidents/db.ts';
 import { IncidentStore, type PhaseActorContext } from '../../../src/fleet/incidents/store.ts';
@@ -156,6 +157,48 @@ describe('IncidentStore phase facts', () => {
     expect(selfRecovery.outcome).toBe('accepted');
     if (selfRecovery.outcome !== 'accepted') return;
     expect(selfRecovery.receipt.reasonCode).toBe('self_confirmed_recovery');
+    expect(store.getIncident(incidentId)?.conditionState).toBe('open');
+  });
+
+  it('keeps the opener from confirming recovery of its own occurrence', () => {
+    acceptedChainThroughExecution();
+    const openerRecovery = accept(
+      'recovery-opener',
+      'recovery_confirmed',
+      { ...actors.recovery_witness, producerId: OBSERVER.producerId },
+      6,
+      'execution-1',
+      'runtime_reverified',
+      `sha256:${'f'.repeat(64)}`,
+    );
+    expect(openerRecovery).toMatchObject({
+      outcome: 'accepted',
+      receipt: { disposition: 'stored_state_inert', reasonCode: 'opener_confirmed_recovery', transitionId: null },
+    });
+    expect(store.getIncident(incidentId)?.conditionState).toBe('open');
+  });
+
+  it('keeps recovery of an occurrence without recorded opener state-inert', () => {
+    acceptedChainThroughExecution();
+    const raw = new DatabaseSync(join(dir, 'incidents.db'));
+    try {
+      raw.prepare('UPDATE incidents SET opened_producer_id = NULL WHERE incident_id = ?').run(incidentId);
+    } finally {
+      raw.close();
+    }
+    const recovered = accept(
+      'recovery-unknown-opener',
+      'recovery_confirmed',
+      actors.recovery_witness,
+      6,
+      'execution-1',
+      'runtime_reverified',
+      `sha256:${'0'.repeat(64)}`,
+    );
+    expect(recovered).toMatchObject({
+      outcome: 'accepted',
+      receipt: { disposition: 'stored_state_inert', reasonCode: 'opener_confirmed_recovery', transitionId: null },
+    });
     expect(store.getIncident(incidentId)?.conditionState).toBe('open');
   });
 

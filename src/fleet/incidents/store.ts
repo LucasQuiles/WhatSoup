@@ -500,7 +500,8 @@ export class IncidentStore {
       && (envelope.evidenceClass !== undefined || envelope.evidenceDigest !== undefined)
     ) return inert('unexpected_phase_evidence');
     const incident = this.db.prepare(
-      `SELECT producer_domain_id, occurrence_id, condition_state, opened_event_id, last_observed_at
+      `SELECT producer_domain_id, occurrence_id, condition_state, opened_event_id, last_observed_at,
+              opened_producer_id
          FROM incidents WHERE incident_id = ?`,
     ).get(envelope.incidentId) as {
       producer_domain_id: string;
@@ -508,6 +509,7 @@ export class IncidentStore {
       condition_state: string;
       opened_event_id: number;
       last_observed_at: string;
+      opened_producer_id: string | null;
     } | undefined;
     if (!incident || incident.occurrence_id !== envelope.occurrenceId) return inert('incident_mismatch');
     if (incident.producer_domain_id !== actor.producerDomainId) return inert('producer_domain_mismatch');
@@ -559,6 +561,10 @@ export class IncidentStore {
       if (incident.condition_state !== 'open') return inert('incident_not_open');
       if (envelope.observedAt <= incident.last_observed_at) return inert('stale_recovery_evidence');
       if (predecessor?.producer_id === actor.producerId) return inert('self_confirmed_recovery');
+      // An unrecorded opener may be the actor, so it is refused as in applyConditionRecovered.
+      if (incident.opened_producer_id === null || incident.opened_producer_id === actor.producerId) {
+        return inert('opener_confirmed_recovery');
+      }
       const approval = this.db.prepare(
         `SELECT producer_id FROM phase_facts
           WHERE incident_id = ? AND phase_kind = 'change_approved'
