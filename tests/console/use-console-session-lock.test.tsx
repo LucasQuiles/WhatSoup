@@ -27,6 +27,14 @@ afterEach(() => {
   sessionStorage.clear()
 })
 
+// Storage faults go to the prototype of the `sessionStorage` object the hook reads.
+// The test environment's global `Storage` is jsdom's, but where the runtime has its own
+// Web Storage (Node 25 and later) `sessionStorage` is the runtime's object, not jsdom's.
+function failSessionStorage(method: 'getItem' | 'setItem' | 'removeItem', message: string) {
+  const storagePrototype = Object.getPrototypeOf(sessionStorage) as Storage
+  return vi.spyOn(storagePrototype, method).mockImplementation(() => { throw new Error(message) })
+}
+
 describe('useConsoleSession onLock', () => {
   beforeEach(() => {
     mockIsProductionConsole.mockReturnValue(true)
@@ -152,7 +160,7 @@ describe('useConsoleSession onLock', () => {
   it('reports when failed revocation cannot preserve its lock request across reload', async () => {
     const { result } = renderHook(() => useConsoleSession())
     await waitFor(() => expect(result.current.state).toBe('unlocked'))
-    const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota exceeded') })
+    const write = failSessionStorage('setItem', 'quota exceeded')
     mockLockConsole.mockRejectedValueOnce(new Error('offline'))
     try {
       await act(async () => { await result.current.onLock() })
@@ -163,7 +171,7 @@ describe('useConsoleSession onLock', () => {
   })
 
   it('does not probe into an open session when stored lock intent cannot be read', async () => {
-    const read = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage denied') })
+    const read = failSessionStorage('getItem', 'storage denied')
     try {
       const { result } = renderHook(() => useConsoleSession())
       expect(result.current.state).toBe('locked')
@@ -177,7 +185,7 @@ describe('useConsoleSession onLock', () => {
   it.each(['unlock', 'confirmed revocation'] as const)('keeps failed marker removal visible after %s and can recover', async (operation) => {
     sessionStorage.setItem('whatsoup.console.lock-requested', '1')
     const { result } = renderHook(() => useConsoleSession())
-    const remove = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('storage denied') })
+    const remove = failSessionStorage('removeItem', 'storage denied')
     try {
       await act(async () => {
         if (operation === 'unlock') result.current.onUnlocked()
