@@ -1,6 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   RUN_ROOT_ENV,
@@ -103,4 +113,120 @@ describe('worker temporary root', () => {
       );
     }
   });
+});
+
+const repoRoot = process.cwd();
+// Hang guards, not performance bounds: a nested run starts Vite and one fork.
+const NESTED_RUN_TIMEOUT_MS = 60_000;
+const NESTED_TEST_TIMEOUT_MS = NESTED_RUN_TIMEOUT_MS + 30_000;
+
+interface ProbeRecord {
+  event: 'module' | 'afterAll';
+  home?: string;
+  runRoot?: string | null;
+}
+
+// How the probe's fork ends. Neither way runs its afterAll or emits `exit`.
+// - sigterm: a referenced timer keeps the fork alive after its file, as an open
+//   handle in a real test file does. A fork with nothing left to run exits on
+//   its own once Vitest's stop request removes its message listeners, and its
+//   `exit` fallback then removes the HOME; this one waits for Vitest's SIGTERM.
+// - sigkill: the fork ends itself with SIGKILL inside its test.
+type ForkEnd = 'sigterm' | 'sigkill';
+
+// One nested Vitest run over one probe file, with the isolation setup file and,
+// when asked, this globalSetup. The probe records its worker HOME and run root
+// from module code, which also runs in a `vitest list` pass, and records its
+// afterAll, so a fork whose hooks ran is visible.
+function nestedRun(options: {
+  command: 'run' | 'list';
+  end: ForkEnd;
+  globalSetup: boolean;
+  env?: NodeJS.ProcessEnv;
+}): { records: ProbeRecord[]; status: number | null; output: string } {
+  const dir = realpathSync(tmp.make('nested'));
+  const recordsFile = join(dir, 'records.jsonl');
+  const config = join(dir, 'vitest.config.mts');
+  writeFileSync(config, `export default ${JSON.stringify({
+    root: dir,
+    cacheDir: join(dir, '.vite'),
+    test: {
+      include: ['probe.test.mjs'],
+      ...(options.globalSetup ? { globalSetup: [resolve(repoRoot, 'tests/setup/vitest-run-root.ts')] } : {}),
+      setupFiles: [resolve(repoRoot, 'tests/setup/bot-errors-vitest-isolation.ts')],
+      maxWorkers: 1,
+      fileParallelism: false,
+    },
+  })};`);
+  writeFileSync(join(dir, 'probe.test.mjs'), [
+    `import { afterAll, it } from ${JSON.stringify(resolve(repoRoot, 'node_modules/vitest/dist/index.js'))};`,
+    "import { appendFileSync } from 'node:fs';",
+    'const record = (row) => appendFileSync(process.env.WHATSOUP_RUN_ROOT_PROBE_RECORDS, `${JSON.stringify(row)}\\n`);',
+    "record({ event: 'module', home: process.env.WHATSOUP_VITEST_HOME, runRoot: process.env.WHATSOUP_VITEST_RUN_ROOT ?? null });",
+    "afterAll(() => record({ event: 'afterAll' }));",
+    options.end === 'sigkill'
+      ? "it('ends its own fork by signal', () => { process.kill(process.pid, 'SIGKILL'); });"
+      : 'setInterval(() => {}, 60_000);\nit(\'keeps its fork alive\', () => {});',
+  ].join('\n'));
+  const child = spawnSync(process.execPath, [
+    resolve(repoRoot, 'node_modules/vitest/vitest.mjs'), options.command, '--config', config, '--pool=forks',
+  ], {
+    cwd: repoRoot,
+    env: { ...process.env, ...options.env, WHATSOUP_RUN_ROOT_PROBE_RECORDS: recordsFile },
+    encoding: 'utf8', timeout: NESTED_RUN_TIMEOUT_MS, maxBuffer: 1024 * 1024,
+  });
+  const output = `${child.stdout}${child.stderr}`;
+  expect(child.error, output).toBeUndefined();
+  // Records before status: a setup or import failure in the nested run records
+  // nothing, so it cannot pass for a removed HOME.
+  expect(existsSync(recordsFile), `the nested probe did not run:\n${output}`).toBe(true);
+  const records = readFileSync(recordsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as ProbeRecord);
+  return { records, status: child.status, output };
+}
+
+// The module record, after checking that the fork's hooks never ran: the
+// probe's afterAll would run before the setup file's, which removes the HOME.
+function onlyModuleRecord(records: ProbeRecord[], output: string): { home: string; runRoot: string | null } {
+  expect(records.map((row) => row.event), output).toEqual(['module']);
+  const [record] = records;
+  expect(record!.home, output).toBeTruthy();
+  return { home: record!.home!, runRoot: record!.runRoot ?? null };
+}
+
+// `exitsCleanly`: a `vitest list` pass succeeds; a run whose fork died fails.
+const FORK_ROUTES = [
+  { route: 'a `vitest list` pass, its fork ended by SIGTERM', command: 'list', end: 'sigterm', exitsCleanly: true },
+  { route: 'a `vitest run` whose fork dies by SIGKILL in its test', command: 'run', end: 'sigkill', exitsCleanly: false },
+] as const;
+
+describe.each(FORK_ROUTES)('the worker HOME of $route', ({ command, end, exitsCleanly }) => {
+  it('is removed with the run root by the globalSetup', () => {
+    const { records, status, output } = nestedRun({ command, end, globalSetup: true });
+    const { home, runRoot } = onlyModuleRecord(records, output);
+
+    expect(status === 0, output).toBe(exitsCleanly);
+    // A fresh root under /tmp, as a nested run under the outer run makes.
+    expect(dirname(runRoot!)).toBe(defaultTempParent());
+    expect(dirname(home)).toBe(runRoot);
+    expect(existsSync(home), output).toBe(false);
+    expect(existsSync(runRoot!), output).toBe(false);
+  }, NESTED_TEST_TIMEOUT_MS);
+
+  // Control: the fork's own cleanup does not run, so without the globalSetup
+  // the HOME stays. It stays in a marked root this test owns, which the
+  // temporary-directory cleanup removes, never in /tmp.
+  it('stays without the globalSetup', () => {
+    const inherited = realpathSync(tmp.make('inherited'));
+    writeFileSync(join(inherited, RUN_ROOT_MARKER), 'control');
+
+    const { records, status, output } = nestedRun({
+      command, end, globalSetup: false, env: { [RUN_ROOT_ENV]: inherited },
+    });
+    const { home, runRoot } = onlyModuleRecord(records, output);
+
+    expect(status === 0, output).toBe(exitsCleanly);
+    expect(runRoot).toBe(inherited);
+    expect(dirname(home)).toBe(inherited);
+    expect(existsSync(home), output).toBe(true);
+  }, NESTED_TEST_TIMEOUT_MS);
 });
