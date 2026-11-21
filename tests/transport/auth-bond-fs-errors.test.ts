@@ -163,7 +163,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       instanceName: 'manifest-fsync-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
 
     expect(result).toMatchObject({ ok: false, captured: false, path: null });
     expect(result.error).toContain('fsync boom');
@@ -187,7 +187,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       }) as unknown as FsModule['openSync'],
     }));
 
-    const result = new AuthBondGuard({
+    const result = await new AuthBondGuard({
       authDir,
       stateRoot,
       instanceName: 'dir-fsync-bot',
@@ -225,7 +225,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(result).toMatchObject({ ok: false, captured: false, deferred: true, path: null });
     expect(result.error).toContain('auth bond changed during capture');
@@ -283,7 +283,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       instanceName: 'copy-symlink-race-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
 
     expect(result).toMatchObject({ ok: false, captured: false, path: null });
     expect(result.error).toContain('refusing to copy auth tree containing symlink');
@@ -307,7 +307,7 @@ describe('AuthBondGuard filesystem error paths', () => {
     }));
 
     const guard = new AuthBondGuard({ authDir, stateRoot: join(root, 'state'), instanceName: 'missing-treehash-bot' });
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
 
     expect(result).toMatchObject({ ok: false, captured: false, path: null });
     expect(result.error).toContain('auth bond is present');
@@ -340,7 +340,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       })) as unknown as FsModule['fstatSync'],
     }));
 
-    const result = new AuthBondGuard({
+    const result = await new AuthBondGuard({
       authDir,
       stateRoot: join(root, 'state'),
       instanceName: 'invalid-mtime-bot',
@@ -371,7 +371,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       instanceName: 'restore-copy-failure-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     actualFs.writeFileSync(join(authDir, 'creds.json'), '{ bad json');
@@ -410,7 +410,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       instanceName: 'restore-copy-validation-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     actualFs.writeFileSync(join(authDir, 'creds.json'), '{ bad json');
@@ -443,7 +443,7 @@ describe('AuthBondGuard filesystem error paths', () => {
       instanceName: 'restore-missing-copy-failure-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     actualFs.rmSync(authDir, { recursive: true, force: true });
@@ -474,7 +474,7 @@ describe('AuthBondGuard filesystem error paths', () => {
 
     writeAuth(authDir, '15550100068:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-disappearing-auth-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     disappearingBackupAuth = join(captured.path!, 'auth');
     actualFs.rmSync(authDir, { recursive: true, force: true });
@@ -504,7 +504,7 @@ describe('AuthBondGuard filesystem error paths', () => {
 
     writeAuth(authDir, '15550100069:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-path-race-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     backupPath = captured.path;
     actualFs.rmSync(authDir, { recursive: true, force: true });
@@ -535,7 +535,7 @@ describe('AuthBondGuard filesystem error paths', () => {
 
     writeAuth(authDir, '15550100070:1@s.whatsapp.net');
     const manifestGuard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-manifest-string-bot' });
-    const manifestCapture = manifestGuard.capture('connection-open');
+    const manifestCapture = await manifestGuard.capture('connection-open');
     expect(manifestCapture.ok).toBe(true);
     manifestPath = join(manifestCapture.path!, 'manifest.json');
     actualFs.rmSync(authDir, { recursive: true, force: true });
@@ -546,7 +546,7 @@ describe('AuthBondGuard filesystem error paths', () => {
     manifestPath = null;
     writeAuth(authDir, '15550100071:1@s.whatsapp.net');
     const pathGuard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-path-string-bot' });
-    const pathCapture = pathGuard.capture('connection-open');
+    const pathCapture = await pathGuard.capture('connection-open');
     expect(pathCapture.ok).toBe(true);
     backupPath = pathCapture.path;
     actualFs.rmSync(authDir, { recursive: true, force: true });
@@ -577,12 +577,12 @@ describe('AuthBondGuard filesystem error paths', () => {
       keepBackups: 2,
       now: () => now,
     });
-    expect(guard.capture('connection-open').ok).toBe(true);
+    expect((await guard.capture('connection-open')).ok).toBe(true);
 
     actualFs.mkdirSync(flakyHistoryEntry, { mode: 0o700 });
     now = new Date('2026-06-09T12:01:00Z');
     writeAuth(authDir, '15550100063:1@s.whatsapp.net');
-    const second = guard.capture('creds-update');
+    const second = await guard.capture('creds-update');
 
     expect(second.ok).toBe(true);
     expect(actualFs.existsSync(flakyHistoryEntry)).toBe(true);
@@ -1190,7 +1190,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     // A real backup first, with a clean reader, so the restore assertion below
     // is about the withholding gate and not about a missing backup.
     const clean = await importGuardWithFsMock(() => ({}));
-    expect(new clean.AuthBondGuard({
+    expect(await new clean.AuthBondGuard({
       authDir, stateRoot, instanceName: 'creds-read-ops-bot',
       now: () => new Date('2026-09-03T12:00:00Z'),
     }).capture('seed')).toMatchObject({ ok: true, captured: true });
@@ -1252,7 +1252,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
       writeAuth(authDir);
 
       const clean = await importGuardWithFsMock(() => ({}));
-      expect(new clean.AuthBondGuard({
+      expect(await new clean.AuthBondGuard({
         authDir, stateRoot, instanceName: `creds-midread-${errno.toLowerCase()}-bot`,
         now: () => new Date('2026-09-03T12:00:00Z'),
       }).capture('seed')).toMatchObject({ ok: true, captured: true });
@@ -1342,7 +1342,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     // restore bails at "no auth-bond backup available" and the gate is not
     // what refused. Same idiom as the sibling restore-withhold test.
     const clean = await importGuardWithFsMock(() => ({}));
-    const seeded = new clean.AuthBondGuard({
+    const seeded = await new clean.AuthBondGuard({
       authDir, stateRoot, instanceName: 'root-eagain-bot',
       now: () => new Date('2026-09-03T12:00:00Z'),
     }).capture('seed');
@@ -1461,7 +1461,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     // never reached, which would leave this test unable to tell the gate from
     // the absence of a backup.
     const clean = await importGuardWithFsMock(() => ({}));
-    const seeded = new clean.AuthBondGuard({
+    const seeded = await new clean.AuthBondGuard({
       authDir, stateRoot, instanceName: 'transient-restore-bot',
       now: () => new Date('2026-09-03T12:00:00Z'),
     }).capture('seed');
@@ -1612,7 +1612,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
       captureRetryDelayMs: 0,
     });
 
-    const deferred = guard.capture('scheduled');
+    const deferred = await guard.capture('scheduled');
 
     expect(deferred.ok).toBe(false);
     expect(deferred.captured).toBe(false);
@@ -1637,7 +1637,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     // The next DEFINITE read decides, and here it decides the credential is
     // fine — so the capture the transient deferred actually happens.
     inject.transient = false;
-    const captured = guard.capture('scheduled');
+    const captured = await guard.capture('scheduled');
     expect(captured.ok).toBe(true);
     expect(captured.captured).toBe(true);
     expect(captured.deferred).toBe(false);
@@ -1647,7 +1647,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     // keyed on the transient issue rather than on any non-'present' status. A
     // gate that swallowed every failing capture would fail here.
     actualFs.rmSync(credsPath);
-    const failed = guard.capture('scheduled');
+    const failed = await guard.capture('scheduled');
     expect(failed.ok).toBe(false);
     expect(failed.deferred).toBe(false);
     expect(failed.error).toContain('auth bond is missing');
@@ -1675,7 +1675,7 @@ describe('AuthBondGuard credential open flags and root-descriptor faults', () =>
     // Seed a real backup so the restore reaches the destructive body rather
     // than bailing at "no auth-bond backup available".
     const clean = await importGuardWithFsMock(() => ({}));
-    const seeded = new clean.AuthBondGuard({
+    const seeded = await new clean.AuthBondGuard({
       authDir, stateRoot, instanceName: 'restore-fail-bot',
       now: () => new Date('2026-09-03T12:00:00Z'),
     }).capture('seed');

@@ -73,7 +73,7 @@ function writeAuth(authDir: string, id = '15550100:1@s.whatsapp.net'): void {
 
 describe('AuthBondGuard uncovered branches', () => {
   // --- safeName(): cleaned === '' fallback to 'unknown' (auth-bond.ts:116) ---
-  it('falls back to "unknown" instance directory when the name is all separators', () => {
+  it('falls back to "unknown" instance directory when the name is all separators', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -84,13 +84,13 @@ describe('AuthBondGuard uncovered branches', () => {
       instanceName: '///',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
     expect(result.ok).toBe(true);
     expect(existsSync(join(stateRoot, 'auth-bond-backups', 'unknown', 'latest.json'))).toBe(true);
   });
 
   // --- extractMeHash(): me non-object/array, lid fallback, id null ---
-  it('treats a non-object "me" field as missing identity (extractMeHash early null)', () => {
+  it('treats a non-object "me" field as missing identity (extractMeHash early null)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -101,7 +101,7 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(snap.issues).toContain('creds_json_missing_me');
   });
 
-  it('derives identity from "lid" when "id" is absent (extractMeHash lid fallback)', () => {
+  it('derives identity from "lid" when "id" is absent (extractMeHash lid fallback)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -111,7 +111,7 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(snap.meHash).toHaveLength(20);
   });
 
-  it('treats a "me" without string id or lid as missing identity (extractMeHash id === null)', () => {
+  it('treats a "me" without string id or lid as missing identity (extractMeHash id === null)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -123,7 +123,7 @@ describe('AuthBondGuard uncovered branches', () => {
   });
 
   // --- inspect(): parsed creds is array -> creds_json_not_object (auth-bond.ts:473-482) ---
-  it('reports creds_json_not_object when creds.json parses to a JSON array', () => {
+  it('reports creds_json_not_object when creds.json parses to a JSON array', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -137,7 +137,7 @@ describe('AuthBondGuard uncovered branches', () => {
   // --- walkAuthFiles symlink throw is reached only via hashAuthTree on a tree
   //     that already passed hardenPrivateTree; inspect() classifies symlinked
   //     trees 'invalid' first, so we assert that classification here. ---
-  it('refuses to treat an auth tree containing a symlinked non-creds file as present', () => {
+  it('refuses to treat an auth tree containing a symlinked non-creds file as present', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     writeAuth(authDir);
@@ -159,7 +159,7 @@ describe('AuthBondGuard uncovered branches', () => {
   // never observes a symlink. Flagged, not fake-covered.
 
   // --- copyPrivateTree(): .DS_Store skip (auth-bond.ts:238) via capture ---
-  it('captures successfully while skipping a .DS_Store entry in the auth tree', () => {
+  it('captures successfully while skipping a .DS_Store entry in the auth tree', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -171,7 +171,7 @@ describe('AuthBondGuard uncovered branches', () => {
       instanceName: 'dsstore-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
     expect(result.ok).toBe(true);
     expect(existsSync(join(result.path!, 'auth', '.DS_Store'))).toBe(false);
     expect(existsSync(join(result.path!, 'auth', 'creds.json'))).toBe(true);
@@ -179,7 +179,7 @@ describe('AuthBondGuard uncovered branches', () => {
 
   // --- hardenPrivateTree(): chmod arms on NON-root sub-entries + directory
   //     re-stack (auth-bond.ts:271-277, 281-288) ---
-  it('repairs permissions on nested auth subdirectories and files (non-root rel paths)', () => {
+  it('repairs permissions on nested auth subdirectories and files (non-root rel paths)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     writeAuth(authDir, '15550102:1@s.whatsapp.net');
@@ -196,13 +196,13 @@ describe('AuthBondGuard uncovered branches', () => {
   });
 
   // --- authTreeValidationError() arms via validateBackupForRestore ---
-  it('refuses restore when the backup creds.json is missing (auth missing creds.json)', () => {
+  it('refuses restore when the backup creds.json is missing (auth missing creds.json)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550103:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'missing-backup-creds-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     rmSync(join(captured.path!, 'auth', 'creds.json'), { force: true });
     rmSync(authDir, { recursive: true, force: true });
@@ -212,13 +212,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(existsSync(authDir)).toBe(false);
   });
 
-  it('refuses restore when the backup creds.json is empty (creds.json is empty)', () => {
+  it('refuses restore when the backup creds.json is empty (creds.json is empty)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550104:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'empty-backup-creds-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     writeFileSync(join(captured.path!, 'auth', 'creds.json'), '');
     rmSync(authDir, { recursive: true, force: true });
@@ -227,13 +227,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('creds.json is empty');
   });
 
-  it('refuses restore when backup creds.json is a non-object but its hash matches the manifest', () => {
+  it('refuses restore when backup creds.json is a non-object but its hash matches the manifest', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550106:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'nonobj-match-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     const arrayBody = JSON.stringify([1, 2, 3]);
     const credsPath = join(captured.path!, 'auth', 'creds.json');
@@ -255,13 +255,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('creds.json is not an object');
   });
 
-  it('refuses restore when backup creds.json is invalid JSON but its hash matches', () => {
+  it('refuses restore when backup creds.json is invalid JSON but its hash matches', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550107:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'invalidjson-match-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     const credsPath = join(captured.path!, 'auth', 'creds.json');
     writeFileSync(credsPath, '{ not json');
@@ -282,13 +282,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('creds.json is invalid json');
   });
 
-  it('refuses restore when backup creds.json lacks identity but its hash matches', () => {
+  it('refuses restore when backup creds.json lacks identity but its hash matches', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550108:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'noidentity-match-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     const credsPath = join(captured.path!, 'auth', 'creds.json');
     writeFileSync(credsPath, JSON.stringify({ registrationId: 5 }));
@@ -309,13 +309,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('creds.json is missing identity');
   });
 
-  it('refuses restore when the backup creds.json identity does not match the manifest', () => {
+  it('refuses restore when the backup creds.json identity does not match the manifest', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550109:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'identity-mismatch-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     const credsPath = join(captured.path!, 'auth', 'creds.json');
     writeFileSync(credsPath, JSON.stringify({ me: { id: '15550199:9@s.whatsapp.net' }, registrationId: 9 }));
@@ -336,13 +336,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('creds.json identity mismatch');
   });
 
-  it('refuses restore when the backup auth tree hash does not match the manifest', () => {
+  it('refuses restore when the backup auth tree hash does not match the manifest', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550110:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'treehash-mismatch-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     // Extra file -> recomputed treeHash differs while creds (hash+identity) match.
     writeFileSync(join(captured.path!, 'auth', 'pre-key-extra.json'), JSON.stringify({ added: true }));
@@ -358,13 +358,13 @@ describe('AuthBondGuard uncovered branches', () => {
 
   // --- validateBackupForRestore(): manifest not-object, instance mismatch,
   //     latest-vs-manifest tree mismatch (auth-bond.ts:760, 768, 771) ---
-  it('refuses restore when the backup manifest is a JSON array (manifest not an object)', () => {
+  it('refuses restore when the backup manifest is a JSON array (manifest not an object)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550112:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'manifest-array-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     writeFileSync(join(captured.path!, 'manifest.json'), JSON.stringify(['not', 'object']));
     rmSync(authDir, { recursive: true, force: true });
@@ -373,13 +373,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('backup manifest is not an object');
   });
 
-  it('refuses restore when the backup manifest instanceName mismatches the guard', () => {
+  it('refuses restore when the backup manifest instanceName mismatches the guard', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550113:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'instance-mismatch-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     const manifestPath = join(captured.path!, 'manifest.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
@@ -391,13 +391,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('backup instance mismatch');
   });
 
-  it('refuses restore when the latest pointer treeHash disagrees with the manifest', () => {
+  it('refuses restore when the latest pointer treeHash disagrees with the manifest', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550114:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'pointer-treehash-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     const manifestPath = join(captured.path!, 'manifest.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
@@ -410,13 +410,13 @@ describe('AuthBondGuard uncovered branches', () => {
   });
 
   // --- backupPathProblem(): symlink, not-directory, unreadable (788, 789, 791) ---
-  it('refuses restore when the latest backup path is a symlink', () => {
+  it('refuses restore when the latest backup path is a symlink', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550115:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'backup-symlink-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     const realTarget = join(root, 'real-backup-target');
     cpSync(captured.path!, realTarget, { recursive: true });
@@ -428,13 +428,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('backup path is a symlink');
   });
 
-  it('refuses restore when the latest backup path is a regular file, not a directory', () => {
+  it('refuses restore when the latest backup path is a regular file, not a directory', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550116:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'backup-notdir-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     rmSync(captured.path!, { recursive: true, force: true });
     writeFileSync(captured.path!, 'i am a file', { mode: 0o600 });
@@ -444,13 +444,13 @@ describe('AuthBondGuard uncovered branches', () => {
     expect(restored.error).toContain('backup path is not a directory');
   });
 
-  it('refuses restore when the latest backup path is unreadable (lstat throws ENOENT)', () => {
+  it('refuses restore when the latest backup path is unreadable (lstat throws ENOENT)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550117:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'backup-unreadable-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     rmSync(captured.path!, { recursive: true, force: true });
     rmSync(authDir, { recursive: true, force: true });
@@ -461,13 +461,13 @@ describe('AuthBondGuard uncovered branches', () => {
   });
 
   // --- restoreLatestIfNeeded(): auto-restore disabled (auth-bond.ts:635-637) ---
-  it('does not attempt restore when autoRestore is disabled', () => {
+  it('does not attempt restore when autoRestore is disabled', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550118:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'no-autorestore-bot', autoRestore: false });
-    expect(guard.capture('connection-open').ok).toBe(true);
+    expect((await guard.capture('connection-open')).ok).toBe(true);
     rmSync(authDir, { recursive: true, force: true });
     const restored = guard.restoreLatestIfNeeded();
     expect(restored).toMatchObject({ attempted: false, restored: false, source: null });
@@ -478,7 +478,7 @@ describe('AuthBondGuard uncovered branches', () => {
   // --- restoreLatestIfNeeded(): failure rollback (auth-bond.ts:709-718) ---
   // Uses hoisted vi.mock('node:fs') factory (top of file) — ESM named-import
   // spy is not configurable; mockCopyFileSyncImpl ref is the only safe hook.
-  it('rolls the quarantined original back when the restore copy fails mid-flight', () => {
+  it('rolls the quarantined original back when the restore copy fails mid-flight', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -489,7 +489,7 @@ describe('AuthBondGuard uncovered branches', () => {
       instanceName: 'rollback-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
     // Corrupt LIVE creds -> status invalid -> restore attempted; live tree still
     // present so it is moved to quarantine before the copy fails.
@@ -511,7 +511,7 @@ describe('AuthBondGuard uncovered branches', () => {
   });
 
   // --- pruneHistory(): keepBackups <= 0 short-circuit (auth-bond.ts:797) ---
-  it('never prunes history when keepBackups is zero', () => {
+  it('never prunes history when keepBackups is zero', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -523,15 +523,15 @@ describe('AuthBondGuard uncovered branches', () => {
       keepBackups: 0,
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    expect(guard.capture('connection-open').captured).toBe(true);
+    expect((await guard.capture('connection-open')).captured).toBe(true);
     writeAuth(authDir, '15550121:1@s.whatsapp.net');
-    expect(guard.capture('creds-update').captured).toBe(true);
+    expect((await guard.capture('creds-update')).captured).toBe(true);
     const historyRoot = join(stateRoot, 'auth-bond-backups', 'no-prune-bot', 'history');
     expect(readdirSync(historyRoot).length).toBe(2);
   });
 
   // --- readLatestManifest(): non-object/array pointer -> null (auth-bond.ts:392) ---
-  it('treats a non-object latest pointer as absent', () => {
+  it('treats a non-object latest pointer as absent', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -542,7 +542,7 @@ describe('AuthBondGuard uncovered branches', () => {
       instanceName: 'array-pointer-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    expect(guard.capture('connection-open').ok).toBe(true);
+    expect((await guard.capture('connection-open')).ok).toBe(true);
     const latestPath = join(stateRoot, 'auth-bond-backups', 'array-pointer-bot', 'latest.json');
     writeFileSync(latestPath, JSON.stringify([1, 2, 3]), { mode: 0o600 });
     const snap = guard.inspect();
@@ -567,7 +567,7 @@ describe('AuthBondGuard uncovered branches', () => {
   //     instead of recording a hard failure (auth-bond.ts:589-593) ---
   // Uses hoisted vi.mock('node:fs') factory (top of file) — ESM named-import
   // spy is not configurable; mockCopyFileSyncImpl ref is the only safe hook.
-  it('defers when the auth tree is freshly truncated during capture', () => {
+  it('defers when the auth tree is freshly truncated during capture', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -588,7 +588,7 @@ describe('AuthBondGuard uncovered branches', () => {
       throw new Error('synthetic mid-capture failure');
     };
 
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
     expect(result).toMatchObject({ ok: false, captured: false, deferred: true, path: null });
     expect(result.error).toContain('changed during capture');
     expect(guard.inspect().backup.lastCaptureDeferredReason).toBe('creds-update');
@@ -596,7 +596,7 @@ describe('AuthBondGuard uncovered branches', () => {
 
   // --- assertPrivateJsonTarget(): refuses writing json over a non-regular path
   //     (auth-bond.ts:305-307) — latest.json pre-created as a directory ---
-  it('refuses to write the latest pointer over a non-regular (directory) path', () => {
+  it('refuses to write the latest pointer over a non-regular (directory) path', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -609,7 +609,7 @@ describe('AuthBondGuard uncovered branches', () => {
       instanceName: 'json-target-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
     expect(result.ok).toBe(false);
     expect(result.error).toContain('non-regular path');
   });

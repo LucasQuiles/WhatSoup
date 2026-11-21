@@ -771,6 +771,86 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   ages, 120 s by default) after process start. A completed walk that finds a
   problem, a transient read, a backup error, or a first walk that does not
   complete within the bound latches as before.
+- **Auth-bond snapshot capture.** The capture that backs up the auth tree runs
+  on connection open and when the 60 s settle timer fires. The first send or
+  key event arms that timer, and later ones do not push it back; only a
+  `creds.update` clears it and arms it again.
+  - A run hands the event loop back between slices. One budget covers the
+    whole run: a slice holds at most 64 units, where a walk entry costs 1 and a
+    copy or delete entry costs 4, and a phase boundary does not restart the
+    count.
+  - The capture's own slices do not open an `event_loop_starvation` hold. On a
+    large tree, the open handler's synchronous walks (three with a data root
+    set: its `connection_open` record, that record's bond event and its
+    persist) can still add stalls inside an open-path capture, and so can
+    the bond event of the run's result record and the settle persist after
+    the run.
+
+  Each run logs two lines on the `connection` logger with the same `run`
+  number:
+  - `auth bond capture started` (info): `reason`, `run`, `coalescedRequests`,
+    `queuedMs`.
+  - `auth bond capture finished`: `outcome`, `elapsedMs`, `attempts`,
+    `slices`, `maxSliceMs`, `phaseMs` (inspect, sweep, copy, validate,
+    publish, prune), `fileCount`, `totalBytes`, `error` and
+    `consecutiveDeferrals`.
+    - Logged at info: `captured` (a new backup) and `unchanged` (the latest
+      backup already matches).
+    - Logged at warn: `deferred` (a credential write or a transient read was in
+      progress, or an entry vanished between the walk's listing and its read;
+      retried), `blocked` (a logout or bond-lost state refused it) and
+      `aborted` (a restore or shutdown stopped it before it published).
+    - Logged at error: `failed`.
+
+  `maxSliceMs` is the longest single stretch the capture held the loop with
+  its own synchronous work; time inside a yield, the retry sleep or an abort's
+  wake is not counted. It should stay far under the 250 ms starvation
+  threshold. No alert covers backup age, so a `consecutiveDeferrals` that keeps
+  climbing on a busy instance means `latest.json` is getting old.
+  - A request made during a run folds into one trailing run.
+  - A run that ends `deferred` re-arms the 60 s settled snapshot. Its
+    `auth_snapshot_scheduled` record comes from the run's result, without
+    another walk. A run that ends `failed` is not re-armed, as before.
+  - A settled snapshot refused by the 5-minute floor still records
+    `auth_snapshot_skipped` (`settled-snapshot-min-interval`), and is re-armed
+    for the rest of the interval. The info line `auth bond settled snapshot
+    re-armed for the minimum interval` carries `retryInMs`.
+  - An incomplete read (`auth bond auth tree read was incomplete`) defers
+    without a page. After six consecutive runs end that way, the seventh such
+    run fails with `... incomplete in 7 consecutive runs` and pages
+    `whatsapp_auth_bond_local_failure`. Any run that ends otherwise resets the
+    count. The deferred re-arm and the 5-minute floor space the runs, so a
+    tree that never reads completely pages about 30 minutes after its first
+    incomplete read (about 26 minutes when that first read is the open
+    capture), and sooner if reconnects add open-path runs. These times assume
+    no credential-write churn: each successful `creds.update` replaces the
+    settle timer with a new 60 s one, so updates less than 60 s apart keep
+    postponing the next run, and with it the seventh.
+  - A `blocked` run is recorded as `auth_snapshot_skipped` with note
+    `capture-blocked:<reason>`. It does not page
+    `whatsapp_auth_bond_local_failure`, but it still sets the guard's last
+    capture error, as before; the authenticated `/health` body shows it in
+    `whatsapp.auth_bond.backup.last_capture_error`. While the block holds,
+    `whatsapp.connection.auth_failure_class` reports the logout's own 401
+    class, not `auth_bond_at_risk`, because health checks the logout before
+    the bond: `serverside_logout_irreversible` for a confirmed device
+    removal, `auth_401_ambiguous_parked` or `auth_401_uninspected_exit` for an
+    unconfirmed 401. After the next open in the same process, the error
+    keeps the bond `auth_bond_at_risk` until a capture succeeds, unless an
+    earlier bond check decides the class first: a transient read, the
+    fresh-write grace or a bond `status` other than `present`. The block
+    holds from the close handler's
+    logout decision, even when the logout alert could not be enqueued, until
+    the next open.
+  - Each capture's sweep removes the staging copies of other processes: a
+    killed process's, or the one a shutdown left. The sweep skips a staging
+    entry carrying the current process's PID, such as one an abort left during
+    its cleanup. Such an entry stays until another process's sweep removes it,
+    normally after a restart, unless a later capture in this process generates
+    the same staging name (the same second, reason and tree hash) and removes
+    it first.
+
+  The contract is in [Durability §5.9](durability.md#59-auth-bond-backups).
 - **Log.** The `degradation silence latch set` line carries `reasons`, the
   sorted latched reason codes, so a latch-only reading names what armed it.
 - **Advance.** Every later evaluation that observes real degradation reasons

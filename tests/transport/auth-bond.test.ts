@@ -27,7 +27,7 @@ function writeAuth(authDir: string, id = '15550100001:1@s.whatsapp.net'): void {
 }
 
 describe('AuthBondGuard', () => {
-  it('reports missing, invalid, and present credential state', () => {
+  it('reports missing, invalid, and present credential state', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const guard = new AuthBondGuard({ authDir, stateRoot: join(root, 'state'), instanceName: 'test-bot' });
@@ -52,7 +52,7 @@ describe('AuthBondGuard', () => {
     expect(snapshot.treeHash).toHaveLength(64);
   });
 
-  it('reports non-object credentials and supports lid-only identities', () => {
+  it('reports non-object credentials and supports lid-only identities', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -80,10 +80,10 @@ describe('AuthBondGuard', () => {
     const snapshot = guard.inspect();
     expect(snapshot.status).toBe('present');
     expect(snapshot.meHash).toHaveLength(20);
-    expect(guard.capture('connection-open').path).toContain('/unknown/history/');
+    expect((await guard.capture('connection-open')).path).toContain('/unknown/history/');
   });
 
-  it('reports a symlinked auth root as an invalid auth tree', () => {
+  it('reports a symlinked auth root as an invalid auth tree', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const realAuthDir = join(root, 'real-auth');
@@ -112,7 +112,7 @@ describe('AuthBondGuard', () => {
     });
   });
 
-  it('captures private immutable backups and a latest pointer', () => {
+  it('captures private immutable backups and a latest pointer', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -125,7 +125,7 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
     expect(result).toMatchObject({ ok: true, captured: true, error: null });
     expect(result.path).toEqual(expect.any(String));
     expect(existsSync(join(result.path!, 'auth', 'creds.json'))).toBe(true);
@@ -137,11 +137,11 @@ describe('AuthBondGuard', () => {
     expect(statSync(latestPath).mode & 0o777).toBe(0o600);
     expect(statSync(join(result.path!, 'auth', 'creds.json')).mode & 0o777).toBe(0o600);
 
-    const skipped = guard.capture('creds-update');
+    const skipped = await guard.capture('creds-update');
     expect(skipped).toMatchObject({ ok: true, captured: false, path: result.path });
   });
 
-  it('sweeps an orphaned credential-bearing staging temp dir left by a dead process, keeping its own in-flight + non-temp entries (#1076/#1078)', () => {
+  it('sweeps an orphaned credential-bearing staging temp dir left by a dead process, keeping its own in-flight + non-temp entries (#1076/#1078)', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -168,7 +168,7 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
     expect(result.ok).toBe(true); // capture still succeeds
 
     expect(existsSync(orphan)).toBe(false); // dead-pid credential residue swept
@@ -176,7 +176,7 @@ describe('AuthBondGuard', () => {
     expect(existsSync(keep)).toBe(true); // non-temp entry untouched
   });
 
-  it('uses the default state root when none is configured', () => {
+  it('uses the default state root when none is configured', async () => {
     const root = makeRoot();
     const instanceRoot = join(root, 'instance');
     const authDir = join(instanceRoot, 'auth');
@@ -188,13 +188,13 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
 
     expect(result.ok).toBe(true);
     expect(result.path).toContain('/state/auth-bond-backups/default-state-bot/history/');
   });
 
-  it('refuses a symlinked latest pointer and removes the unpublished backup', () => {
+  it('refuses a symlinked latest pointer and removes the unpublished backup', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -213,7 +213,7 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
 
     expect(result).toMatchObject({ ok: false, captured: false, path: null });
     expect(result.error).toMatch(/symlink/);
@@ -221,7 +221,7 @@ describe('AuthBondGuard', () => {
     expect(readdirSync(historyRoot)).toEqual([]);
   });
 
-  it('does not trust a symlinked latest pointer even when it points at a matching manifest', () => {
+  it('does not trust a symlinked latest pointer even when it points at a matching manifest', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -234,7 +234,7 @@ describe('AuthBondGuard', () => {
       instanceName: 'matching-symlink-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const captured = initial.capture('connection-open');
+    const captured = await initial.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     const latestPath = join(backupRoot, 'latest.json');
@@ -249,7 +249,7 @@ describe('AuthBondGuard', () => {
       instanceName: 'matching-symlink-bot',
       now: () => new Date('2026-06-09T12:01:00Z'),
     });
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(result).toMatchObject({ ok: false, captured: false, path: null });
     expect(result.error).toMatch(/symlink/);
@@ -257,7 +257,7 @@ describe('AuthBondGuard', () => {
     expect(readdirSync(join(backupRoot, 'history'))).toHaveLength(1);
   });
 
-  it('ignores malformed latest manifests during backup inspection', () => {
+  it('ignores malformed latest manifests during backup inspection', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -275,7 +275,7 @@ describe('AuthBondGuard', () => {
     expect(snapshot.backup.root).toBe(backupRoot);
   });
 
-  it('refuses to write backups through a symlinked backup root directory', () => {
+  it('refuses to write backups through a symlinked backup root directory', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -293,14 +293,14 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
 
     expect(result).toMatchObject({ ok: false, captured: false, path: null });
     expect(result.error).toMatch(/backup root directory.*symlink/);
     expect(readdirSync(outsideRoot)).toEqual([]);
   });
 
-  it('refuses to publish a latest manifest over a non-regular path and removes the unpublished backup', () => {
+  it('refuses to publish a latest manifest over a non-regular path and removes the unpublished backup', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -317,14 +317,14 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const result = guard.capture('connection-open');
+    const result = await guard.capture('connection-open');
 
     expect(result).toMatchObject({ ok: false, captured: false, path: null });
     expect(result.error).toContain('refusing to write auth-bond json over non-regular path');
     expect(readdirSync(historyRoot)).toEqual([]);
   });
 
-  it('refuses to capture a live auth tree containing symlinked credentials', () => {
+  it('refuses to capture a live auth tree containing symlinked credentials', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -336,7 +336,7 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const good = guard.capture('connection-open');
+    const good = await guard.capture('connection-open');
     expect(good.ok).toBe(true);
     const latestPath = join(stateRoot, 'auth-bond-backups', 'symlink-creds-bot', 'latest.json');
     const latestBefore = JSON.parse(readFileSync(latestPath, 'utf8')) as { backupPath: string; treeHash: string };
@@ -349,7 +349,7 @@ describe('AuthBondGuard', () => {
     rmSync(join(authDir, 'creds.json'), { force: true });
     symlinkSync(outsideCreds, join(authDir, 'creds.json'));
 
-    const failed = guard.capture('creds-update');
+    const failed = await guard.capture('creds-update');
 
     expect(failed).toMatchObject({
       ok: false,
@@ -365,7 +365,7 @@ describe('AuthBondGuard', () => {
     expect(readdirSync(join(stateRoot, 'auth-bond-backups', 'symlink-creds-bot', 'history'))).toHaveLength(1);
   });
 
-  it('revalidates an unchanged auth tree without moving the latest pointer', () => {
+  it('revalidates an unchanged auth tree without moving the latest pointer', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -378,9 +378,9 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const first = guard.capture('connection-open');
+    const first = await guard.capture('connection-open');
     expect(first).toMatchObject({ ok: true, captured: true, error: null });
-    const second = guard.capture('creds-update');
+    const second = await guard.capture('creds-update');
     expect(second).toMatchObject({ ok: true, captured: false, path: first.path, error: null });
 
     const snapshot = guard.inspect();
@@ -391,7 +391,7 @@ describe('AuthBondGuard', () => {
     expect(readdirSync(join(stateRoot, 'auth-bond-backups', 'revalidate-bot', 'history'))).toHaveLength(1);
   });
 
-  it('refuses corrupt credential captures and preserves the previous protected snapshot', () => {
+  it('refuses corrupt credential captures and preserves the previous protected snapshot', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -405,13 +405,13 @@ describe('AuthBondGuard', () => {
       freshInvalidGraceMs: 0,
     });
 
-    const good = guard.capture('connection-open');
+    const good = await guard.capture('connection-open');
     expect(good).toMatchObject({ ok: true, captured: true, error: null });
     const latestPath = join(stateRoot, 'auth-bond-backups', 'corrupt-bot', 'latest.json');
     const latestBefore = JSON.parse(readFileSync(latestPath, 'utf8')) as { backupPath: string; treeHash: string };
 
     writeFileSync(join(authDir, 'creds.json'), '{ bad json');
-    const failed = guard.capture('creds-update');
+    const failed = await guard.capture('creds-update');
 
     expect(failed).toMatchObject({
       ok: false,
@@ -433,7 +433,7 @@ describe('AuthBondGuard', () => {
     expect(protectedCreds.me?.id).toBe('15550100013:1@s.whatsapp.net');
   });
 
-  it('refuses zero-byte credential captures and preserves the previous protected snapshot', () => {
+  it('refuses zero-byte credential captures and preserves the previous protected snapshot', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -447,13 +447,13 @@ describe('AuthBondGuard', () => {
       freshInvalidGraceMs: 0,
     });
 
-    const good = guard.capture('connection-open');
+    const good = await guard.capture('connection-open');
     expect(good).toMatchObject({ ok: true, captured: true, error: null });
     const latestPath = join(stateRoot, 'auth-bond-backups', 'zero-byte-bot', 'latest.json');
     const latestBefore = JSON.parse(readFileSync(latestPath, 'utf8')) as { backupPath: string; treeHash: string };
 
     writeFileSync(join(authDir, 'creds.json'), '');
-    const failed = guard.capture('creds-update');
+    const failed = await guard.capture('creds-update');
 
     expect(failed).toMatchObject({
       ok: false,
@@ -476,34 +476,12 @@ describe('AuthBondGuard', () => {
     expect(protectedCreds.me?.id).toBe('15550100010:1@s.whatsapp.net');
   });
 
-  it('retries a fresh zero-byte credential read and captures after the write settles', () => {
-    const root = makeRoot();
-    const authDir = join(root, 'auth');
-    mkdirSync(authDir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(authDir, 'creds.json'), '');
+  // The settle-during-retry case lives in auth-bond-capture-yield.test.ts (N8).
+  // Its earlier form used an Atomics.wait spy as the hook, so it pinned the
+  // synchronous sleep that C8 removes; N8 keeps the outcome and asserts the
+  // wait goes through the injected sleep instead.
 
-    vi.spyOn(Atomics, 'wait').mockImplementation(() => {
-      writeAuth(authDir, '15550100030:1@s.whatsapp.net');
-      return 'ok';
-    });
-
-    const guard = new AuthBondGuard({
-      authDir,
-      stateRoot: join(root, 'state'),
-      instanceName: 'settling-retry-bot',
-      captureAttempts: 2,
-      captureRetryDelayMs: 1,
-      freshInvalidGraceMs: 60_000,
-    });
-
-    const result = guard.capture('creds-update');
-
-    expect(result).toMatchObject({ ok: true, captured: true, deferred: false, error: null });
-    expect(result.path).toEqual(expect.any(String));
-    expect(guard.inspect().backup.lastCaptureError).toBeNull();
-  });
-
-  it('defers fresh zero-byte credential reads without recording a hard capture failure', () => {
+  it('defers fresh zero-byte credential reads without recording a hard capture failure', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -517,7 +495,7 @@ describe('AuthBondGuard', () => {
       freshInvalidGraceMs: 60_000,
     });
 
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(result).toMatchObject({
       ok: false,
@@ -537,7 +515,7 @@ describe('AuthBondGuard', () => {
     expect(guard.inspect().backup.lastCaptureDeferredAgeMs).toEqual(expect.any(Number));
   });
 
-  it('retries a deferred credential read without sleeping when retry delay is zero', () => {
+  it('retries a deferred credential read without sleeping when retry delay is zero', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -553,14 +531,14 @@ describe('AuthBondGuard', () => {
       freshInvalidGraceMs: 60_000,
     });
 
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(result).toMatchObject({ ok: false, captured: false, deferred: true, path: null });
     expect(result.error).toContain('credential write still in flight');
     expect(wait).not.toHaveBeenCalled();
   });
 
-  it('fails missing credential captures without treating them as fresh write windows', () => {
+  it('fails missing credential captures without treating them as fresh write windows', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -572,14 +550,14 @@ describe('AuthBondGuard', () => {
       freshInvalidGraceMs: 60_000,
     });
 
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(result).toMatchObject({ ok: false, captured: false, deferred: false, path: null });
     expect(result.error).toContain('auth bond is missing');
     expect(result.error).toContain('creds_json_missing');
   });
 
-  it('fails stale zero-byte credential reads after the write grace expires', () => {
+  it('fails stale zero-byte credential reads after the write grace expires', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
@@ -597,7 +575,7 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:10Z'),
     });
 
-    const result = guard.capture('creds-update');
+    const result = await guard.capture('creds-update');
 
     expect(result).toMatchObject({ ok: false, captured: false, deferred: false, path: null });
     expect(result.error).toContain('auth bond is invalid');
@@ -605,7 +583,7 @@ describe('AuthBondGuard', () => {
     expect(guard.inspect().backup.lastCaptureDeferredAt).toBeNull();
   });
 
-  it('refuses captures without a stable WhatsApp identity and preserves the previous protected snapshot', () => {
+  it('refuses captures without a stable WhatsApp identity and preserves the previous protected snapshot', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -618,13 +596,13 @@ describe('AuthBondGuard', () => {
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
 
-    const good = guard.capture('connection-open');
+    const good = await guard.capture('connection-open');
     expect(good).toMatchObject({ ok: true, captured: true, error: null });
     const latestPath = join(stateRoot, 'auth-bond-backups', 'missing-identity-bot', 'latest.json');
     const latestBefore = JSON.parse(readFileSync(latestPath, 'utf8')) as { backupPath: string; treeHash: string };
 
     writeFileSync(join(authDir, 'creds.json'), JSON.stringify({ registrationId: 2 }));
-    const failed = guard.capture('creds-update');
+    const failed = await guard.capture('creds-update');
 
     expect(failed).toMatchObject({
       ok: false,
@@ -647,7 +625,7 @@ describe('AuthBondGuard', () => {
     expect(protectedCreds.me?.id).toBe('15550100021:1@s.whatsapp.net');
   });
 
-  it('blocks snapshots during logged-out capture windows and preserves the previous protected snapshot', () => {
+  it('blocks snapshots during logged-out capture windows and preserves the previous protected snapshot', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -662,14 +640,14 @@ describe('AuthBondGuard', () => {
       captureBlockReason: () => captureBlockReason,
     });
 
-    const good = guard.capture('connection-open');
+    const good = await guard.capture('connection-open');
     expect(good).toMatchObject({ ok: true, captured: true, error: null });
     const latestPath = join(stateRoot, 'auth-bond-backups', 'logged-out-bot', 'latest.json');
     const latestBefore = JSON.parse(readFileSync(latestPath, 'utf8')) as { backupPath: string; treeHash: string };
 
     captureBlockReason = 'loggedOut/device-bond-lost state active';
     writeAuth(authDir, '15550199999:1@s.whatsapp.net');
-    const blocked = guard.capture('creds-update');
+    const blocked = await guard.capture('creds-update');
 
     expect(blocked).toMatchObject({
       ok: false,
@@ -688,7 +666,7 @@ describe('AuthBondGuard', () => {
     expect(protectedCreds.me?.id).toBe('15550100022:1@s.whatsapp.net');
   });
 
-  it('repairs live auth directory and credential file permissions during inspection', () => {
+  it('repairs live auth directory and credential file permissions during inspection', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     writeAuth(authDir);
@@ -705,7 +683,7 @@ describe('AuthBondGuard', () => {
     expect(snapshot.creds.mode).toBe('600');
   });
 
-  it('prunes stale protected backups while ignoring local metadata files', () => {
+  it('prunes stale protected backups while ignoring local metadata files', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -721,17 +699,17 @@ describe('AuthBondGuard', () => {
       now: () => now,
     });
 
-    const first = guard.capture('connection-open');
+    const first = await guard.capture('connection-open');
     expect(first.ok).toBe(true);
     expect(existsSync(join(first.path!, 'auth', '.DS_Store'))).toBe(false);
 
     now = new Date('2026-06-09T12:01:00Z');
     writeAuth(authDir, '15550100041:1@s.whatsapp.net');
-    expect(guard.capture('creds-update').ok).toBe(true);
+    expect((await guard.capture('creds-update')).ok).toBe(true);
 
     now = new Date('2026-06-09T12:02:00Z');
     writeAuth(authDir, '15550100042:1@s.whatsapp.net');
-    const third = guard.capture('creds-update');
+    const third = await guard.capture('creds-update');
 
     expect(third.ok).toBe(true);
     const history = readdirSync(join(stateRoot, 'auth-bond-backups', 'prune-bot', 'history'));
@@ -739,7 +717,7 @@ describe('AuthBondGuard', () => {
     expect(existsSync(first.path!)).toBe(false);
   });
 
-  it('caps retained history by auth-tree file pressure even when count retention is larger', () => {
+  it('caps retained history by auth-tree file pressure even when count retention is larger', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -756,16 +734,16 @@ describe('AuthBondGuard', () => {
       now: () => now,
     });
 
-    const first = guard.capture('connection-open');
+    const first = await guard.capture('connection-open');
     expect(first.ok).toBe(true);
 
     now = new Date('2026-06-09T12:01:00Z');
     writeFileSync(join(authDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'b' }));
-    expect(guard.capture('creds-update').ok).toBe(true);
+    expect((await guard.capture('creds-update')).ok).toBe(true);
 
     now = new Date('2026-06-09T12:02:00Z');
     writeFileSync(join(authDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'c' }));
-    const third = guard.capture('creds-update');
+    const third = await guard.capture('creds-update');
 
     expect(third.ok).toBe(true);
     expect(third.snapshot.fileCount).toBe(3);
@@ -774,7 +752,7 @@ describe('AuthBondGuard', () => {
     expect(existsSync(first.path!)).toBe(false);
   });
 
-  it('excludes in-flight temp backup directories from retention pruning', () => {
+  it('excludes in-flight temp backup directories from retention pruning', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -789,12 +767,12 @@ describe('AuthBondGuard', () => {
       now: () => now,
     });
 
-    const first = guard.capture('connection-open');
+    const first = await guard.capture('connection-open');
     expect(first.ok).toBe(true);
 
     now = new Date('2026-06-09T12:01:00Z');
     writeAuth(authDir, '15550100071:1@s.whatsapp.net');
-    const second = guard.capture('creds-update');
+    const second = await guard.capture('creds-update');
     expect(second.ok).toBe(true);
 
     const historyRoot = join(stateRoot, 'auth-bond-backups', 'tmp-prune-bot', 'history');
@@ -803,7 +781,7 @@ describe('AuthBondGuard', () => {
 
     now = new Date('2026-06-09T12:02:00Z');
     writeAuth(authDir, '15550100072:1@s.whatsapp.net');
-    const third = guard.capture('creds-update');
+    const third = await guard.capture('creds-update');
     expect(third.ok).toBe(true);
 
     const history = readdirSync(historyRoot).sort();
@@ -815,7 +793,7 @@ describe('AuthBondGuard', () => {
     expect(existsSync(third.path!)).toBe(true);
   });
 
-  it('leaves backup history unpruned when the retention count is zero', () => {
+  it('leaves backup history unpruned when the retention count is zero', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -830,16 +808,16 @@ describe('AuthBondGuard', () => {
       now: () => now,
     });
 
-    expect(guard.capture('connection-open').ok).toBe(true);
+    expect((await guard.capture('connection-open')).ok).toBe(true);
     now = new Date('2026-06-09T12:01:00Z');
     writeAuth(authDir, '15550100048:1@s.whatsapp.net');
-    expect(guard.capture('creds-update').ok).toBe(true);
+    expect((await guard.capture('creds-update')).ok).toBe(true);
 
     const history = readdirSync(join(stateRoot, 'auth-bond-backups', 'no-prune-bot', 'history'));
     expect(history).toHaveLength(2);
   });
 
-  it('does not restore when auth is healthy, auto-restore is disabled, or no backup exists', () => {
+  it('does not restore when auth is healthy, auto-restore is disabled, or no backup exists', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -872,13 +850,13 @@ describe('AuthBondGuard', () => {
     expect(missingBackup.inspect().backup.lastRestoreError).toBe('no auth-bond backup available');
   });
 
-  it('restores missing local auth from the latest protected snapshot', () => {
+  it('restores missing local auth from the latest protected snapshot', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550100009:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-bot' });
-    expect(guard.capture('connection-open').ok).toBe(true);
+    expect((await guard.capture('connection-open')).ok).toBe(true);
 
     rmSync(authDir, { recursive: true, force: true });
     const restored = guard.restoreLatestIfNeeded();
@@ -888,7 +866,7 @@ describe('AuthBondGuard', () => {
     expect(guard.inspect().status).toBe('present');
   });
 
-  it('restores corrupt local auth and quarantines the broken tree', () => {
+  it('restores corrupt local auth and quarantines the broken tree', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
@@ -899,7 +877,7 @@ describe('AuthBondGuard', () => {
       instanceName: 'restore-corrupt-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
     });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     writeFileSync(join(authDir, 'creds.json'), '{ bad json');
@@ -931,13 +909,13 @@ describe('AuthBondGuard', () => {
     });
   });
 
-  it('refuses to restore from a backup with a missing manifest', () => {
+  it('refuses to restore from a backup with a missing manifest', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550100011:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-guard-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     rmSync(join(captured.path!, 'manifest.json'), { force: true });
@@ -949,13 +927,13 @@ describe('AuthBondGuard', () => {
     expect(existsSync(authDir)).toBe(false);
   });
 
-  it('refuses to restore from backup pointers that are symlinks, files, or unreadable paths', () => {
+  it('refuses to restore from backup pointers that are symlinks, files, or unreadable paths', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550100044:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-path-guard-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     const latestPath = join(stateRoot, 'auth-bond-backups', 'restore-path-guard-bot', 'latest.json');
@@ -1092,13 +1070,13 @@ describe('AuthBondGuard', () => {
       },
       expected: 'backup auth tree hash mismatch',
     },
-  ])('refuses to restore from $name', ({ mutate, expected }) => {
+  ])('refuses to restore from $name', async ({ mutate, expected }) => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550100045:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-validation-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     const latestPath = join(stateRoot, 'auth-bond-backups', 'restore-validation-bot', 'latest.json');
@@ -1112,13 +1090,13 @@ describe('AuthBondGuard', () => {
     expect(existsSync(authDir)).toBe(false);
   });
 
-  it('refuses to restore from a backup whose auth tree no longer matches its manifest', () => {
+  it('refuses to restore from a backup whose auth tree no longer matches its manifest', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550100012:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'restore-guard-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     writeFileSync(join(captured.path!, 'auth', 'creds.json'), JSON.stringify({
@@ -1133,7 +1111,7 @@ describe('AuthBondGuard', () => {
     expect(existsSync(authDir)).toBe(false);
   });
 
-  it('restores from a history-root entry whose name merely begins with dots', () => {
+  it('restores from a history-root entry whose name merely begins with dots', async () => {
     // DECLARED BEHAVIOUR CHANGE. The containment predicate here used to be a
     // local copy testing `rel.startsWith('..')`, which also matched an entry
     // that is genuinely INSIDE the history root but whose name happens to begin
@@ -1148,7 +1126,7 @@ describe('AuthBondGuard', () => {
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550100033:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'dotted-restore-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     const historyRoot = join(stateRoot, 'auth-bond-backups', 'dotted-restore-bot', 'history');
@@ -1169,13 +1147,13 @@ describe('AuthBondGuard', () => {
     expect(existsSync(authDir)).toBe(true);
   });
 
-  it('refuses to restore from a latest pointer outside the protected history root', () => {
+  it('refuses to restore from a latest pointer outside the protected history root', async () => {
     const root = makeRoot();
     const authDir = join(root, 'auth');
     const stateRoot = join(root, 'state');
     writeAuth(authDir, '15550100032:1@s.whatsapp.net');
     const guard = new AuthBondGuard({ authDir, stateRoot, instanceName: 'escape-restore-bot' });
-    const captured = guard.capture('connection-open');
+    const captured = await guard.capture('connection-open');
     expect(captured.ok).toBe(true);
 
     const outsideBackup = join(root, 'outside-backup');
