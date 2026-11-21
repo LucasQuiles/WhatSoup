@@ -72,8 +72,9 @@ function restartDeps(): RestartSelfToolDeps {
     instanceName: 'inst',
     dataRoot: '/tmp/dr',
     resolveChatJid: () => undefined,
+    deliverOwedReply: async () => ({ delivered: true }),
     sendAck: async () => {},
-    serviceManager: { restart: async () => {} },
+    serviceManager: { restartSelf: async () => {} },
     trigger: async () => ({ ok: true, markerPath: '/tmp/dr/marker' }),
     assertAdmin: () => {},
   };
@@ -187,11 +188,18 @@ describe('registerRuntimeInlineTools gating', () => {
     return {
       sandbox: false,
       sandboxPerChat: false,
+      perChat: false,
       emitHealResult: healDeps(),
       restartSelf: restartDeps(),
       ...overrides,
     };
   }
+
+  it('omits restart_self on a per_chat runtime, whose owed text sits in per-chat queues', () => {
+    const { registry, names } = fakeRegistry();
+    registerRuntimeInlineTools(registry, deps({ perChat: true }));
+    expect(names).toEqual(['emit_heal_result']);
+  });
 
   it('registers both tools (emit_heal_result first) on a non-sandboxed instance with control peers and a restarter', () => {
     const { registry, names } = fakeRegistry();

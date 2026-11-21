@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -76,6 +76,37 @@ describe('live release currency alert', () => {
 
     expect(proc.status).toBe(2);
     expect(proc.stderr).toContain('the next argument is another flag (--json)');
+  });
+
+  it('exits 0 on target-differs while still printing the state and emitting the finding', () => {
+    const releasePath = writeRelease();
+    const fakeBin = path.join(tmpRoot, 'bin');
+    mkdirSync(fakeBin);
+    const fakeGit = path.join(fakeBin, 'git');
+    writeFileSync(fakeGit, `#!/bin/bash\nprintf "%s\\t%s\\n" "${TARGET}" "\${@: -1}"\n`);
+    chmodSync(fakeGit, 0o755);
+    const stateDir = path.join(tmpRoot, 'bot-errors-state');
+    const proc = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning',
+      '--experimental-strip-types',
+      path.join(process.cwd(), 'scripts/live-release-currency-alert.ts'),
+      '--release', releasePath,
+      '--target-url', 'https://github.com/LucasQuiles/WhatSoup.git',
+      '--instance', 'sample-bot',
+      '--json',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}`, BOT_ERRORS_STATE_DIR: stateDir },
+      encoding: 'utf8',
+    });
+
+    expect(proc.status, proc.stderr || proc.stdout).toBe(0);
+    expect(JSON.parse(proc.stdout)).toMatchObject({
+      state: 'target-differs',
+      alert: { required: true, attempted: true, kind: 'alert', status: 0 },
+    });
+    const eventFiles = readdirSync(path.join(stateDir, 'outbox')).filter((name) => name.endsWith('.json'));
+    expect(eventFiles).toHaveLength(1);
   });
 
   it('reports current only when exact full object IDs match', async () => {

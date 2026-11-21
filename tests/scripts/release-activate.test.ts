@@ -243,6 +243,7 @@ describe('release:activate --plan', () => {
       'acquire-activation-lock',
       'create-backup-dir', 'backup-database', 'record-schema-level', 'record-symlink', 'backup-plists', 'write-staged-plists',
       'recheck-refresh-rollback-fence-requirement-before-switch',
+      'recheck-required-outputs-before-switch',
       'recheck-live-identity-before-switch',
       'switch-symlink', 'install-plists', 'reload', 'reload', 'reload', 'verify', 'rollback-on-failure',
     ]);
@@ -285,6 +286,8 @@ describe('release:activate --plan', () => {
     const failed = (result.json.preconditions as Array<{ id: string; ok: boolean }>).filter((entry) => !entry.ok).map((entry) => entry.id);
     expect(failed).toEqual(['release-manifest-path']);
   });
+
+  // Required host-built outputs: tests/scripts/release-activate-required-outputs.test.ts.
 
   it('refuses clearly on a platform other than macOS launchd', async () => {
     const world = new SimulatedLaunchd(fixture, { platform: 'linux' });

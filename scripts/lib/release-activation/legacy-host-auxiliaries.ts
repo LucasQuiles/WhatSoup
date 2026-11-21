@@ -24,7 +24,9 @@ const PATH_REBASE_ROOT_KEYS: ReadonlySet<string> = new Set([
   'StartCalendarInterval', 'StartInterval', 'StandardOutPath', 'StandardErrorPath',
 ]);
 // Per job, the environment key names that a committed version of its repository writer set; values differ by host
-// and are not proven. The two BOT ERRORS installers wrote the nine health keys. deploy/setup.sh renders the timers
+// and are not proven. The two BOT ERRORS installers wrote the nine health keys; the health re-pin helper's
+// --runtime-manifest also writes BOT_ERRORS_RUNTIME_MANIFEST, which is not admitted, so such a job is reinstalled
+// before host activation (docs/runbooks/release-deployment.md). deploy/setup.sh renders the timers
 // through scripts/launchd-claude-config-env.ts, which adds the agent CLI's config and credential-store selectors.
 const PATH_REBASE_ENVIRONMENT_KEYS: Readonly<Record<LegacyPathRebaseLabel, ReadonlySet<string>>> = {
   'com.bot-errors.health': new Set([

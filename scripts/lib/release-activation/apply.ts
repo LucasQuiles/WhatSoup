@@ -69,6 +69,7 @@ import {
   plistDigest,
   readBotErrorsHealthConsumer,
   recheckCandidateRefreshRollbackFence,
+  recheckRequiredOutputs,
   recheckRollbackRefreshFenceTarget,
   wrapperTargetFor,
 } from './plan.ts';
@@ -853,6 +854,9 @@ async function applyHoldingLock(host: ActivationHost, context: ActivationContext
     // No await from this recheck through the symlink switch into the first writePlist call. Each plist
     // write is awaited (a root-owned plist waits on the sudo root helper), so other work can run between
     // writes; writePlist therefore rechecks every plist against its backup bytes before replacing it.
+    const requiredOutputs = recheckRequiredOutputs(context);
+    steps.push({ step: 'recheck-required-outputs-before-switch', ok: requiredOutputs.ok, detail: requiredOutputs.detail });
+    if (!requiredOutputs.ok) return refuse(requiredOutputs.detail, backupPath);
     const beforeSwitch = foreignWriterFailure(context, ['previous']);
     steps.push(beforeSwitch === null
       ? { step: 'recheck-live-identity-before-switch', ok: true }

@@ -133,6 +133,19 @@ export async function handleDeleteLine(
 ): Promise<void> {
   if (!validateInstanceName(params.name, res)) return;
 
+  // 0. #3829: refuse before anything is stopped when disable could not remove
+  // the service definition (a protected launchd plist); the job stays loaded.
+  try {
+    deps.serviceManager.assertCanDisable?.(params.name);
+  } catch (err) {
+    log.error({ err, instance: params.name }, 'delete line: service definition cannot be removed');
+    jsonResponse(res, 409, {
+      error: `delete refused: ${serviceErrorMessage(err)}`,
+      instance: params.name,
+    });
+    return;
+  }
+
   // 1. Stop the service. Only service-absence errors are idempotent; other
   // failures may leave the instance running, so state must not be deleted.
   try {
