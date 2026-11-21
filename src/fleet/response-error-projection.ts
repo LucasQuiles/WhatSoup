@@ -44,6 +44,7 @@ export type FleetErrorCode =
   | 'config_read_failed'
   | 'config_write_failed'
   | 'instance_creation_failed'
+  | 'instance_cleanup_failed'
   | 'auth_failed'
   | 'auth_timeout'
   | 'validation_failed'
@@ -134,6 +135,7 @@ const SAFE_MESSAGES: Record<FleetErrorCode, string> = {
   config_read_failed: 'Configuration could not be read.',
   config_write_failed: 'Configuration could not be written.',
   instance_creation_failed: 'Instance creation failed.',
+  instance_cleanup_failed: 'Instance cleanup is incomplete. Inspect remaining state before retrying.',
   auth_failed: 'Authentication failed.',
   auth_timeout: 'Authentication timed out. Please retry.',
   validation_failed: 'The request failed validation.',
@@ -317,8 +319,12 @@ export function mutationError(
     mutationState: MutationState;
     rollbackState?: RollbackState;
   },
+  codeOverride?: FleetErrorCode,
 ): FleetErrorResponse {
-  return projectError(err, ctx);
+  const response = projectError(err, ctx);
+  return codeOverride === undefined ? response : {
+    ...response, code: codeOverride, message: SAFE_MESSAGES[codeOverride], retryable: false,
+  };
 }
 
 /**
