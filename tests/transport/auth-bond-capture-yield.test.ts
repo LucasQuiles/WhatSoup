@@ -1134,3 +1134,309 @@ describe('C8 FIX 3: restore copies strictly, and a capture result cannot throw',
     expect(finishedEvents(events).map((event) => [event.run, event.outcome])).toEqual([[1, 'failed']]);
   });
 });
+
+/** N13's malformed latest.json: a truthy non-string backupPath, so every read of the backup half throws. */
+const MALFORMED_LATEST = JSON.stringify({ backupPath: 42, treeHash: 'c8-not-a-tree-hash' });
+/** Every field of a refused result but its snapshot. */
+const REFUSED = {
+  ok: false,
+  captured: false,
+  deferred: false,
+  aborted: true,
+  path: null,
+  error: 'auth bond capture refused: shutting down',
+};
+/** Every field of a run aborted by shutdown but its snapshot. */
+const SHUTDOWN_ABORTED = {
+  ok: false,
+  captured: false,
+  deferred: false,
+  aborted: true,
+  path: null,
+  error: 'auth bond capture aborted: shutting down',
+};
+
+type Outcome<T> =
+  | { readonly status: 'fulfilled'; readonly value: T }
+  | { readonly status: 'rejected'; readonly reason: unknown }
+  | { readonly status: 'pending' };
+
+/**
+ * settledWithin, with a rejection recorded instead of left unhandled, so a
+ * promise that should resolve and rejects shows its reason in the failure.
+ */
+async function outcomeWithin<T>(promise: Promise<T>, turns = 200): Promise<Outcome<T>> {
+  const box: { outcome: Outcome<T> } = { outcome: { status: 'pending' } };
+  void promise.then(
+    (value) => { box.outcome = { status: 'fulfilled', value }; },
+    (reason: unknown) => { box.outcome = { status: 'rejected', reason }; },
+  );
+  for (let turn = 0; turn < turns && box.outcome.status === 'pending'; turn += 1) await macrotask();
+  return box.outcome;
+}
+
+/** The value of an outcome that an earlier assertion required to be fulfilled. */
+function fulfilledValue<T>(outcome: Outcome<T>): T {
+  return (outcome as Extract<Outcome<T>, { status: 'fulfilled' }>).value;
+}
+
+/**
+ * A captureYield that parks the next yield after `gate.park` is set, forever:
+ * that run stops before its next live snapshot, and only an abort, through the
+ * run's wake promise, ends it. Every other yield is a macrotask.
+ */
+function parkingYield(gate: { park: boolean; parked: number }): () => Promise<void> {
+  return async () => {
+    if (gate.park) {
+      gate.park = false;
+      gate.parked += 1;
+      await new Promise<void>(() => undefined);
+    }
+    await macrotask();
+  };
+}
+
+function writeMalformedLatest(fx: Fixture): void {
+  mkdirSync(backupRoot(fx), { recursive: true, mode: 0o700 });
+  writeFileSync(latestPath(fx), MALFORMED_LATEST);
+}
+
+describe('C8 FIX 4: refused and aborted results are built without reading the disk', () => {
+  it('N18a: shutdown during a parked run settles the folded request refused and aborts the run, on a malformed latest.json', async () => {
+    const fx = makeFixture('n18a', 4);
+    writeMalformedLatest(fx);
+    const events: AuthBondCaptureEvent[] = [];
+    const gate = { park: true, parked: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      onCaptureEvent: (event) => { events.push(event); },
+      captureYield: parkingYield(gate),
+    });
+
+    const first = guard.capture('connection-open');
+    // Made while run 1 is active, so it folds into the trailing run.
+    const folded = guard.capture('creds-update-settled');
+    // Coverage: run 1 is parked at its first yield, before its first live
+    // snapshot, and no run has settled, so no snapshot is held for a refusal.
+    expect(gate.parked).toBe(1);
+    expect(finishedEvents(events)).toEqual([]);
+
+    const shutdown = await outcomeWithin(guard.shutdownCaptures());
+    const foldedOutcome = await outcomeWithin(folded);
+    const firstOutcome = await outcomeWithin(first);
+
+    expect(shutdown).toEqual({ status: 'fulfilled', value: undefined });
+    expect(foldedOutcome).toMatchObject({ status: 'fulfilled', value: REFUSED });
+    expect(fulfilledValue(foldedOutcome).blocked).toBeUndefined();
+    expect(firstOutcome).toMatchObject({ status: 'fulfilled', value: SHUTDOWN_ABORTED });
+    expect(startedEvents(events).map((event) => event.run)).toEqual([1]);
+    expect(finishedEvents(events).map((event) => [event.run, event.outcome])).toEqual([[1, 'aborted']]);
+    expect(historyEntries(fx)).toEqual([]);
+    expect(readFileSync(latestPath(fx), 'utf8')).toBe(MALFORMED_LATEST);
+
+    // A later request resolves a refusal, and the call itself does not throw.
+    const later: { promise: Promise<AuthBondCaptureResult> | null } = { promise: null };
+    expect(() => { later.promise = guard.capture('after-shutdown'); }).not.toThrow();
+    expect(await outcomeWithin(later.promise!)).toMatchObject({ status: 'fulfilled', value: REFUSED });
+  });
+
+  it('N18b: capture() after shutdown, before any run has settled, resolves a refusal on a malformed latest.json', async () => {
+    const fx = makeFixture('n18b', 4);
+    writeMalformedLatest(fx);
+    const events: AuthBondCaptureEvent[] = [];
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      onCaptureEvent: (event) => { events.push(event); },
+    });
+    // Coverage: no run is active or folded, so shutdown builds no result.
+    expect(await outcomeWithin(guard.shutdownCaptures())).toEqual({ status: 'fulfilled', value: undefined });
+
+    const later: { promise: Promise<AuthBondCaptureResult> | null } = { promise: null };
+    expect(() => { later.promise = guard.capture('after-shutdown'); }).not.toThrow();
+    const outcome = await outcomeWithin(later.promise!);
+
+    expect(outcome).toMatchObject({ status: 'fulfilled', value: REFUSED });
+    const refused = fulfilledValue(outcome);
+    expect(refused.blocked).toBeUndefined();
+    // Read from nothing: no tree evidence, and the guard's health fields untouched.
+    expect(refused.snapshot).toMatchObject({ status: 'unknown', treeHash: null });
+    expect(refused.snapshot.backup.lastCaptureError).toBeNull();
+    expect(startedEvents(events)).toEqual([]);
+    expect(readFileSync(latestPath(fx), 'utf8')).toBe(MALFORMED_LATEST);
+  });
+
+  it('N18c: a run aborted before any run has settled settles aborted on a malformed latest.json', async () => {
+    const fx = makeFixture('n18c', 4);
+    writeMalformedLatest(fx);
+    const events: AuthBondCaptureEvent[] = [];
+    const gate = { park: true, parked: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      onCaptureEvent: (event) => { events.push(event); },
+      captureYield: parkingYield(gate),
+    });
+
+    const run = guard.capture('connection-open');
+    // Coverage: parked before its first live snapshot, with no run settled and
+    // no request folded, so shutdown builds only the aborted result.
+    expect(gate.parked).toBe(1);
+    const shutdown = await outcomeWithin(guard.shutdownCaptures());
+    const outcome = await outcomeWithin(run);
+
+    expect(shutdown).toEqual({ status: 'fulfilled', value: undefined });
+    expect(outcome).toMatchObject({ status: 'fulfilled', value: SHUTDOWN_ABORTED });
+    const aborted = fulfilledValue(outcome);
+    expect(aborted.blocked).toBeUndefined();
+    // An abort is not a failure: no tree evidence, and the health fields untouched.
+    expect(aborted.snapshot).toMatchObject({ status: 'unknown', treeHash: null });
+    expect(aborted.snapshot.backup.lastCaptureError).toBeNull();
+    expect(finishedEvents(events).map((event) => [event.run, event.outcome])).toEqual([[1, 'aborted']]);
+    expect(historyEntries(fx)).toEqual([]);
+    expect(readFileSync(latestPath(fx), 'utf8')).toBe(MALFORMED_LATEST);
+  });
+
+  it('N18d: a refusal and an abort before any run has settled make no synchronous fs call', async () => {
+    const counter = { ops: 0 };
+    const { AuthBondGuard: CountingGuard } = await importGuardCountingFs(counter);
+
+    // The abort: run 1 parks at its first yield, and shutdown aborts it.
+    const abortFx = makeFixture('n18d-abort', 4);
+    const gate = { park: true, parked: 0 };
+    const aborting = new CountingGuard({
+      authDir: abortFx.authDir,
+      stateRoot: abortFx.stateRoot,
+      instanceName: abortFx.name,
+      captureYield: parkingYield(gate),
+    });
+    const run = aborting.capture('connection-open');
+    // Coverage: parked before its first live snapshot, with no run settled.
+    expect(gate.parked).toBe(1);
+    const opsBeforeAbort = counter.ops;
+    const shutdown = await outcomeWithin(aborting.shutdownCaptures());
+    const aborted = await outcomeWithin(run);
+    const abortOps = counter.ops - opsBeforeAbort;
+
+    // The refusal: after shutdown, on a guard that never ran a capture.
+    const refuseFx = makeFixture('n18d-refuse', 4);
+    const refusing = new CountingGuard({
+      authDir: refuseFx.authDir,
+      stateRoot: refuseFx.stateRoot,
+      instanceName: refuseFx.name,
+    });
+    await outcomeWithin(refusing.shutdownCaptures());
+    const opsBeforeRefusal = counter.ops;
+    const refusal = refusing.capture('after-shutdown');
+    const refusalOps = counter.ops - opsBeforeRefusal;
+
+    // Coverage: both results were built, with the flags the other tests pin.
+    expect(shutdown).toEqual({ status: 'fulfilled', value: undefined });
+    expect(aborted).toMatchObject({ status: 'fulfilled', value: SHUTDOWN_ABORTED });
+    expect(await outcomeWithin(refusal)).toMatchObject({ status: 'fulfilled', value: REFUSED });
+    // Coverage: the counting import counts this guard's reads, so a zero below means none.
+    const opsBeforeInspect = counter.ops;
+    refusing.inspect();
+    expect(counter.ops - opsBeforeInspect, 'the counting import counted nothing').toBeGreaterThan(0);
+    expect({ abortOps, refusalOps }).toEqual({ abortOps: 0, refusalOps: 0 });
+  });
+
+  it('N18e: control: after a run has settled, refusals and an abort carry that run\'s snapshot unchanged', async () => {
+    const fx = makeFixture('n18e', 4);
+    const gate = { park: false, parked: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      captureYield: parkingYield(gate),
+    });
+    const settled = await guard.capture('connection-open');
+    expect(settled).toMatchObject({ ok: true, captured: true });
+    // Coverage: latest.json is valid and names run 1's backup, and run 1's
+    // snapshot is tree evidence, not an unread one.
+    expect(JSON.parse(readFileSync(latestPath(fx), 'utf8'))).toMatchObject({ backupPath: settled.path });
+    expect(settled.snapshot).toMatchObject({
+      status: 'present',
+      treeHash: expect.any(String),
+      backup: { latest: settled.path },
+    });
+
+    // Run 2 parks at its first yield, so its aborted result has no snapshot of its own.
+    gate.park = true;
+    const second = guard.capture('creds-update-settled');
+    const folded = guard.capture('auth-bond-capture-deferred');
+    expect(gate.parked).toBe(1);
+    const shutdown = await outcomeWithin(guard.shutdownCaptures());
+    const foldedOutcome = await outcomeWithin(folded);
+    const secondOutcome = await outcomeWithin(second);
+    const laterOutcome = await outcomeWithin(guard.capture('after-shutdown'));
+
+    expect(shutdown).toEqual({ status: 'fulfilled', value: undefined });
+    expect(foldedOutcome).toMatchObject({ status: 'fulfilled', value: REFUSED });
+    expect(secondOutcome).toMatchObject({ status: 'fulfilled', value: SHUTDOWN_ABORTED });
+    expect(laterOutcome).toMatchObject({ status: 'fulfilled', value: REFUSED });
+    expect(fulfilledValue(foldedOutcome).snapshot).toEqual(settled.snapshot);
+    expect(fulfilledValue(secondOutcome).snapshot).toEqual(settled.snapshot);
+    expect(fulfilledValue(laterOutcome).snapshot).toEqual(settled.snapshot);
+  });
+
+  it('N18f: control: a run that fails before any run has settled still reads creds.json live', async () => {
+    const fx = makeFixture('n18f', 4);
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      // As in N17a: the first yield's rejection reaches the failure result builder.
+      captureYield: firstYieldRejects(new Error('c8-fix4-control-hook-fault')),
+    });
+
+    const outcome = await outcomeWithin(guard.capture('connection-open'));
+
+    expect(outcome).toMatchObject({
+      status: 'fulfilled',
+      value: { ok: false, captured: false, deferred: false, path: null },
+    });
+    const failed = fulfilledValue(outcome);
+    expect(failed.error).toContain('c8-fix4-control-hook-fault');
+    expect(failed.aborted).toBeUndefined();
+    // The failure builder is outside this fix: its snapshot still has a live creds.json read.
+    expect(failed.snapshot.creds.exists).toBe(true);
+    expect(typeof failed.snapshot.creds.sha256).toBe('string');
+    expect(failed.snapshot.issues).not.toContain('auth_bond_capture_result_unread');
+    expect(await outcomeWithin(guard.shutdownCaptures())).toEqual({ status: 'fulfilled', value: undefined });
+  });
+
+  it('N18g: shutdown still aborts the run and settles the folded request when building the refusal throws', async () => {
+    const fx = makeFixture('n18g', 4);
+    const gate = { park: true, parked: 0 };
+    const guard = new AuthBondGuard({
+      authDir: fx.authDir,
+      stateRoot: fx.stateRoot,
+      instanceName: fx.name,
+      captureYield: parkingYield(gate),
+    });
+    // Stands in for a later builder change that reads the disk again and throws.
+    const builders = guard as unknown as { refusedCaptureResult: () => AuthBondCaptureResult };
+    const builder = vi.spyOn(builders, 'refusedCaptureResult').mockImplementationOnce(() => {
+      throw new Error('c8-fix4-refusal-builder-fault');
+    });
+
+    const first = guard.capture('connection-open');
+    const folded = guard.capture('creds-update-settled');
+    // Coverage: run 1 is parked with a request folded behind it.
+    expect(gate.parked).toBe(1);
+    const shutdown = await outcomeWithin(guard.shutdownCaptures());
+    const foldedOutcome = await outcomeWithin(folded);
+    const firstOutcome = await outcomeWithin(first);
+
+    // Coverage: shutdown built the folded result through the stubbed builder, and it threw.
+    expect(builder.mock.results[0]?.type, 'the stubbed builder never threw').toBe('throw');
+    expect(firstOutcome).toMatchObject({ status: 'fulfilled', value: SHUTDOWN_ABORTED });
+    expect(foldedOutcome.status, 'the folded request never settled').not.toBe('pending');
+    expect(shutdown.status, 'shutdownCaptures never settled').not.toBe('pending');
+  });
+});
