@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 
 // A recorder that stands in for `launchctl` in tests that spawn a deploy script. The script looks the command up on
@@ -11,14 +11,26 @@ export interface FakeLaunchctl {
   /**
    * The argument list of every call, space-joined, in the order the lines were appended to the log (not the order the
    * calls started, when several run at once). Empty means the recorder never ran: installation proved it can log.
+   * Throws when the log is gone or is not a regular file, because then no list is evidence of anything.
    */
   calls(): string[];
 }
 
 const SELF_CHECK = '__fake-launchctl-self-check__';
+// The self-check is one shell builtin and an append; a recorder still running after this is broken, and the test
+// should fail here with the recorder's own message rather than at the test timeout.
+const SELF_CHECK_TIMEOUT_MS = 5_000;
+
+function logIsRegularFile(log: string): boolean {
+  return lstatSync(log, { throwIfNoEntry: false })?.isFile() === true;
+}
 
 function readLog(log: string): string[] {
-  return existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter((line) => line !== '') : [];
+  // An empty list for a missing log would let a "no call" assertion pass after the log disappeared.
+  if (!logIsRegularFile(log)) {
+    throw new Error(`fake launchctl: the call log is missing or not a regular file: ${JSON.stringify(log)}`);
+  }
+  return readFileSync(log, 'utf8').split('\n').filter((line) => line !== '');
 }
 
 export function installFakeLaunchctl(root: string, basePath = process.env.PATH ?? '/usr/bin:/bin'): FakeLaunchctl {
@@ -46,9 +58,10 @@ export function installFakeLaunchctl(root: string, basePath = process.env.PATH ?
   chmodSync(command, 0o700);
   // A recorder that cannot log would make every "no call" assertion pass for the wrong reason: prove it logs, then
   // start the log empty.
-  const check = spawnSync(command, [SELF_CHECK], { encoding: 'utf8' });
-  if (check.status !== 0 || readLog(log).join('\n') !== SELF_CHECK) {
-    throw new Error(`fake launchctl: the recorder did not log its self-check (status ${String(check.status)})`);
+  const check = spawnSync(command, [SELF_CHECK], { encoding: 'utf8', timeout: SELF_CHECK_TIMEOUT_MS });
+  if (check.status !== 0 || !logIsRegularFile(log) || readLog(log).join('\n') !== SELF_CHECK) {
+    const cause = check.error ? `, ${check.error.message}` : '';
+    throw new Error(`fake launchctl: the recorder did not log its self-check (status ${String(check.status)}${cause})`);
   }
   writeFileSync(log, '');
   return {
