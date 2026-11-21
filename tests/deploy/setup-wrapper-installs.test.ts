@@ -5,12 +5,12 @@ import path from 'node:path';
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const setupSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
 
-/** Wrapper names setup.sh symlinks into ~/.local/bin (`ln -sf "$REPO_ROOT/deploy/..." "$BIN_DIR/<name>"`). */
+/** Wrapper names setup.sh links into ~/.local/bin (`install_wrapper_link "<name>" "$REPO_ROOT/deploy/..."`). */
 function installedWrappers(source: string): Map<string, string> {
   const out = new Map<string, string>();
-  const re = /ln -sf "\$REPO_ROOT\/(deploy\/[^"]+)" "\$BIN_DIR\/([^"]+)"/g;
+  const re = /install_wrapper_link "([^"]+)" "\$REPO_ROOT\/(deploy\/[^"]+)"/g;
   for (const m of source.matchAll(re)) {
-    out.set(m[2], m[1]);
+    out.set(m[1], m[2]);
   }
   return out;
 }

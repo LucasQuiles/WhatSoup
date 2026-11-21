@@ -421,16 +421,16 @@ describe('deploy/setup.sh platform portability', () => {
 
   it('existing wrapper install targets remain intact (regression guard)', () => {
     // These are cross-platform and must be present regardless of PLATFORM branching
-    expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup" "$BIN_DIR/whatsoup"');
-    expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup-auth" "$BIN_DIR/whatsoup-auth"');
-    expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup-fleet" "$BIN_DIR/whatsoup-fleet"');
+    expect(setupSource).toContain('install_wrapper_link "whatsoup" "$REPO_ROOT/deploy/whatsoup"');
+    expect(setupSource).toContain('install_wrapper_link "whatsoup-auth" "$REPO_ROOT/deploy/whatsoup-auth"');
+    expect(setupSource).toContain('install_wrapper_link "whatsoup-fleet" "$REPO_ROOT/deploy/whatsoup-fleet"');
   });
 
   it('Linux setup installs BOT ERRORS service and timer units, not just the env template', () => {
     const linuxUnitBlock = sliceBetween(
       setupSource,
       '# --- linux (systemd) unit install ---',
-      'fi\nmkdir -p "$HOME/.config/whatsoup"',
+      'fi\n# --- step 4 env templates ---',
     );
     expect(setupSource).toContain('BOT_ERRORS_SYSTEMD_UNITS=(');
     for (const unit of botErrorsSystemdUnits) {
@@ -445,7 +445,7 @@ describe('deploy/setup.sh platform portability', () => {
     const linuxUnitBlock = sliceBetween(
       setupSource,
       '# --- linux (systemd) unit install ---',
-      'fi\nmkdir -p "$HOME/.config/whatsoup"',
+      'fi\n# --- step 4 env templates ---',
     );
     expect(linuxUnitBlock).toContain('if ! systemctl --user daemon-reload; then');
     expect(linuxUnitBlock).toContain('systemctl --user daemon-reload failed after installing units');
@@ -457,7 +457,7 @@ describe('deploy/setup.sh platform portability', () => {
     const linuxUnitBlock = sliceBetween(
       setupSource,
       '# --- linux (systemd) unit install ---',
-      'fi\nmkdir -p "$HOME/.config/whatsoup"',
+      'fi\n# --- step 4 env templates ---',
     );
     expect(linuxUnitBlock).toContain('require_readable_bot_errors_health_profile');
     expect(linuxUnitBlock.indexOf('require_readable_bot_errors_health_profile')).toBeLessThan(
