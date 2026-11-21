@@ -23,7 +23,7 @@ directory at a link name is refused, and each link is read back.
 - `--skip-wrappers`, `--wrappers-only`, `--timers-only` and `--npmrc-only`
   select steps 3, 4 and 5. With any of the last three, step 2 (dependencies),
   step 6 (console build) and step 7 (key check) do not run; the preflight and
-  step 1 always run. `--wrappers-only` and `--skip-wrappers` cannot be combined.
+  step 1 run whenever the first release-host check admits the run. `--wrappers-only` and `--skip-wrappers` cannot be combined.
 - `--switch-release-tree` (Linux only, default run only) switches a host whose
   wrapper resolves to another tree to this tree on purpose, printing the old and
   new wrapper target and the rollback command first. On Linux, where
@@ -40,4 +40,4 @@ directory at a link name is refused, and each link is read back.
   [release-deployment.md](../runbooks/release-deployment.md#switching-a-linux-host-to-another-tree).
 - A release exported before this change has neither the guard nor the flags. Its
   `setup.sh` rejects them as unknown options, and its plain default run switches
-  the host without any check.
+  the host without the release-tree check.

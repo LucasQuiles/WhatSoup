@@ -103,8 +103,8 @@ tree other than the active release, setup's numbered steps run only with
 `--npmrc-only` (alone or with `--skip-wrappers`): `--skip-wrappers` alone and
 `--timers-only` still reach step 4; the standalone `--check`, `--remove-timers`,
 `--reconcile` and `--help` modes are not affected. From the active release, run
-through the path the wrapper names, `--wrappers-only` runs only step 3 and
-moves the helper links that activation leaves on the previous release (all
+through the path the wrapper names, `--wrappers-only` runs the preflight, the
+step 1 checks and step 3, no other step, and moves the helper links that activation leaves on the previous release (all
 seven after `release:activate`; six after `release:activate-host` with a
 `fleet-wrapper` entry, which moves `whatsoup-fleet` itself). See
 "`deploy/setup.sh` on a release host" in
