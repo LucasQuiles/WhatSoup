@@ -29,8 +29,18 @@
   15 minutes on the monotonic clock. Failed or thrown emissions suppress retries
   for one minute, counted from the end of the failed attempt; a later
   observation can retry after that interval. There is no
-  background retry timer. Log attempts are separately limited to once per reason
-  every 15 minutes, while the observation counters continue to increment.
+  background retry timer. The recorder's own log lines are separately limited to
+  once per reason every 15 minutes, while the observation counters continue to
+  increment; the shared alert emitter still logs one warning for each failed
+  outbox write.
+- With the default dispatcher settings each source keeps one open warning card.
+  Later events of that source are absorbed into it until the next reminder
+  (6 hours, then doubling up to 24 hours). Neither source sends a clear; after a
+  quiet day the card is closed and reported in the consolidated age-out digest,
+  which does not prove that a message was recovered.
+- A stored message whose journal call threw is counted as
+  `ingest.stored_not_admitted`. The throw proves that dispatch did not go on, not
+  that the journal insert failed, so a journal row may still exist for recovery.
 - A persistence failure can occur after the message row was written. Its
   observation therefore leaves retention unknown and does not journal or
   replay the message. Recording does not change admission or recovery.
