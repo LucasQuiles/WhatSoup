@@ -10,14 +10,18 @@
 // runtime itself uses, so the evidence is the system's own path, not a proxy.
 //
 // Fail-closed on the question it asks ("can this entry serve a turn right
-// now?"): a non-zero exit, a timeout, or a spawn error is a FAILURE with
+// now?"): a non-zero exit, a timeout, a spawn error, output past the byte
+// limit, or anything but one complete tool-free "OK" turn is a FAILURE with
 // evidence. 'unknown' is reserved for entries the canary cannot probe (no CLI
 // binary transport) — never for a probe that ran and misbehaved.
 
 import { spawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { SIGNAL } from '../../../lib/signals.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { systemClock } from '../../../lib/clock.ts';
+import { killSessionTree } from '../process-tree.ts';
+import { createOpenCodeParser } from './opencode-parser.ts';
 
 const log = createChildLogger('chain-entry-canary');
 
@@ -66,6 +70,49 @@ function sanitizeEvidence(raw: string): string {
 }
 
 /**
+ * Captured stdout cap, in bytes as read from the pipe (not decoded string
+ * length). A canary reply is a few hundred bytes of JSON events; output past
+ * this bound fails the probe and stops the child.
+ */
+export const CANARY_OUTPUT_LIMIT_BYTES = 64 * 1024;
+/** Stderr is evidence only; keep its last bytes. */
+const CANARY_STDERR_TAIL_BYTES = 4 * 1024;
+/** SIGTERM grace before killSessionTree escalates the canary tree to SIGKILL. */
+const CANARY_TREE_TERM_GRACE_MS = 2_000;
+const CANARY_REPLY = /^ok[.!]?$/i;
+
+/**
+ * Judge `opencode run --format json` output: exactly one tool-free turn — a
+ * step_start, its assistant text, then one terminal step_finish "stop" with
+ * nothing meaningful after it — whose text is the requested OK. Blank lines are
+ * skipped. Anything else (a missing start, a second step or result, a tool
+ * call, an unparseable line, an unrecognized event) fails. Returns null when it
+ * passes, else a short content-free reason.
+ */
+function incompleteCompletionReason(stdout: string): string | null {
+  const parser = createOpenCodeParser();
+  let phase: 'awaiting_start' | 'in_turn' | 'finished' = 'awaiting_start';
+  let reply = '';
+  for (const line of stdout.split('\n')) {
+    const parsed = parser.parse(line);
+    if (parsed === null) continue;
+    if (phase === 'finished') return `${parsed.type} event after the terminal result`;
+    if (phase === 'awaiting_start') {
+      if (parsed.type !== 'init') return `${parsed.type} event before the turn started`;
+      phase = 'in_turn';
+    } else if (parsed.type === 'assistant_text') {
+      reply += parsed.text;
+    } else if (parsed.type === 'result') {
+      phase = 'finished';
+    } else {
+      return `unexpected ${parsed.type} event`;
+    }
+  }
+  if (phase !== 'finished') return 'no terminal result';
+  return CANARY_REPLY.test(reply.trim()) ? null : 'reply was not OK';
+}
+
+/**
  * Map a raw failure tail onto the bounded class. Signature-matched against
  * real provider output observed on the fleet; order matters — quota wording
  * frequently co-occurs with a 4xx that would otherwise read as auth.
@@ -100,9 +147,14 @@ export async function probeChainEntryCompletion(
   const startedAt = systemClock.now();
   return new Promise<ChainEntryCanaryResult>((resolve) => {
     let settled = false;
-    let stdoutBuffer = '';
-    let stderrBuffer = '';
+    const stdoutChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrTail = Buffer.alloc(0);
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let child: ReturnType<typeof spawnImpl> | undefined;
+    // Set once the probe decides to stop the child: its later close must not
+    // replace the timeout or overflow verdict.
+    let stopping = false;
 
     const settle = (result: Omit<ChainEntryCanaryResult, 'durationMs'>): void => {
       if (settled) return;
@@ -111,7 +163,40 @@ export async function probeChainEntryCompletion(
       resolve({ ...result, durationMs: systemClock.now() - startedAt });
     };
 
-    let child: ReturnType<typeof spawnImpl>;
+    // Stop a child that is still running, with its descendants, through the
+    // shared process-tree reaper. The result is settled only after the reap,
+    // and an unconfirmed reap is recorded in the (debug-only) evidence.
+    const stopThenSettle = (result: Omit<ChainEntryCanaryResult, 'durationMs'>): void => {
+      if (settled || stopping) return;
+      stopping = true;
+      clearTimeout(killTimer);
+      const target = child;
+      if (target?.pid === undefined || target.exitCode !== null || target.signalCode !== null) {
+        try { target?.kill(SIGNAL.KILL); } catch (killErr) { log.debug({ err: killErr }, 'canary kill — child already gone'); }
+        settle(result);
+        return;
+      }
+      let outcome: string | null = null;
+      void killSessionTree(target, SIGNAL.TERM, {
+        generationMarker: `chain-canary:${randomUUID()}`,
+        termGraceMs: CANARY_TREE_TERM_GRACE_MS,
+        onOutcome: (reaped) => { outcome = reaped.outcome; },
+      }).then(
+        () => {
+          if (outcome === 'unresolved_ambiguous') {
+            log.warn({ pid: target.pid }, 'chain canary process tree cleanup left ambiguous processes');
+            settle({ ...result, evidence: `${result.evidence ?? ''} [cleanup ambiguous]`.trim() });
+            return;
+          }
+          settle(result);
+        },
+        (err: unknown) => {
+          log.warn({ err, pid: target.pid }, 'chain canary process tree cleanup failed');
+          settle({ ...result, evidence: `${result.evidence ?? ''} [cleanup failed]`.trim() });
+        },
+      );
+    };
+
     try {
       child = spawnImpl(binary, args, {
         stdio: ['pipe', 'pipe', 'pipe'] as const,
@@ -122,31 +207,61 @@ export async function probeChainEntryCompletion(
       settle({ status: 'failed', evidence, failureClass: 'spawn' });
       return;
     }
+    const spawned = child;
 
     killTimer = setTimeout(() => {
-      try { child.kill(SIGNAL.KILL); } catch (killErr) { log.debug({ err: killErr }, 'canary kill after timeout — child already gone'); }
-      settle({ status: 'timeout', evidence: `no completion within ${timeoutMs}ms`, failureClass: 'timeout' });
+      stopThenSettle({ status: 'timeout', evidence: `no completion within ${timeoutMs}ms`, failureClass: 'timeout' });
     }, timeoutMs);
     killTimer.unref?.();
 
-    child.on('error', (err) => {
+    spawned.on('error', (err) => {
+      // The reaper's own kill can surface an error while the probe is stopping
+      // the child; the reap result settles with the original verdict.
+      if (stopping) {
+        log.debug({ err }, 'canary child error during cleanup');
+        return;
+      }
       const evidence = sanitizeEvidence(String(err));
       settle({ status: 'failed', evidence, failureClass: classifyCanaryFailure(evidence) });
     });
-    child.stdout?.on('data', (chunk: Buffer) => { stdoutBuffer += chunk.toString(); });
-    child.stderr?.on('data', (chunk: Buffer) => { stderrBuffer += chunk.toString(); });
-    child.on('close', (code, signal) => {
-      if (code === 0 && stdoutBuffer.trim() !== '') {
+    // A child that exits or closes stdin before reading the prompt makes the
+    // write fail with EPIPE; without a listener that error would be uncaught.
+    spawned.stdin?.on('error', (err) => {
+      log.debug({ err }, 'canary stdin write failed');
+    });
+    spawned.stdout?.on('data', (chunk: Buffer) => {
+      if (settled || stopping) return;
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > CANARY_OUTPUT_LIMIT_BYTES) {
+        stopThenSettle({
+          status: 'failed',
+          evidence: `output exceeded ${CANARY_OUTPUT_LIMIT_BYTES} bytes`,
+          failureClass: 'unknown',
+        });
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    spawned.stderr?.on('data', (chunk: Buffer) => {
+      const joined = Buffer.concat([stderrTail, chunk]);
+      stderrTail = joined.subarray(Math.max(0, joined.length - CANARY_STDERR_TAIL_BYTES));
+    });
+    spawned.on('close', (code, signal) => {
+      if (stopping) return;
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const incomplete = incompleteCompletionReason(stdout);
+      if (code === 0 && incomplete === null) {
         settle({ status: 'ok', evidence: null, failureClass: null });
         return;
       }
-      const detail = stderrBuffer.trim() || stdoutBuffer.trim() || '(no output)';
-      const evidence = sanitizeEvidence(`exit=${code ?? 'null'} signal=${signal ?? 'none'} ${detail}`);
+      const detail = stderrTail.toString('utf8').trim() || stdout.trim() || '(no output)';
+      const reason = code === 0 ? ` ${incomplete}:` : '';
+      const evidence = sanitizeEvidence(`exit=${code ?? 'null'} signal=${signal ?? 'none'}${reason} ${detail}`);
       settle({ status: 'failed', evidence, failureClass: classifyCanaryFailure(evidence) });
     });
 
     try {
-      child.stdin?.end(prompt);
+      spawned.stdin?.end(prompt);
     } catch (stdinErr) {
       // stdin already closed by a fast-failing child — close handler settles.
       log.debug({ err: stdinErr }, 'canary stdin write raced child exit');
