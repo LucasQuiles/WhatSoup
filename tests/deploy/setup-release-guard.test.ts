@@ -250,18 +250,20 @@ function runGuard(host: Host, repo: string, opts: RunOptions = {}): Run & { pass
   const start = setupSource.indexOf(GUARD_START);
   const end = setupSource.indexOf(GUARD_END, start);
   if (start === -1 || end === -1) throw new Error('release guard helper markers not found in deploy/setup.sh');
+  // The script text is constant plus setup.sh's own lines; every path reaches it as an argument.
   const harness = [
     'set -euo pipefail',
-    `BIN_DIR=${JSON.stringify(host.bin)}`,
-    `REPO_ROOT=${JSON.stringify(repo)}`,
-    `PLATFORM=${JSON.stringify(opts.platform ?? 'Linux')}`,
-    `switch_release_tree=${opts.switchTree ? 1 : 0}`,
+    'BIN_DIR="$1"',
+    'REPO_ROOT="$2"',
+    'PLATFORM="$3"',
+    'switch_release_tree="$4"',
     setupSource.slice(start, end),
     'refuse_release_bound_change "repoint the wrappers in $BIN_DIR"',
     'echo guard-passed',
     '',
   ].join('\n');
-  const result = spawnSync('bash', ['-c', harness], {
+  const args = [host.bin, repo, opts.platform ?? 'Linux', opts.switchTree ? '1' : '0'];
+  const result = spawnSync('bash', ['-c', harness, 'guard-harness', ...args], {
     cwd: host.base,
     env: { ...cleanGitEnv(), ...opts.env, HOME: host.home },
     encoding: 'utf8',
@@ -541,7 +543,10 @@ describe(`deploy/setup.sh release guard helpers with ${SWITCH_FLAG} (Linux)`, ()
     linkWrapper(host, wrapperOf(spaced));
     const run = runGuard(host, next, { switchTree: true });
     expect(run.passed, `${run.stdout}\n${run.stderr}`).toBe(true);
-    const quoted = path.join(spaced, 'deploy', 'setup.sh').replace(/ /g, '\\ ');
+    // The expectation comes from the same shell quoting setup.sh uses; the path is an argument, not script text.
+    const oldSetup = path.join(spaced, 'deploy', 'setup.sh');
+    const quoted = spawnSync('bash', ['-c', 'printf %q "$1"', 'quote', oldSetup], { encoding: 'utf8' }).stdout;
+    expect(quoted).not.toBe(oldSetup);
     expect(run.stdout).toContain(`      bash ${quoted} ${SWITCH_FLAG}\n`);
   });
 
@@ -792,18 +797,24 @@ function extractShellFunction(source: string, name: string): string {
   return source.slice(start + 1, end + 3);
 }
 
-/** Run setup.sh's own install_wrapper_link (extracted verbatim) with a chosen BIN_DIR; SHIMS go first on PATH. */
+/**
+ * Run setup.sh's own install_wrapper_link (extracted verbatim) with a chosen BIN_DIR; SHIMS go first on PATH.
+ * BIN_DIR reaches the constant script text through the environment, the call through the arguments.
+ */
 function runLinkHelper(bin: string, call: string[], shims?: string, extraEnv: NodeJS.ProcessEnv = {}) {
   const harness = [
     'set -euo pipefail',
-    `BIN_DIR=${JSON.stringify(bin)}`,
+    'BIN_DIR="$LINK_HELPER_BIN_DIR"',
     extractShellFunction(setupSource, 'install_wrapper_link'),
     '"$@"',
     'echo "helper-returned"',
     '',
   ].join('\n');
   const base = shims ? { ...process.env, PATH: `${shims}:${process.env.PATH ?? ''}` } : process.env;
-  return spawnSync('bash', ['-c', harness, 'harness', ...call], { encoding: 'utf8', env: { ...base, ...extraEnv } });
+  return spawnSync('bash', ['-c', harness, 'harness', ...call], {
+    encoding: 'utf8',
+    env: { ...base, ...extraEnv, LINK_HELPER_BIN_DIR: bin },
+  });
 }
 
 describe('deploy/setup.sh install_wrapper_link', () => {
@@ -1006,18 +1017,35 @@ describe('deploy/setup.sh from this repository on a Linux host whose bot runs a 
 });
 
 describe('release-deployment.md: the block that respells a relative wrapper', () => {
-  /** The pasteable block under "Helper links after a macOS activation", with NEW filled in. */
-  function respellBlock(newTarget: string): string {
+  /** The line where the operator pastes the path; the test feeds the same variable from the environment instead. */
+  const NEW_PLACEHOLDER = `NEW='<the path printed after "Bot wrapper: … ->">'`;
+
+  /**
+   * The pasteable block under "Helper links after a macOS activation", exactly as the runbook prints it except
+   * for its NEW line, which reads RESPELL_NEW. The path then reaches the constant block text only through the
+   * environment of the run (`runRespellBlock`), never as script text.
+   */
+  function respellBlock(): string {
     const runbook = fs.readFileSync(path.join(repoRoot, 'docs', 'runbooks', 'release-deployment.md'), 'utf8');
     const start = runbook.indexOf('   ```bash\n   (\n     fail()');
     const end = runbook.indexOf('\n   )\n   ```', start);
     if (start === -1 || end === -1) throw new Error('respelling block not found in release-deployment.md');
-    const body = runbook.slice(start + '   ```bash\n'.length, end + '\n   )'.length);
-    return body
+    const body = runbook
+      .slice(start + '   ```bash\n'.length, end + '\n   )'.length)
       .split('\n')
-      .map((line) => line.replace(/^ {3}/, ''))
-      .join('\n')
-      .replace(`NEW='<the path printed after "Bot wrapper: … ->">'`, `NEW=${JSON.stringify(newTarget)}`);
+      .map((line) => line.replace(/^ {3}/, ''));
+    // The runbook's own block assigns NEW on exactly one line, the one replaced here.
+    expect(body.filter((line) => line.trim() === NEW_PLACEHOLDER)).toHaveLength(1);
+    return body
+      .map((line) => (line.trim() === NEW_PLACEHOLDER ? line.replace(NEW_PLACEHOLDER, 'NEW="$RESPELL_NEW"') : line))
+      .join('\n');
+  }
+
+  function runRespellBlock(host: Host, newTarget: string) {
+    return spawnSync('bash', ['-c', respellBlock()], {
+      env: { ...cleanGitEnv(), HOME: host.home, RESPELL_NEW: newTarget },
+      encoding: 'utf8',
+    });
   }
 
   it('stops before any change when NEW is another tree whose wrapper is the same file (a hard link)', () => {
@@ -1029,10 +1057,7 @@ describe('release-deployment.md: the block that respells a relative wrapper', ()
     fs.symlinkSync(path.relative(host.bin, wrapperOf(r1)), path.join(host.bin, 'whatsoup'));
     const before = snapshot(host.base);
 
-    const result = spawnSync('bash', ['-c', respellBlock(wrapperOf(r2))], {
-      env: { ...cleanGitEnv(), HOME: host.home },
-      encoding: 'utf8',
-    });
+    const result = runRespellBlock(host, wrapperOf(r2));
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
     expect(result.stderr).toContain('stop: NEW is not the path the wrapper resolves to');
     expect(result.stdout).not.toContain('relinked');
@@ -1045,10 +1070,7 @@ describe('release-deployment.md: the block that respells a relative wrapper', ()
     const r1 = makeTree(path.join(host.base, 'releases', 'r1'), 'release');
     fs.symlinkSync(path.relative(host.bin, wrapperOf(r1)), path.join(host.bin, 'whatsoup'));
 
-    const result = spawnSync('bash', ['-c', respellBlock(wrapperOf(r1))], {
-      env: { ...cleanGitEnv(), HOME: host.home },
-      encoding: 'utf8',
-    });
+    const result = runRespellBlock(host, wrapperOf(r1));
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.stdout).toContain('relinked');
     expect(fs.readlinkSync(path.join(host.bin, 'whatsoup'))).toBe(wrapperOf(r1));
