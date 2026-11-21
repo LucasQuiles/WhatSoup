@@ -20,13 +20,21 @@ credentials — enter the fleet token on the lock screen to start a session:
   The lock screen serializes token unlock and retry handlers so an older unlock
   response cannot overtake a newer revocation request.
   A non-secret session-storage marker preserves an unfinished lock across reload
-  in the same tab. It is cleared by confirmed revocation or explicit token unlock.
+  in the same tab. It is cleared when the open page receives the confirmed
+  revocation, or by an explicit token unlock. If the page is reloaded or closed
+  before the revocation response arrives, the marker stays, even if the server
+  has already revoked the session: the console then starts locked with the
+  unconfirmed outcome, and **Retry lock** sends the revocation request again.
+  The server handles a repeated request like the first: it revokes the session
+  the request's cookie names, if any, clears the cookie and answers success.
   If storage cannot be read, the console stays closed. If it cannot save the marker,
   the screen explains, including while revocation is pending, that reload may
   reopen the session until revocation succeeds.
   If the marker cannot be cleared after a confirmed session change, local access
-  stays closed with **Retry browser storage**. Recovery clears the marker, then
-  checks the current server session without repeating the mutation.
+  stays closed with **Retry browser storage**. That button alone clears the marker
+  and then checks the current server session without repeating the mutation;
+  **Retry lock** repeats the revocation request instead. If the marker still
+  cannot be cleared, the console stays closed.
   This local marker does not revoke credentials or replace server authorization.
 - An unavailable session check stays closed with **Retry session check**; it is
   distinguished from the server confirming that the session is absent or expired.
