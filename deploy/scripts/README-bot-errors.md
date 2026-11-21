@@ -102,12 +102,25 @@ The Q loop asks the same authority before bootstrap, nudge, or checkpoint
 messages. Owner copies and credential re-pages pass through the shared sender
 in `lib/owner_route.py`, which checks the receipt in enforce mode. The
 repository security boundary guard rejects direct dispatcher, owner-route, or
-Q-loop transports. In the dispatcher this includes the raw JSON-RPC transport
-under `send_whatsapp`: a call outside `send_whatsapp`, an alias, a dynamic
-lookup, or a keyword hand-off outside the two owner-route callers
-(`drain_owner_route_queue`, `send_credential_pages`) is rejected. The mode
-decision lives inside those wrappers, so the guard's call-site counts hold in
-both modes; the guard does not check the mode.
+Q-loop transports. It reads one physical line at a time and tracks the
+enclosing function by the last column-zero `def`. In the dispatcher it rejects:
+
+- a call of `send_whatsapp`, `email_fallback` or the raw JSON-RPC transport
+  `json_rpc_call`, written on one line, inside a column-zero function other
+  than the one allowed to hold it (`send_authorized_whatsapp`,
+  `send_authorized_email` and `send_whatsapp`), including a call in a default
+  argument or a one-line body on a `def` line;
+- an alias of one of those names, and a `globals()`, `locals()` or `getattr`
+  lookup of one by name;
+- a keyword hand-off `json_rpc_call=json_rpc_call` outside the two owner-route
+  callers (`drain_owner_route_queue`, `send_credential_pages`).
+
+It does not see, and these are open follow-ups: a nested definition, which
+inherits its outer function's allowance; a statement after a function's body,
+which can inherit that function's allowance; a call split across lines between
+the name and the parenthesis; and a positional hand-off such as
+`f(json_rpc_call)`. The mode decision lives inside those wrappers, so the
+guard's call-site counts hold in both modes; the guard does not check the mode.
 The guard also pins the authority preflight ahead of credential observation,
 suppression, flap/storm mutation, and delivery, inventories the full `deploy/`
 tree, rejects test-only dry seams in service definitions, and verifies the two

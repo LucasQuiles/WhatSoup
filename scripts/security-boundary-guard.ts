@@ -174,15 +174,18 @@ function scanOperationalSecurityBoundaries(
       if (/BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE/.test(line)) {
         counts.dispatcherCredentialReads += 1;
       }
-      if (/\bsend_whatsapp\s*\(/.test(line) && !definition && currentFunction !== 'send_authorized_whatsapp') {
+      // A def line is exempt only from the match of its own name: a transport
+      // call in a default argument or a one-line body is still a call.
+      const callText = definition ? line.slice(definition[0].length) : line;
+      if (/\bsend_whatsapp\s*\(/.test(callText) && currentFunction !== 'send_authorized_whatsapp') {
         add('security.incident-authority.raw-dispatch-send', lineNumber,
           'dispatcher WhatsApp effects must pass through send_authorized_whatsapp');
       }
-      if (/\bemail_fallback\s*\(/.test(line) && !definition && currentFunction !== 'send_authorized_email') {
+      if (/\bemail_fallback\s*\(/.test(callText) && currentFunction !== 'send_authorized_email') {
         add('security.incident-authority.raw-dispatch-email', lineNumber,
           'dispatcher e-mail effects must pass through send_authorized_email');
       }
-      if (/\bjson_rpc_call\s*\(/.test(line) && !definition && currentFunction !== DISPATCHER_JSON_RPC_CALLER) {
+      if (/\bjson_rpc_call\s*\(/.test(callText) && currentFunction !== DISPATCHER_JSON_RPC_CALLER) {
         add('security.incident-authority.raw-dispatch-send', lineNumber,
           'dispatcher JSON-RPC effects must stay inside send_whatsapp');
       }

@@ -96,10 +96,21 @@ describe('security boundary guard — IncidentStore authority', () => {
     }));
   });
 
+  it.each([
+    ['a JSON-RPC call in a default argument', 'def alternate(socket, reply=json_rpc_call(SOCKET, "tools/call", {})):', 'security.incident-authority.raw-dispatch-send'],
+    ['a JSON-RPC call in a one-line body', 'def alternate(socket): json_rpc_call(socket, "tools/call", {})', 'security.incident-authority.raw-dispatch-send'],
+    ['a WhatsApp send in a default argument', 'def alternate(text, sent=send_whatsapp("text")):', 'security.incident-authority.raw-dispatch-send'],
+    ['an e-mail send in a one-line body', 'def alternate(text): email_fallback("subject", text)', 'security.incident-authority.raw-dispatch-email'],
+  ])('blocks %s on a dispatcher definition line', (_shape, line, code) => {
+    const findings = scanFileForSecurityBoundaryViolations('deploy/scripts/bot-errors-dispatcher.py', `${line}\n`);
+    expect(findings).toContainEqual(expect.objectContaining({ code, line: 1 }));
+  });
+
   it('admits the dispatcher JSON-RPC call and the owner-route hand-offs it holds today', () => {
     const findings = scanFileForSecurityBoundaryViolations(
       'deploy/scripts/bot-errors-dispatcher.py',
       [
+        'def json_rpc_call(socket_path, method, params):',
         'def send_whatsapp(text, socket_path):',
         '    result = json_rpc_call(',
         '        socket_path,',
