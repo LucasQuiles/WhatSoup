@@ -154,6 +154,11 @@ export interface RuntimeInlineToolsDeps {
   sandbox: boolean;
   /** Per-chat sandbox — repair target / non-restarter. */
   sandboxPerChat: boolean;
+  /**
+   * `sessionScope: 'per_chat'`. Its queues are keyed per chat, while restart_self
+   * flushes only the global turn's queue, so owed text would be lost on restart.
+   */
+  perChat: boolean;
   /** emit_heal_result deps; registered only when `controlPeers` is non-empty. */
   emitHealResult: EmitHealResultToolDeps;
   /** restart_self deps, or null when no fleet service restarter is wired. */
@@ -182,9 +187,10 @@ export function registerRuntimeInlineTools(registry: ToolRegistry, deps: Runtime
 
   // Register restart_self MCP tool (agent instance only — sandboxed instances
   // are repair targets, not self-restarters). Routes through the existing
-  // graceful shutdown via ServiceManager.restart; logic lives in self-restart.ts.
+  // graceful shutdown via ServiceManager.restartSelf; logic lives in self-restart.ts.
   // Requires the fleet-owned restarter injected from the composition root.
-  if (!deps.sandbox && !deps.sandboxPerChat && deps.restartSelf) {
+  // Per-chat runtimes are excluded: see RuntimeInlineToolsDeps.perChat.
+  if (!deps.sandbox && !deps.sandboxPerChat && !deps.perChat && deps.restartSelf) {
     registry.register(buildRestartSelfTool(deps.restartSelf));
   }
 }

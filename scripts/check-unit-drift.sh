@@ -13,10 +13,13 @@ UNITS=(
   "whatsoup-reply-guarantee.timer"
   "harness-maintenance.service"
   "harness-maintenance.timer"
+  "whatsoup-release-drift.service"
+  "whatsoup-release-drift.timer"
 )
 UNIT_SCOPE="default"
 MANAGED_WRAPPERS=(
   "whatsoup-ensure-node:deploy/scripts/ensure-node-installed.sh"
+  "whatsoup-release-drift-linux.sh:deploy/scripts/whatsoup-release-drift-linux.sh"
 )
 WRAPPERS=("${MANAGED_WRAPPERS[@]}")
 WRAPPER_SCOPE="default"

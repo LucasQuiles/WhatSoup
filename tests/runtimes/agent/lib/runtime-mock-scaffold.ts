@@ -298,6 +298,7 @@ export function makeQueueMock(targetChatJid: string): IOutboundQueue {
     targetChatJid,
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    getSendFailureCount: vi.fn(() => 0),
   };
 }
 
