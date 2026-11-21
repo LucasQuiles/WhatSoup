@@ -100,6 +100,23 @@ function permissionFaults(workflow: WorkflowPermissions): string[] {
   return faults;
 }
 
+type EvidenceStep = { name: string; id?: string; if?: string; uses?: string; with?: Record<string, unknown> };
+type EvidenceWorkflow = { jobs: { quality: { steps: EvidenceStep[] }; 'attest-container-build'?: { if?: string } } };
+
+// The archive contains src/, so it uploads only for the main push whose attestation job downloads it,
+// and only after the receipt verified it; a failed check must never publish an archive under github.sha.
+function evidenceUploadFaults(workflow: EvidenceWorkflow): string[] {
+  const steps = workflow.jobs.quality.steps;
+  const receipt = steps.findIndex((step) => step.name === 'Verify container build receipt');
+  const uploads = steps.flatMap((step, index) => (
+    step.uses?.startsWith('actions/upload-artifact@') && String(step.with?.path ?? '').includes('whatsoup-container') ? [index] : []
+  ));
+  if (uploads.length !== 1) return ['upload count'];
+  const expected = "${{ always() && steps.verify-container-receipt.outcome == 'success' && "
+    + `${workflow.jobs['attest-container-build']?.if} }}`;
+  return [...(uploads[0]! > receipt ? [] : ['order']), ...(steps[uploads[0]!]!.if === expected ? [] : ['condition'])];
+}
+
 function makeReceiptInput(options: {
   provenance?: unknown;
   builder?: string;
@@ -566,22 +583,25 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('id: build-container');
   });
 
-  it('uploads container evidence only after the receipt verified it for this commit', () => {
-    const workflow = parse(qualityWorkflow) as {
-      jobs: { quality: { steps: { name: string; id?: string; if?: string; uses?: string; with?: Record<string, unknown> }[] } };
-    };
-    const steps = workflow.jobs.quality.steps;
-    const receipt = steps.findIndex((step) => step.name === 'Verify container build receipt');
-    expect(steps[receipt]?.id).toBe('verify-container-receipt');
-    // A failed revision or receipt check must never publish an archive under this commit's name.
-    const uploads = steps.flatMap((step, index) => (
-      step.uses?.startsWith('actions/upload-artifact@') && String(step.with?.path ?? '').includes('whatsoup-container') ? [index] : []
-    ));
-    expect(uploads).toHaveLength(1);
-    for (const index of uploads) {
-      expect(index).toBeGreaterThan(receipt);
-      expect(steps[index]!.if).toBe("${{ always() && steps.verify-container-receipt.outcome == 'success' }}");
-    }
+  it('uploads container evidence only on main pushes after the receipt verified it for this commit', () => {
+    const workflow = parse(qualityWorkflow) as EvidenceWorkflow;
+    const receipt = workflow.jobs.quality.steps.find((step) => step.name === 'Verify container build receipt');
+    expect(receipt?.id).toBe('verify-container-receipt');
+    expect(evidenceUploadFaults(workflow)).toEqual([]);
+  });
+
+  it.each([
+    ['without an event guard', "${{ always() && steps.verify-container-receipt.outcome == 'success' }}"],
+    ['on every push, tags included', "${{ always() && steps.verify-container-receipt.outcome == 'success' && github.event_name == 'push' }}"],
+    ['on pull requests too', "${{ always() && steps.verify-container-receipt.outcome == 'success' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}"],
+    ['without the receipt check', "${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}"],
+    ['with no condition', undefined],
+  ])('rejects a container evidence upload %s', (_label, condition) => {
+    const workflow = parse(qualityWorkflow) as EvidenceWorkflow;
+    const upload = workflow.jobs.quality.steps.find((step) => step.name === 'Upload container build evidence')!;
+    if (condition === undefined) delete upload.if;
+    else upload.if = condition;
+    expect(evidenceUploadFaults(workflow)).toEqual(['condition']);
   });
 
   it('attests only the trusted main branch with a pinned action and isolated permissions', () => {
