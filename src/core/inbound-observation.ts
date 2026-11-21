@@ -114,8 +114,10 @@ function emitLocalLossAlert(instance: string, reason: AlertingReason): { emissio
     return { emissionAccepted, status: result.status };
   } finally {
     // Count both windows from the end of the attempt: a slow failed or thrown
-    // emission must not leave the next attempt free to start at once.
-    nextAlertAt.set(reason, performance.now() + (emissionAccepted ? INBOUND_OBSERVATION_ALERT_WINDOW_MS : FAILED_ALERT_RETRY_MS));
+    // emission must not leave the next attempt free to start at once. Keep the
+    // later deadline, so this never shortens one a nested emission already set.
+    const next = performance.now() + (emissionAccepted ? INBOUND_OBSERVATION_ALERT_WINDOW_MS : FAILED_ALERT_RETRY_MS);
+    nextAlertAt.set(reason, Math.max(nextAlertAt.get(reason) ?? next, next));
   }
 }
 

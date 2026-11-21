@@ -263,6 +263,25 @@ describe('accepted alert windows and bounded failed-delivery retries', () => {
     },
   );
 
+  it('never shortens a later window that a nested accepted emission set', () => {
+    // Guards the invariant only: the real emitter cannot re-enter observation.
+    // The outer attempt outlasts its reservation, a nested observation is then
+    // accepted (15 minutes), and the outer attempt fails afterwards.
+    doubles.emitAlert.mockImplementationOnce(() => {
+      vi.advanceTimersByTime(90_000);
+      observeInbound('WhatSoup', 'ingest.store_failed');
+      return { ok: false, channel: 'none', status: 'failed' };
+    });
+
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(61_000);
+    observeInbound('WhatSoup', 'ingest.store_failed');
+
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
+    expect(getInboundObservationHealth().alerts).toMatchObject({ failed: 1, durably_queued: 1, rate_limited: 1 });
+  });
+
   it.each(['durably_queued', 'captured', 'legacy_accepted_unconfirmed'] as const)(
     'an accepted %s emission is reported as itself and starts the window',
     (status) => {
