@@ -254,7 +254,8 @@ async function applyHoldingLock(host: ActivationHost, context: HostUnitApplyCont
       return fail(restored ? 'refused' : 'rollback-unverified', error);
     }
   }
-  // release:activate's rechecks before its switch, for every member. Only the watchdogs have changed so far.
+  // release:activate's fence and health-consumer rechecks before its switch, for every member. Its required-output
+  // recheck is not repeated here: planning refuses while an output is missing. Only the watchdogs have changed so far.
   let refusal: string | null = null;
   for (const member of context.members) {
     const fence = recheckCandidateRefreshRollbackFence(member);

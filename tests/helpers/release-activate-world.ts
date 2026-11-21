@@ -397,6 +397,8 @@ export interface WorldOptions {
   hangBounded?: (file: string, args: readonly string[]) => boolean;
   /** Runs at every bounded exec, before it answers (e.g. a migration that commits meanwhile). */
   onBoundedCall?: (file: string, args: readonly string[]) => void;
+  /** Runs at every exec, before it answers (e.g. a host writer acting between planning and the switch). */
+  onExec?: (file: string, args: readonly string[]) => void;
   /** How long a process has been up when it first answers (its start precedes the tool's clock by this). Default 2 s. */
   bootMs?: number;
   /** Take `now` from Date.now() and sleep on setTimeout, so fake timers drive the clock (runPumped). */
@@ -614,6 +616,7 @@ export class SimulatedLaunchd {
       toolCommit: async () => TOOL_COMMIT,
       exec: async (file, args, options) => {
         this.calls.push([file, ...args]);
+        this.options.onExec?.(file, args);
         const extra = options as { timeoutMs?: number; env?: unknown } | undefined;
         if (extra?.timeoutMs !== undefined) {
           this.boundedCalls.push([file, ...args]);

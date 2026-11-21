@@ -4,10 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   exportRelease,
+  run,
   type ReleaseExportReport,
 } from '../../scripts/release-export.ts';
 import {
@@ -186,6 +187,7 @@ describe('exportRelease', () => {
     const drift = createReleaseSnapshotDriftReport(report.releasePath);
     expect(drift.ok, JSON.stringify(drift.issues, null, 2)).toBe(true);
     expect(report.selfCheck.ok).toBe(true);
+    expect(report.pendingHostOutputs).toEqual([]);
     expect(report.fileCount).toBeGreaterThan(0);
     expect(report.treeSha256).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -329,7 +331,26 @@ describe('exportRelease', () => {
     ).toThrow(/full 40-hex/i);
   });
 
-  it('fails closed and leaves no release when a required output is missing', () => {
+  it('publishes a release whose required outputs are still to be built on the host, and lists them as pending', () => {
+    // Required outputs (the built console under dist/) are produced on the host
+    // AFTER export, so export can never see them. It publishes, reports them as
+    // pending, and the standard drift check keeps flagging them until they exist;
+    // release:activate refuses the release meanwhile.
+    const fixture = makeGitFixture();
+    const report = exportOk(fixture, { requiredOutputs: ['generated/output.txt'] });
+    expect(report.pendingHostOutputs).toEqual(['generated/output.txt']);
+    expect(createReleaseSnapshotDriftReport(report.releasePath).issues).toEqual([
+      expect.objectContaining({ kind: 'required-output-missing', path: 'generated/output.txt' }),
+    ]);
+
+    mkdirSync(path.join(report.releasePath, 'generated'), { recursive: true });
+    writeFileSync(path.join(report.releasePath, 'generated/output.txt'), 'built on the host\n', 'utf8');
+    expect(createReleaseSnapshotDriftReport(report.releasePath).ok).toBe(true);
+  });
+
+  it('still fails closed and leaves no release on any other drift beside a pending output', () => {
+    // Only required-output-missing is tolerated. With no mutable excludes the
+    // staged manifest file reads as an extra file, which must still refuse.
     const fixture = makeGitFixture();
     expect(() =>
       exportRelease({
@@ -337,11 +358,52 @@ describe('exportRelease', () => {
         commit: fixture.commit,
         releaseRoot: fixture.releaseRoot,
         buildTime: '2026-08-26T17:00:00.000Z',
-        requiredOutputs: ['console/dist/index.html'],
+        requiredOutputs: ['generated/output.txt'],
+        mutablePathExcludes: [],
       }),
-    ).toThrow(/required-output-missing|self-check/i);
-    // Fail-closed: the final release path must not exist after a failed export.
+    ).toThrow(/self-check failed \(extra-file\)/);
     expect(existsSync(path.join(fixture.releaseRoot, `WhatSoup-release-${fixture.commit.slice(0, 12)}`))).toBe(false);
+  });
+
+  it('requires the built console for a commit that ships the console package', () => {
+    const fixture = makeGitFixture();
+    mkdirSync(path.join(fixture.sourceRoot, 'console'), { recursive: true });
+    writeFileSync(path.join(fixture.sourceRoot, 'console/package.json'), '{"name":"console-fixture"}\n', 'utf8');
+    recommitFixture(fixture, 'console package');
+    const report = exportOk(fixture);
+    expect(report.pendingHostOutputs).toEqual(['dist/index.html']);
+    const manifest = parseReleaseSnapshotManifest(
+      JSON.parse(readFileSync(path.join(report.releasePath, RELEASE_MANIFEST_FILE), 'utf8')),
+    );
+    expect(manifest.requiredOutputs).toEqual(['dist/index.html']);
+  });
+
+  it('prints the pending host build in the summary instead of a self-check ok=<bool> line', () => {
+    const fixture = makeGitFixture();
+    const cli = (commit: string) => run([
+      '--commit', commit,
+      '--release-root', fixture.releaseRoot,
+      '--repo-root', fixture.sourceRoot,
+      '--build-time', '2026-08-26T17:00:00.000Z',
+    ]);
+    const printed: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((line?: unknown) => {
+      printed.push(String(line));
+    });
+    try {
+      cli(fixture.commit);
+      mkdirSync(path.join(fixture.sourceRoot, 'console'), { recursive: true });
+      writeFileSync(path.join(fixture.sourceRoot, 'console/package.json'), '{"name":"console-fixture"}\n', 'utf8');
+      recommitFixture(fixture, 'console package');
+      cli(fixture.commit);
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(printed.filter((line) => line.startsWith('self-check'))).toEqual([
+      'self-check ok',
+      'self-check ok except pending host build: dist/index.html (build them on the host: docs/runbooks/release-deployment.md)',
+    ]);
   });
 
   it('a post-export tamper is caught by the standard drift check', () => {

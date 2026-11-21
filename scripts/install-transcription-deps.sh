@@ -30,6 +30,8 @@ MODELS="$ROOT/models"
 FW_MODEL_DIR="$MODELS/faster-whisper"
 WCPP_MODEL_DIR="$MODELS/whisper.cpp"
 FW_VERSION="1.2.1"
+# PyAV 19 removed metadata_errors, which this faster-whisper release still passes.
+AV_VERSION="17.1.0"
 HF_VERSION="1.10.2"
 CTRANS_VERSION="4.7.1"
 EXPECTED_GGML_SMALL_SHA256="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
@@ -117,6 +119,7 @@ fi
 "$VENV/bin/python" -m pip install --upgrade pip
 "$VENV/bin/python" -m pip install \
   "faster-whisper==$FW_VERSION" \
+  "av==$AV_VERSION" \
   "huggingface-hub==$HF_VERSION" \
   "ctranslate2==$CTRANS_VERSION"
 

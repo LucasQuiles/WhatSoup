@@ -22,7 +22,7 @@ const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const setupSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
 
 // The full setup-managed expected set. MUST mirror `RECONCILE_SYSTEMD_EXPECTED`
-// in deploy/setup.sh (7 named cp targets + the 11-entry BOT_ERRORS_SYSTEMD_UNITS
+// in deploy/setup.sh (9 named cp targets + the 11-entry BOT_ERRORS_SYSTEMD_UNITS
 // array). The structural drift-guard test below asserts this stays in sync.
 const reconcileSystemdNamed = [
   'whatsoup@.service',
@@ -32,6 +32,8 @@ const reconcileSystemdNamed = [
   'whatsoup-reply-guarantee.timer',
   'harness-maintenance.service',
   'harness-maintenance.timer',
+  'whatsoup-release-drift.service',
+  'whatsoup-release-drift.timer',
 ];
 const botErrorsSystemdUnits = [
   'bot-errors-dispatcher.service',
@@ -129,13 +131,17 @@ describe('deploy/setup.sh --reconcile structure', () => {
   });
 
   it('the reconcile expected-set mirrors the step-4 install surface (drift guard)', () => {
-    // The named 7-unit array declaration must enumerate exactly the cp targets.
+    // The named unit array declaration must enumerate exactly the cp targets.
     const startMarker = 'RECONCILE_SYSTEMD_EXPECTED=(';
     const startIdx = setupSource.indexOf(startMarker);
     expect(startIdx, 'RECONCILE_SYSTEMD_EXPECTED array not found').toBeGreaterThan(-1);
     const namedBlock = setupSource.slice(startIdx, setupSource.indexOf(')', startIdx));
     for (const unit of reconcileSystemdNamed) {
       expect(namedBlock, `reconcile expected-set missing named unit ${unit}`).toContain(`"${unit}"`);
+      // Reconcile must never expect a unit that step 4 does not install.
+      expect(setupSource, `step 4 does not install ${unit}`).toContain(
+        `cp "$REPO_ROOT/deploy/${unit}" "$SYSTEMD_DIR/${unit}"`,
+      );
     }
     // The reconcile set must REUSE BOT_ERRORS_SYSTEMD_UNITS rather than
     // duplicate the 11 bot-errors units (single source of truth). The append

@@ -69,6 +69,8 @@ export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
 export const SUPPRESSED_RUNTIME_PATHS: ReadonlySet<string> = new Set([
   'deploy/scripts/bot-errors-maintenance.py', // operator CLI: declare planned maintenance windows
   'deploy/scripts/retire-outbound-quarantine.py', // operator CLI: retire a known unsafe quarantine
+  // operator CLI: install-bot-errors-health-launchd.sh --repin-existing runs it by hand; the deployer does not ship it
+  'deploy/scripts/lib/health_launchd_install.py',
 ]);
 
 // Runtime files that must be pinned but are not covered by the deploy/scripts python glob.
