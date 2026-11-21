@@ -1359,7 +1359,7 @@ describe('safeguard diagnostics', () => {
 
   it.each([
     ['depends on a skippable job', 'jobs:\n  quality:', "jobs:\n  suppress-quality:\n    runs-on: ubuntu-latest\n    if: false\n    steps:\n      - run: 'true'\n  quality:\n    needs: suppress-quality", 'quality job must not declare needs'],
-    ['becomes conditional', '    timeout-minutes: 60\n    steps:', "    timeout-minutes: 60\n    if: github.ref == 'refs/heads/main'\n    steps:", 'quality job must not declare if'],
+    ['becomes conditional', '    timeout-minutes: 100\n    steps:', "    timeout-minutes: 100\n    if: github.ref == 'refs/heads/main'\n    steps:", 'quality job must not declare if'],
   ])('fails when the quality job %s', (_name, anchor, replacement, evidence) => {
     const workflow = requiredFiles['.github/workflows/quality.yml'];
     const mutated = workflow.replace(anchor, replacement);
